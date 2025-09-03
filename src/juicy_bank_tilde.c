@@ -79,7 +79,8 @@ static void bank_recalc_body(t_juicy_bank_tilde *x){
     x->anisotropy = clampf(x->anisotropy, -1.f, 1.f);
     x->contact    = clampf(x->contact,    0.f, 1.f);
     if (x->base_hz <= 0) x->base_hz = 440.f;
-    if (x->N < 1) x->N = 1; if (x->N > MAXN) x->N = MAXN;
+    if (x->N < 1) x->N = 1;
+    if (x->N > MAXN) x->N = MAXN;
     if (x->aniso_P < 1) x->aniso_P = 2;
     if (x->contact_soft < 0.5f) x->contact_soft = 2.f;
     if (x->couple_df <= 0) x->couple_df = 200.f;
@@ -256,7 +257,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     for (int k=1; k<=N; ++k){
         t_mode *m = &x->m[k-1];
         double ampw = (double)m->pos_w * (double)m->aniso_w * ((double)m->bright_w / bright_norm);
-        if (ampw < 0.0) ampw = 0.0; if (ampw > 32.0) ampw = 32.0;
+        if (ampw < 0.0) ampw = 0.0;
+        if (ampw > 32.0) ampw = 32.0;
         m->amp_w = (float)ampw;
         if (m->active) ampW_sum += ampw;
     }
@@ -490,7 +492,7 @@ void juicy_bank_tilde_setup(void){
 
     class_addmethod(juicy_bank_tilde_class, (t_method)set_idx,    gensym("idx"),    A_FLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)set_ratio,  gensym("ratio"),  A_FLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)set_gain),   gensym("gain"),   A_FLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)set_gain,   gensym("gain"),   A_FLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)set_attack, gensym("attack"), A_FLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)set_decay,  gensym("decay"),  A_FLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)set_pan,    gensym("pan"),    A_FLOAT, 0);
