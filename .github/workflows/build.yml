@@ -1,4 +1,4 @@
-name: build-juicy-bank
+name: build-juicy-bank-universal
 
 on:
   push:
@@ -34,6 +34,11 @@ jobs:
 
       - name: Show PDINC/Help
         run: make help || true
+
+      - name: Print binary type (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          make fatcheck || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
