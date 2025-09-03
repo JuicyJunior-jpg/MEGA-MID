@@ -1,0 +1,42 @@
+name: build-juicy-bank
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install deps (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential puredata-dev
+
+      - name: Install Pd (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install --cask pd
+
+      - name: Build
+        run: make all
+
+      - name: Show PDINC/Help
+        run: make help || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: juicy_bank-${{ matrix.os }}
+          path: build/**/juicy_bank~.pd_*
