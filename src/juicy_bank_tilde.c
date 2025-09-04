@@ -1,13 +1,13 @@
-// juicy_bank_tilde.c — Juicy's modal **bank** (N resonators in one object)
-// PATCH: 2025-09-03 (pass 6)
-//  • FIX: Coupling safety — energy‑preserving velocity rotation with small angle, Q‑aware scaling, and ramping.
-//  • FIX: Global bus limiter to prevent headphone blasts (fast attack / slow release).
-//  • CHANGE: Contact back to linear crossfade saturator (original behavior).
-//  • TWEAK: Position floor & compensation so non-prime indices aren't way quieter.
+// juicy_bank_tilde.c — Juicy's modal bank (single object hosting N resonators)
+// Patch: 2025-09-03 (stability pass)
+//   • FIX gain: "gain" is now a clean 0..1 scalar per mode (independent of body weights).
+//     Body weights (position/anisotropy/brightness) are applied on the *input* only, normalized per block.
+//   • FIX coupling: smaller, freq‑aware velocity rotation (energy‑preserving), no limiter "drive".
+//     Added only a last‑resort scaler if absolute peak > 1.2 to prevent blasts (inaudible when not needed).
+//   • Contact: back to original "body" style — soft clip applied to the *exciter* (input), not the resonator state.
+//   • Index loudness: kept position floor & gentle compensation so even/odd don’t vanish at p=0.5.
 //
-// Expected knob ranges (clamped here):
-// damping [0..1], brightness [-1..+1], position [0..1], dispersion [-1..+1], coupling [0..1], density [-1..+1], anisotropy [-1..+1], contact [0..1].
-// Indices are 1-based externally.
+// Build: standard Pd external, class name: juicy_bank~
 
 #include "m_pd.h"
 #include <math.h>
@@ -18,26 +18,28 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-#ifndef JUICY_HD
-#define JUICY_HD 0
-#endif
-
 #define MAXN 128
 
 static t_class *juicy_bank_tilde_class;
 
-static inline float clampf(float x, float lo, float hi){ return (x<lo)?lo:((x>hi)?hi:x); }
+static inline float  clampf(float x, float lo, float hi){ return (x<lo)?lo:((x>hi)?hi:x); }
 static inline double denorm_fix(double v){ return (v<1e-30 && v>-1e-30)?0.0:v; }
 
 typedef struct {
+    // user params
     float ratio, gain, attack_ms, decay_ms, pan, keytrack;
-    float disp_rand;
+    float disp_rand; // per-mode random for dispersion
 
+    // biquad state
     double a1, a2, y1, y2, env, freq_hz, rcur;
+
+    // pan gains
     double gl, gr;
 
-    float amp_w, r_w, pos_w, aniso_w, bright_w;
+    // per-block weights (we reuse amp_w as normalized input weight)
+    float  amp_w, r_w, pos_w, aniso_w, bright_w;
 
+    // misc
     double cstate;
 
     unsigned char active, dirty_coeffs;
@@ -47,24 +49,30 @@ typedef struct _juicy_bank_tilde {
     t_object  x_obj;
     t_float   f_dummy;
 
+    // global/body
     int     N;
     float   base_hz;
     float   damping, brightness, position, dispersion, coupling, density, anisotropy, contact;
     int     aniso_P;
     float   contact_soft, couple_df;
 
+    // derived
     float   r_mul_base, bright_slope, aniso_gamma;
     float   mix_scale;
     int     n_active;
 
+    // edit cursor
     int     edit_idx;
+
+    // modes
     t_mode  m[MAXN];
 
+    // dsp
     float   sr;
     int     debug;
 
+    // outlets
     t_outlet *outL, *outR, *outBody, *outRes;
-    double limit_envL, limit_envR;
 } t_juicy_bank_tilde;
 
 // RNG helpers
@@ -94,9 +102,9 @@ static void bank_recalc_body(t_juicy_bank_tilde *x){
     if (x->contact_soft < 0.5f) x->contact_soft = 2.f;
     if (x->couple_df <= 0) x->couple_df = 200.f;
 
-    // Damping map 0..1 -> pole base multiplier
+    // Damping map: 0..1 -> base pole multiplier (global tilt)
     float d_s = x->damping * x->damping;
-    x->r_mul_base = 1.f - 0.20f * d_s;     // 1 → 0.8 at full damping (global)
+    x->r_mul_base = 1.f - 0.20f * d_s; // 1 → 0.8 at full damping
     x->aniso_gamma  = x->anisotropy;
     x->bright_slope = 0.6f * x->brightness;
 }
@@ -133,8 +141,6 @@ static void bank_emit_res_selected(t_juicy_bank_tilde *x){
     SETSYMBOL(av+i, gensym("attack_ms")); i++; SETFLOAT(av+i, (t_float)m->attack_ms); i++;
     SETSYMBOL(av+i, gensym("decay_ms")); i++; SETFLOAT(av+i, (t_float)m->decay_ms); i++;
     SETSYMBOL(av+i, gensym("pan")); i++; SETFLOAT(av+i, (t_float)m->pan); i++;
-    SETSYMBOL(av+i, gensym("amp_w")); i++; SETFLOAT(av+i, m->amp_w); i++;
-    SETSYMBOL(av+i, gensym("r_w")); i++; SETFLOAT(av+i, m->r_w); i++;
     SETSYMBOL(av+i, gensym("pos_w")); i++; SETFLOAT(av+i, m->pos_w); i++;
     SETSYMBOL(av+i, gensym("aniso_w")); i++; SETFLOAT(av+i, m->aniso_w); i++;
     SETSYMBOL(av+i, gensym("bright_w")); i++; SETFLOAT(av+i, m->bright_w); i++;
@@ -146,6 +152,7 @@ static void bank_update_coeffs_one(t_juicy_bank_tilde *x, int k){
     t_mode *m = &x->m[k-1];
 
     double base = (x->base_hz>0?x->base_hz:1.0);
+
     // Dispersion: unique per mode via disp_rand, knob sets *max spread* (±0.9*|knob|); skip fundamental
     float disp_amt = 0.9f * fabsf(x->dispersion);
     double ratio_eff = (double)m->ratio;
@@ -197,12 +204,12 @@ static void bank_update_coeffs_one(t_juicy_bank_tilde *x, int k){
     m->a1 = 2.0 * r * cos(w);
     m->a2 = - (r * r);
 
-    // Position: true node behavior, add floor (0.20) so even/odd don’t vanish
+    // Position weight (with a floor so even/odd don’t vanish at middle)
     int    idx1 = k;
     double posw = fabs(sin(M_PI * (double)idx1 * (double)clampf(x->position,0.f,1.f)));
     if (posw < 0.20) posw = 0.20;
 
-    // Anisotropy: attenuation-only for opposite group (period P)
+    // Anisotropy: attenuation-only (period P)
     int P = (x->aniso_P<1?1:x->aniso_P);
     double cyc = cos(2.0*M_PI * (double)(idx1-1) / (double)P);
     double a = x->aniso_gamma;
@@ -227,8 +234,7 @@ static void bank_update_coeffs_one(t_juicy_bank_tilde *x, int k){
 }
 
 // === DSP ===
-static inline double fast_lerp(double a, double b, double t){ return a + (b-a)*t; }
-static inline double safe_sat(double x, double soft){ if (soft<=1e-9) soft=1e-9; return soft * tanh(x/soft); }
+static inline double softsat(double x, double soft){ if (soft<=1e-9) soft=1e-9; return tanh(x/soft)*soft; }
 
 static t_int *juicy_bank_tilde_perform(t_int *w){
     t_juicy_bank_tilde *x = (t_juicy_bank_tilde *)(w[1]);
@@ -242,45 +248,46 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
     int N = x->N;
     int nact = 0;
-    double bright_sum = 0.0;
+
+    // --- compute input-shaping weight, normalized across active modes ---
+    double wsum = 0.0;
     for (int k=1; k<=N; ++k){
         t_mode *m = &x->m[k-1];
         m->active = (m->gain > 0.0005f) || (fabs(m->env) > 1e-6);
         bank_update_coeffs_one(x, k);
-        if (m->active){ nact++; bright_sum += (double)m->bright_w; }
+        if (m->active) {
+            nact++;
+            double w_in = (double)m->pos_w * (double)m->aniso_w * (double)m->bright_w;
+            if (w_in < 0.0) w_in = 0.0;
+            if (w_in > 64.0) w_in = 64.0;
+            m->amp_w = (float)w_in;  // reuse field to store normalized input weight later
+            wsum += w_in;
+        } else {
+            m->amp_w = 0.f;
+        }
     }
     x->n_active = nact;
     x->mix_scale = (nact>0)? (1.0f / sqrtf((float)nact)) : 1.0f;
-
-    // Brightness normalization + fair gain + position compensation
-    double bright_norm = (bright_sum>0.0)? (bright_sum / (double)(nact>0?nact:1)) : 1.0;
-    if (bright_norm <= 0.0) bright_norm = 1.0;
-    double ampW_sum = 0.0;
-    for (int k=1; k<=N; ++k){
-        t_mode *m = &x->m[k-1];
-        double p = (double)m->pos_w;
-        double pos_comp = pow((p<1e-6?1e-6:p)/0.5, -0.7);
-        if (pos_comp > 3.5) pos_comp = 3.5;
-
-        double ampw = (double)m->pos_w * (double)m->aniso_w * ((double)m->bright_w / bright_norm) * pos_comp;
-        if (ampw < 0.0) ampw = 0.0;
-        if (ampw > 32.0) ampw = 32.0;
-        m->amp_w = (float)ampw;
-        if (m->active) ampW_sum += ampw;
-    }
-    double amp_norm = (nact>0)? ((double)nact / (ampW_sum + 1e-12)) : 1.0;
+    double wnorm = (wsum>0.0)? (wsum / (double)(nact>0?nact:1)) : 1.0;
+    if (wnorm <= 0.0) wnorm = 1.0;
 
     for (int i=0;i<n;++i){ outL[i]=0; outR[i]=0; }
 
-    const double contact_amt  = x->contact;
-    const double contact_soft = x->contact_soft;
-    double coup_target = clampf(x->coupling, 0.f, 1.f);
+    const double c_amt  = clampf(x->contact, 0.f, 1.f);
+    const double c_soft = x->contact_soft;
+    double coup = clampf(x->coupling, 0.f, 1.f);
 
-    double coup_sm = 0.0;                // per-block local smoother
-    static const double coup_alpha = 0.05; // smooth coupling to avoid pops
+    // coupling angle (very conservative) with easing
+    const double theta_max = 0.03; // ~1.7 degrees at full
+    const double theta_eased = theta_max * (0.5 - 0.5*cos(M_PI*coup));
 
     for (int i=0;i<n;++i){
-        coup_sm = fast_lerp(coup_sm, coup_target, coup_alpha);
+        double xin_mono = 0.5*((double)inL[i] + (double)inR[i]);
+
+        // Contact on EXCITER (original flavor)
+        double xin_contact = (c_amt>1e-6)
+            ? ((1.0 - c_amt) * xin_mono + c_amt * softsat(xin_mono, c_soft))
+            : xin_mono;
 
         double y1_prev[MAXN];
         double y2_prev[MAXN];
@@ -295,51 +302,40 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             active_mask[k-1]=m->active;
         }
 
-        double xin_mono = 0.5*((double)inL[i] + (double)inR[i]);
-
-        // ---- pass 1: compute y0 (resonator core), env update, and contact **crossfade** (original behavior)
+        // ---- pass 1: compute raw y0 (resonator core), env update
         for (int k=1; k<=N; ++k){
             t_mode *m = &x->m[k-1];
             double y1=y1_prev[k-1], y2=y2_prev[k-1];
-
             if (!active_mask[k-1]){ y0_buf[k-1]=y1; continue; }
 
             double fs = (double)x->sr;
             double att = (m->attack_ms<=0? 0.0 : exp(-1.0/( (double)m->attack_ms*0.001 * fs )));
             double dec = (m->decay_ms <=0? 0.0 : exp(-1.0/( (double)m->decay_ms *0.001 * fs )));
-            double xin = xin_mono * (double)m->pos_w;
+            double w_in_norm = (double)m->amp_w / wnorm; // avg=1 over actives
+            double xin = xin_contact * w_in_norm;
             double tgt = (fabs(xin) > 1e-9) ? 1.0 : 0.0;
             double env = m->env;
             if (tgt > env) env = tgt + (env - tgt) * att; else env = tgt + (env - tgt) * dec;
             m->env = env;
 
             double y0 = m->a1*y1 + m->a2*y2 + xin;
-
-            if (contact_amt>1e-6){
-                double sat = safe_sat(y0, contact_soft);
-                y0 = (1.0 - contact_amt) * y0 + contact_amt * sat; // linear crossfade
-            }
-
             y0_buf[k-1] = y0;
         }
 
-        // ---- pass 2: velocity rotation coupling (energy-preserving), only among ACTIVE neighbors
-        double theta_max = 0.06; // ~3.4 degrees max
-        double theta = theta_max * (0.5 - 0.5*cos(M_PI*coup_sm)); // eased 0..theta_max
-        int start = (i & 1)? 2 : 1; // alternate pairing each sample
+        // ---- pass 2: velocity rotation coupling (energy-preserving), freq-aware to avoid LF blowups
         for (int k=1; k<=N; ++k) v_buf[k-1] = y0_buf[k-1] - y1_prev[k-1];
 
-        if (theta > 1e-9 && N>1){
-            for (int pair= start; pair < N; pair += 2){
-                int k1 = pair;
-                int k2 = pair+1;
+        if (theta_eased > 1e-9 && N>1){
+            int start = (i & 1)? 2 : 1; // alternate pairing each sample
+            for (int pair=start; pair < N; pair += 2){
+                int k1 = pair, k2 = pair+1;
                 if (!active_mask[k1-1] && !active_mask[k2-1]) continue;
 
-                // Q-aware safety: reduce angle when both modes are very underdamped
-                double r1 = x->m[k1-1].rcur, r2 = x->m[k2-1].rcur;
-                double q_safety = 1.0 - 0.6 * ((r1 + r2) * 0.5);
-                if (q_safety < 0.1) q_safety = 0.1;
-                double th = theta * q_safety;
+                double frel1 = x->m[k1-1].freq_hz / (x->base_hz>0?x->base_hz:1.0);
+                double frel2 = x->m[k2-1].freq_hz / (x->base_hz>0?x->base_hz:1.0);
+                if (frel1 < 0.1) frel1 = 0.1; if (frel2 < 0.1) frel2 = 0.1;
+                double fweight = pow(fmin(frel1, frel2), 0.35); // low freqs -> smaller angle
+                double th = theta_eased * fweight;
 
                 double c = cos(th), s = sin(th);
                 double a = v_buf[k1-1];
@@ -352,17 +348,15 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             for (int k=1; k<=N; ++k){ y0_buf[k-1] = y1_prev[k-1] + v_buf[k-1]; }
         }
 
-        // ---- pass 3: state update and **bus limiter**
+        // ---- pass 3: state update and output mix (gain is stable 0..1)
         double accL = 0.0, accR = 0.0;
         for (int k=1; k<=N; ++k){
             t_mode *m = &x->m[k-1];
             if (!active_mask[k-1]) continue;
-
             double y1 = y0_buf[k-1];
             double y2 = y1_prev[k-1];
 
-            double amp = (double)m->gain * (double)x->mix_scale * (double)amp_norm * (double)m->amp_w;
-            double yamp= amp * m->env * y1;
+            double yamp = (double)m->gain * (double)x->mix_scale * m->env * y1;
 
             accL += yamp * m->gl;
             accR += yamp * m->gr;
@@ -371,16 +365,12 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             m->y1 = y1;
         }
 
-        // transparent limiter (per channel). Threshold ~0.9, fast attack, slow release
-        const double thr = 0.9;
+        // only apply **safety** scaling if we truly exceed a hot peak
         double peak = fmax(fabs(accL), fabs(accR));
-        double target = (peak > thr)? (thr / (peak + 1e-12)) : 1.0;
-        double atk = (target < x->limit_envL || target < x->limit_envR) ? 0.3 : 0.005;
-        x->limit_envL = fast_lerp(x->limit_envL, target, atk);
-        x->limit_envR = fast_lerp(x->limit_envR, target, atk);
+        double scl = (peak > 1.2) ? (0.95 / peak) : 1.0;
 
-        outL[i] = (t_sample)(accL * x->limit_envL);
-        outR[i] = (t_sample)(accR * x->limit_envR);
+        outL[i] = (t_sample)(accL * scl);
+        outR[i] = (t_sample)(accR * scl);
     }
 
     return (t_int *)(w+7);
@@ -440,9 +430,9 @@ static void msg_debug(t_juicy_bank_tilde *x, t_floatarg f){
          x->base_hz, x->N, x->damping, x->brightness, x->position, x->dispersion, x->density, x->anisotropy, x->aniso_P, x->contact, x->contact_soft);
     for(int k=1;k<=x->N;++k){
         t_mode *m=&x->m[k-1];
-        post("  id=%d act=%d f=%.2fHz r=%.6f ratio=%.3f key=%d gain=%.3f att=%.1fms dec=%.1fms pan=%.2f posW=%.3f aniso=%.3f bright=%.3f ampW=%.3f dispRand=%.3f",
+        post("  id=%d act=%d f=%.2fHz r=%.6f ratio=%.3f key=%d gain=%.3f att=%.1fms dec=%.1fms pan=%.2f posW=%.3f aniso=%.3f bright=%.3f",
              k, m->active, m->freq_hz, m->rcur, m->ratio, (int)(m->keytrack!=0), m->gain, m->attack_ms, m->decay_ms, m->pan,
-             m->pos_w, m->aniso_w, m->bright_w, m->amp_w, m->disp_rand);
+             m->pos_w, m->aniso_w, m->bright_w);
     }
 }
 static void msg_bug_catch(t_juicy_bank_tilde *x){
@@ -451,14 +441,14 @@ static void msg_bug_catch(t_juicy_bank_tilde *x){
     post("n_active=%d mix_scale=%.3f edit_idx=%d", x->n_active, x->mix_scale, x->edit_idx);
     for(int k=1;k<=x->N;++k){
         t_mode *m=&x->m[k-1];
-        post("id=%d act=%d f=%.2fHz r=%.6f ratio=%.3f key=%d gain=%.3f att=%.1fms dec=%.1fms pan=%.2f posW=%.3f aniso=%.3f bright=%.3f ampW=%.3f dispRand=%.3f",
+        post("id=%d act=%d f=%.2fHz r=%.6f ratio=%.3f key=%d gain=%.3f att=%.1fms dec=%.1fms pan=%.2f posW=%.3f aniso=%.3f bright=%.3f",
              k, m->active, m->freq_hz, m->rcur, m->ratio, (int)(m->keytrack!=0), m->gain, m->attack_ms, m->decay_ms, m->pan,
-             m->pos_w, m->aniso_w, m->bright_w, m->amp_w, m->disp_rand);
+             m->pos_w, m->aniso_w, m->bright_w);
     }
     bank_emit_all(x);
 }
 
-// ---- Presets ----
+// ---- Presets (for quick testing) ----
 static void preset_apply(t_juicy_bank_tilde *x, t_symbol *name){
     const char *n = name? name->s_name : "init";
     // defaults
@@ -526,7 +516,6 @@ static void *juicy_bank_tilde_new(t_symbol *s, int argc, t_atom *argv){
     x->coupling=0; x->density=0; x->anisotropy=0; x->contact=0;
     x->aniso_P=2; x->contact_soft=2; x->couple_df=200;
     x->edit_idx=1; x->sr=44100; x->debug=0; x->n_active=0; x->mix_scale=1.f;
-    x->limit_envL=1.0; x->limit_envR=1.0;
 
     for (int i=0;i<argc;i++){
         if (argv[i].a_type==A_SYMBOL){
