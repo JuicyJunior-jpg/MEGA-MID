@@ -243,6 +243,7 @@ static inline double contact_residual(double x, double amt, double soft){
     return comp * resid;
 }
 
+
 static t_int *juicy_bank_tilde_perform(t_int *w){
     t_juicy_bank_tilde *x = (t_juicy_bank_tilde *)(w[1]);
     t_sample *inL = (t_sample *)(w[2]);
@@ -288,72 +289,43 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
     const double c_amt  = x->contact;
     const double c_soft = x->contact_soft;
+    const double coup   = clampf(x->coupling, 0.f, 1.f);
 
     for (int i=0;i<n;++i){
-        double y1_old[MAXN];
-        for (int k=1; k<=N; ++k){ y1_old[k-1]=x->m[k-1].y1; }
+        double y1_prev[MAXN];
+        double y2_prev[MAXN];
+        double y0_buf[MAXN];
+        double v_buf[MAXN];
+
+        for (int k=1; k<=N; ++k){ 
+            y1_prev[k-1]=x->m[k-1].y1; 
+            y2_prev[k-1]=x->m[k-1].y2;
+        }
 
         double xin_mono = 0.5*((double)inL[i] + (double)inR[i]);
 
+        // ---- pass 1: compute raw y0 (resonator + contact), update env now ----
         for (int k=1; k<=N; ++k){
             t_mode *m = &x->m[k-1];
-            if (!m->active) continue;
+            if (!m->active){ y0_buf[k-1]=y1_prev[k-1]; continue; }
 
-            double a1=m->a1, a2=m->a2, y1=m->y1, y2=m->y2;
-            double env=m->env;
+            double a1=m->a1, a2=m->a2, y1=y1_prev[k-1], y2=y2_prev[k-1];
             double fs = (double)x->sr;
-            // AR env
-#if JUICY_HD
-            double att = (m->attack_ms<=0? 0.0 : exp(-1.0/( (double)m->attack_ms*0.001 * fs )));
-            double dec = (m->decay_ms <=0? 0.0 : exp(-1.0/( (double)m->decay_ms *0.001 * fs )));
-#else
-            double att = (m->attack_ms<=0? 0.0 : exp(-1.0/( (double)m->attack_ms*0.001 * fs )));
-            double dec = (m->decay_ms <=0? 0.0 : exp(-1.0/( (double)m->decay_ms *0.001 * fs )));
-#endif
-            double gl=m->gl, gr=m->gr;
 
+            // AR env (update immediate)
+            double att = (m->attack_ms<=0? 0.0 : exp(-1.0/( (double)m->attack_ms*0.001 * fs )));
+            double dec = (m->decay_ms <=0? 0.0 : exp(-1.0/( (double)m->decay_ms *0.001 * fs )));
             double xin = xin_mono * (double)m->pos_w;
             double tgt = (fabs(xin) > 1e-9) ? 1.0 : 0.0;
+            double env = m->env;
             if (tgt > env) env = tgt + (env - tgt) * att; else env = tgt + (env - tgt) * dec;
+            m->env = env;
 
-            // core resonator
             double y0 = a1*y1 + a2*y2 + xin;
 
-            // ===== Velocity coupling (neighbors) =====
-            double coup = (double)x->coupling;
-            if (coup>1e-6 && N>1){
-                // self velocity
-                double v  = y1 - y2;
-                double vinj = 0.0;
-                if (k>1){
-                    t_mode *ml = &x->m[k-2];
-                    double vL = y1_old[k-2] - ml->y2;
-                    vinj += (vL - v);
-                }
-                if (k<N){
-                    t_mode *mr = &x->m[k];
-                    double vR = y1_old[k] - mr->y2;
-                    vinj += (vR - v);
-                }
-                // frequency-aware falloff (friendly at HF), scaled by damping
-                double damp_scale = 0.3 + 0.7 * (1.0 - m->rcur);
-                double gbase = 0.10 * (0.5 - 0.5*cos(M_PI*coup)); // eased 0..~0.10
-                double g = gbase * damp_scale;
-                // light LP on injection per-mode
-#if JUICY_HD
-                m->cstate = 0.25*vinj + 0.75*m->cstate;
-#else
-                m->cstate = 0.35*vinj + 0.65*m->cstate;
-#endif
-                double inj = g * m->cstate;
-                if (inj > 0.2) inj = 0.2; else if (inj < -0.2) inj = -0.2;
-                y0 += inj;
-            }
-
-            // ===== Contact: additive injection of nonlinear residue =====
+            // contact (additive residual)
             if (c_amt>1e-6){
                 double resid = contact_residual(y0, c_amt, c_soft);
-                // gentle LF compensation so lows don't vanish under contact
                 double ratio_f = (m->freq_hz<=0?1.0:(m->freq_hz / (x->base_hz>0?x->base_hz:1.0)));
                 if (ratio_f < 1e-6) ratio_f = 1e-6;
                 double eq = pow(ratio_f, -0.25 * c_amt);
@@ -361,17 +333,50 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 y0 += eq * resid;
             }
 
-            // state update
-            y2 = y1; y1 = y0;
+            y0_buf[k-1] = y0;
+        }
+
+        // ---- pass 2: velocity coupling as energy-preserving rotation on v = y0 - y1_prev
+        for (int k=1; k<=N; ++k){
+            v_buf[k-1] = y0_buf[k-1] - y1_prev[k-1];
+        }
+        if (coup > 1e-6 && N>1){
+            // rotation angle with easing
+            double theta_max = 0.25; // ~14 degrees at full
+            double theta = theta_max * (0.5 - 0.5*cos(M_PI*coup)); // eased
+            double c = cos(theta), s = sin(theta);
+            int start = (i & 1)? 2 : 1; // alternate pairing each sample: (1,2)(3,4)... then (2,3)(4,5)...
+            for (int k=start; k<N; k+=2){
+                double a = v_buf[k-1];
+                double b = v_buf[k];
+                double A = c*a + s*b;
+                double B = -s*a + c*b;
+                v_buf[k-1] = A;
+                v_buf[k]   = B;
+            }
+            // reconstruct y0 from rotated velocities (preserve y1_prev as the reference)
+            for (int k=1; k<=N; ++k){
+                y0_buf[k-1] = y1_prev[k-1] + v_buf[k-1];
+            }
+        }
+
+        // ---- pass 3: state update and output mix
+        for (int k=1; k<=N; ++k){
+            t_mode *m = &x->m[k-1];
+            if (!m->active) continue;
+
+            double y1 = y0_buf[k-1];
+            double y2 = y1_prev[k-1];
 
             // pan, weights, env, mix
             double amp = (double)m->gain * (double)x->mix_scale * (double)amp_norm * (double)m->amp_w;
-            double yamp= amp * env * y1;
+            double yamp= amp * m->env * y1;
 
             outL[i] = (t_sample)denorm_fix( (double)outL[i] + yamp * m->gl );
             outR[i] = (t_sample)denorm_fix( (double)outR[i] + yamp * m->gr );
 
-            m->y1=y1; m->y2=y2; m->env=env;
+            m->y2 = y2;
+            m->y1 = y1;
         }
     }
 
