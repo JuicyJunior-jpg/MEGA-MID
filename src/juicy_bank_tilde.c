@@ -1,14 +1,10 @@
 // juicy_bank_tilde.c — Juicy's modal **bank** (N resonators in one object)
-// PATCH: 2025-09-03 (pass 2)
-// Fixes based on Juicy's 5-point feedback:
-// 1) Damping mapping re-shaped: 0..1 is the *intended* range. Smooth, not twitchy.
-// 2) Dispersion stays per-mode random, unique per resonator; knob sets max spread (±0.9 * |knob|).
-// 3) Coupling reworked to a *diffusive, stable* form with frequency-falloff and damping scaling.
-// 4) Contact loudness: revised makeup gain (calibrated for typical amplitudes) to avoid the dip near 0+.
-// 5) Even indices silent at pos=0.5 explained by physics; add a higher floor (0.02) so they still whisper.
-//
-// Ranges you should use in the patcher (all clamped here):
-// damping [0..1], brightness [-1..+1], position [0..1], dispersion [-1..+1], coupling [0..1], density [-1..+1], anisotropy [-1..+1], contact [0..1].
+// PATCH: 2025-09-03 (pass 3)
+// Fixes per Juicy's latest notes:
+// - Coupling audible across spectrum (HF-friendly falloff, higher base, safe clamp).
+// - Contact morph has unity small-signal gain (no volume dip for 0<amt<1).
+// - Dispersion remains per-mode unique but affects *all* modes; cap is ±0.9*|knob| absolute offset.
+// - Index handling rounds to nearest int; position audibility floor bumped (0.10) for test clarity.
 
 #include "m_pd.h"
 #include <math.h>
@@ -85,9 +81,7 @@ static void bank_recalc_body(t_juicy_bank_tilde *x){
     if (x->contact_soft < 0.5f) x->contact_soft = 2.f;
     if (x->couple_df <= 0) x->couple_df = 200.f;
 
-    // 1) New damping mapping: smooth & usable across 0..1
-    // Internal scale: d_s = (d)^2 compresses near 0, keeps 1 = full.
-    // r_mul_base in [0.8 .. 1.0] then shaped by a *mild* HF exponent.
+    // Damping mapping across 0..1
     float d_s = x->damping * x->damping;
     x->r_mul_base = 1.f - 0.20f * d_s;     // 1 → 0.8 at full damping (mild base)
     x->aniso_gamma  = x->anisotropy;
@@ -139,8 +133,8 @@ static void bank_update_coeffs_one(t_juicy_bank_tilde *x, int k){
     t_mode *m = &x->m[k-1];
 
     double base = (x->base_hz>0?x->base_hz:1.0);
-    // 2) Dispersion: unique per mode via disp_rand, knob sets *max spread*
-    float disp_amt = 0.9f * fabsf(x->dispersion); // 0..0.9
+    // Dispersion: unique per mode via disp_rand, knob sets *max spread* (±0.9*|knob|)
+    float disp_amt = 0.9f * fabsf(x->dispersion); // 0..0.9 absolute offset
     double ratio_eff = (double)m->ratio;
     if (m->keytrack!=0.f){
         ratio_eff = (double)m->ratio + (double)disp_amt * (double)m->disp_rand;
@@ -153,7 +147,7 @@ static void bank_update_coeffs_one(t_juicy_bank_tilde *x, int k){
     }
 
     // Density: cluster/spread around base (or ratio=1)
-    float dens = x->density;
+    float dens = x->density; // -1..1
     if (m->keytrack!=0.f){
         double d = ratio_eff - 1.0;
         fr = base * (1.0 + d * (1.0 + (double)dens));
@@ -167,12 +161,12 @@ static void bank_update_coeffs_one(t_juicy_bank_tilde *x, int k){
     if (fr > 0.45*fs) fr = 0.45*fs;
     m->freq_hz = fr;
 
-    // 1) Damping: map decay_ms to r, then mild HF shaping by frel
+    // Damping & biquad
     double d_s = (m->decay_ms<=0?0.0:m->decay_ms*0.001);
     double r = (d_s<=0.0)? 0.0 : exp(-1.0/(d_s*fs));
     double frel = fr / base; if (frel < 0.1) frel = 0.1;
-    double expo = 1.0 + 0.5 * sqrt(frel);         // mild HF emphasis on damping
-    double r_w = pow((double)x->r_mul_base, expo); // x->r_mul_base in [0.8..1.0]
+    double expo = 1.0 + 0.5 * sqrt(frel);
+    double r_w = pow((double)x->r_mul_base, expo);
     r *= r_w;
     if (r>0.999999) r = 0.999999;
     if (r<0.0)      r = 0.0;
@@ -182,10 +176,10 @@ static void bank_update_coeffs_one(t_juicy_bank_tilde *x, int k){
     m->a1 = 2.0 * r * cos(w);
     m->a2 = - (r * r);
 
-    // Position: true node behavior, but with a small protective floor (0.02)
+    // Position: keep even modes audible near pos=0.5
     int    idx1 = k;
     double posw = fabs(sin(M_PI * (double)idx1 * (double)clampf(x->position,0.f,1.f)));
-    if (posw < 0.02) posw = 0.02; // keep even modes faintly audible at pos=0.5
+    if (posw < 0.10) posw = 0.10;
 
     // Anisotropy: attenuation-only for opposite group
     int P = (x->aniso_P<1?1:x->aniso_P);
@@ -211,21 +205,12 @@ static void bank_update_coeffs_one(t_juicy_bank_tilde *x, int k){
     mode_update_pan(m);
 }
 
-static inline double contact_makeup(double amt, double soft){
-    if (amt<=0.0) return 1.0;
-    // Calibrate around a moderate internal amplitude to avoid a dip just above 0
-    double k = amt / (soft>1e-6?soft:1.0);
-    double a_cal = 0.75; // calibration amplitude
-    double g = tanh(k*a_cal) / (k*a_cal);
-    if (g < 1e-3) g = 1e-3;
-    double mk = 1.0 / g;
-    if (mk > 8.0) mk = 8.0;
-    return mk;
-}
-static inline double contact_shaper(double x, double amt, double soft){
+// Contact morph: unity small-signal gain for any amount
+static inline double contact_morph(double x, double amt, double soft){
+    // y = (1-amt)*x + amt * soft * tanh(x/soft)
     if (amt<=0.0) return x;
-    double k = amt / (soft>1e-6?soft:1.0);
-    return tanh(k*x);
+    if (soft<=1e-6) soft = 1e-6;
+    return (1.0-amt)*x + amt * soft * tanh(x/soft);
 }
 
 static t_int *juicy_bank_tilde_perform(t_int *w){
@@ -264,20 +249,21 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     }
     double amp_norm = (nact>0)? ((double)nact / (ampW_sum + 1e-12)) : 1.0;
 
-    // Diffusive coupling: pull each mode slightly toward neighbors (stable)
+    // Coupling weights: HF-friendly falloff using local freq
     double coup = (double)x->coupling;
     double dfc  = (double)x->couple_df;
     double kL[MAXN], kR[MAXN];
     for (int k=1; k<=N; ++k){
+        double fr_self = x->m[k-1].freq_hz;
         double gL=0.0, gR=0.0;
         if (coup>1e-6 && N>1){
             if (k>1){
-                double df = fabs(x->m[k-2].freq_hz - x->m[k-1].freq_hz);
-                gL = exp( - df / (dfc>1e-9?dfc:1.0) );
+                double df = fabs(x->m[k-2].freq_hz - fr_self);
+                gL = exp( - df / (dfc + 0.25*fr_self + 1.0) );
             }
             if (k<N){
-                double df = fabs(x->m[k].freq_hz - x->m[k-1].freq_hz);
-                gR = exp( - df / (dfc>1e-9?dfc:1.0) );
+                double df = fabs(x->m[k].freq_hz - fr_self);
+                gR = exp( - df / (dfc + 0.25*fr_self + 1.0) );
             }
         }
         kL[k-1]=(float)gL; kR[k-1]=(float)gR;
@@ -287,7 +273,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
     const double c_amt  = x->contact;
     const double c_soft = x->contact_soft;
-    const double c_mkup = contact_makeup(c_amt, c_soft);
 
     for (int i=0;i<n;++i){
         double y1_old[MAXN];
@@ -310,22 +295,26 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             double tgt = (fabs(xin) > 1e-9) ? 1.0 : 0.0;
             if (tgt > env) env = tgt + (env - tgt) * att; else env = tgt + (env - tgt) * dec;
 
-            // diffusive coupling: proportional to (neighbor - self), scaled by damping
-            double inj = 0.0;
+            // core resonator
+            double y0 = a1*y1 + a2*y2 + xin;
+
+            // diffusive coupling injection (audible but safe)
             if (coup>1e-6 && N>1){
-                double damp_scale = (1.0 - m->rcur); // less coupling when very resonant (stability)
-                double g = coup * 0.01 * damp_scale; // base coefficient
-                if (k>1) inj += g * kL[k-1] * (y1_old[k-2] - y1);
-                if (k<N) inj += g * kR[k-1] * (y1_old[k]   - y1);
-                if (inj > 0.1) inj = 0.1; else if (inj < -0.1) inj = -0.1;
+                double damp_scale = 0.3 + 0.7 * (1.0 - m->rcur); // don't vanish when very resonant
+                double gbase = 0.12 * coup * damp_scale; // audible base
+                double inj = 0.0;
+                if (k>1) inj += gbase * kL[k-1] * (y1_old[k-2] - y1);
+                if (k<N) inj += gbase * kR[k-1] * (y1_old[k]   - y1);
+                if (inj > 0.2) inj = 0.2; else if (inj < -0.2) inj = -0.2;
+                y0 += inj;
             }
 
-            double y0 = a1*y1 + a2*y2 + xin + inj;
             y2 = y1; y1 = y0;
 
-            double ynl = (c_amt>1e-6)? contact_shaper(y0, c_amt, c_soft) : y0;
+            // contact morph (no volume dip)
+            double ynl = contact_morph(y0, c_amt, c_soft);
             double amp = (double)m->gain * (double)x->mix_scale * (double)amp_norm * (double)m->amp_w;
-            double yamp= amp * env * ynl * c_mkup;
+            double yamp= amp * env * ynl;
 
             outL[i] = (t_sample)denorm_fix( (double)outL[i] + yamp * gl );
             outR[i] = (t_sample)denorm_fix( (double)outR[i] + yamp * gr );
@@ -353,8 +342,8 @@ static void set_anisotropy(t_juicy_bank_tilde *x, t_floatarg f){ x->anisotropy=f
 static void set_contact   (t_juicy_bank_tilde *x, t_floatarg f){ x->contact=f; }
 
 // per-mode (via edit cursor)
-static void bank_emit_all(t_juicy_bank_tilde *x){ t_atom a; (void)a; bank_emit_body_state(x); bank_emit_res_selected(x); }
-static void set_idx    (t_juicy_bank_tilde *x, t_floatarg f){ int i=(int)f; if(i<1)i=1; if(i>x->N)i=x->N; x->edit_idx=i; bank_update_coeffs_one(x,i); bank_emit_res_selected(x); }
+static void bank_emit_all(t_juicy_bank_tilde *x){ bank_emit_body_state(x); bank_emit_res_selected(x); }
+static void set_idx    (t_juicy_bank_tilde *x, t_floatarg f){ int i=(int)floor(f+0.5f); if(i<1)i=1; if(i>x->N)i=x->N; x->edit_idx=i; bank_update_coeffs_one(x,i); bank_emit_res_selected(x); }
 static void set_ratio  (t_juicy_bank_tilde *x, t_floatarg f){ int k=x->edit_idx; if(k<1||k>x->N)return; if(f<=0)f=0.0001f; x->m[k-1].ratio=(float)f; x->m[k-1].dirty_coeffs=1; bank_update_coeffs_one(x,k); bank_emit_res_selected(x); }
 static void set_gain   (t_juicy_bank_tilde *x, t_floatarg f){ int k=x->edit_idx; if(k<1||k>x->N)return; x->m[k-1].gain=clampf((float)f,0.f,1.f); bank_emit_all(x); }
 static void set_attack (t_juicy_bank_tilde *x, t_floatarg f){ int k=x->edit_idx; if(k<1||k>x->N)return; x->m[k-1].attack_ms=(f<0?0:f); bank_emit_res_selected(x); }
