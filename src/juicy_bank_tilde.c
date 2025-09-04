@@ -1,10 +1,14 @@
 // juicy_bank_tilde.c — Juicy's modal **bank** (N resonators in one object)
-// PATCH: 2025-09-03 (pass 3)
-// Fixes per Juicy's latest notes:
-// - Coupling audible across spectrum (HF-friendly falloff, higher base, safe clamp).
-// - Contact morph has unity small-signal gain (no volume dip for 0<amt<1).
-// - Dispersion remains per-mode unique but affects *all* modes; cap is ±0.9*|knob| absolute offset.
-// - Index handling rounds to nearest int; position audibility floor bumped (0.10) for test clarity.
+// PATCH: 2025-09-03 (pass 4)
+// New fixes from Juicy:
+// 1) Non-prime indices sounded too quiet → add position-compensation in amp weighting
+//    so near-nodal modes don’t get nuked. Keeps physics-y shape but evens loudness.
+// 2) Dispersion must NOT touch the fundamental (id=1, ratio≈1) → disabled there.
+// 3) Contact made low modes fade at higher amounts → add mild frequency-tilt compensation
+//    under contact so lows don’t vanish while keeping the punch.
+//
+// Ranges expected in the patcher (clamped here):
+// damping [0..1], brightness [-1..+1], position [0..1], dispersion [-1..+1], coupling [0..1], density [-1..+1], anisotropy [-1..+1], contact [0..1].
 
 #include "m_pd.h"
 #include <math.h>
@@ -137,12 +141,21 @@ static void bank_update_coeffs_one(t_juicy_bank_tilde *x, int k){
     float disp_amt = 0.9f * fabsf(x->dispersion); // 0..0.9 absolute offset
     double ratio_eff = (double)m->ratio;
     if (m->keytrack!=0.f){
-        ratio_eff = (double)m->ratio + (double)disp_amt * (double)m->disp_rand;
-        if (ratio_eff <= 0.0001) ratio_eff = 0.0001;
+        // IMPORTANT: Do NOT disperse the fundamental (k==1)
+        if (k != 1){
+            ratio_eff = (double)m->ratio + (double)disp_amt * (double)m->disp_rand;
+            if (ratio_eff <= 0.0001) ratio_eff = 0.0001;
+        } else {
+            ratio_eff = (double)m->ratio; // keep it clean
+        }
     }
     double fr = (m->keytrack!=0.f) ? base * ratio_eff : (double)m->ratio;
     if (m->keytrack==0.f){
-        fr = (double)m->ratio * (1.0 + (double)disp_amt * (double)m->disp_rand);
+        if (k != 1){
+            fr = (double)m->ratio * (1.0 + (double)disp_amt * (double)m->disp_rand);
+        } else {
+            fr = (double)m->ratio;
+        }
         if (fr < 1.0) fr = 1.0;
     }
 
@@ -176,7 +189,7 @@ static void bank_update_coeffs_one(t_juicy_bank_tilde *x, int k){
     m->a1 = 2.0 * r * cos(w);
     m->a2 = - (r * r);
 
-    // Position: keep even modes audible near pos=0.5
+    // Position: true node behavior, + floor (0.10)
     int    idx1 = k;
     double posw = fabs(sin(M_PI * (double)idx1 * (double)clampf(x->position,0.f,1.f)));
     if (posw < 0.10) posw = 0.10;
@@ -235,13 +248,20 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     x->n_active = nact;
     x->mix_scale = (nact>0)? (1.0f / sqrtf((float)nact)) : 1.0f;
 
-    // Brightness normalization + fair gain
+    // Brightness normalization + fair gain + position compensation
     double bright_norm = (bright_sum>0.0)? (bright_sum / (double)(nact>0?nact:1)) : 1.0;
     if (bright_norm <= 0.0) bright_norm = 1.0;
     double ampW_sum = 0.0;
     for (int k=1; k<=N; ++k){
         t_mode *m = &x->m[k-1];
-        double ampw = (double)m->pos_w * (double)m->aniso_w * ((double)m->bright_w / bright_norm);
+        // position compensation: reduce loudness gap for near-nodal modes
+        double pos_comp = 1.0;
+        double p = (double)m->pos_w;
+        // boost a bit when p is small; cap for safety
+        pos_comp = pow((p<1e-6?1e-6:p)/0.5, -0.5); // ~sqrt(0.5/p)
+        if (pos_comp > 2.0) pos_comp = 2.0;
+
+        double ampw = (double)m->pos_w * (double)m->aniso_w * ((double)m->bright_w / bright_norm) * pos_comp;
         if (ampw < 0.0) ampw = 0.0;
         if (ampw > 32.0) ampw = 32.0;
         m->amp_w = (float)ampw;
@@ -249,7 +269,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     }
     double amp_norm = (nact>0)? ((double)nact / (ampW_sum + 1e-12)) : 1.0;
 
-    // Coupling weights: HF-friendly falloff using local freq
+    // Coupling weights (same as previous rev): HF-friendly falloff using local freq
     double coup = (double)x->coupling;
     double dfc  = (double)x->couple_df;
     double kL[MAXN], kR[MAXN];
@@ -311,10 +331,20 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
             y2 = y1; y1 = y0;
 
-            // contact morph (no volume dip)
-            double ynl = contact_morph(y0, c_amt, c_soft);
+            // contact morph (no volume dip) + mild LF compensation under contact
+            double ysh = contact_morph(y0, c_amt, c_soft);
+            double eq = 1.0;
+            if (c_amt>1e-6){
+                double ratio_f = (m->freq_hz<=0?1.0:(m->freq_hz / (x->base_hz>0?x->base_hz:1.0)));
+                if (ratio_f < 1e-6) ratio_f = 1e-6;
+                // compensate lows a bit as contact increases (tilt up lows)
+                eq = pow(ratio_f, -0.25 * c_amt);
+                if (eq < 0.5) eq = 0.5;
+                if (eq > 2.0) eq = 2.0;
+            }
+
             double amp = (double)m->gain * (double)x->mix_scale * (double)amp_norm * (double)m->amp_w;
-            double yamp= amp * env * ynl;
+            double yamp= amp * env * (ysh * eq);
 
             outL[i] = (t_sample)denorm_fix( (double)outL[i] + yamp * gl );
             outR[i] = (t_sample)denorm_fix( (double)outR[i] + yamp * gr );
