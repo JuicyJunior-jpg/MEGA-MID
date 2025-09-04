@@ -248,6 +248,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
     int N = x->N;
     int nact = 0;
+    double sumg2 = 0.0;
 
     // --- compute input-shaping weight, normalized across active modes ---
     double wsum = 0.0;
@@ -257,6 +258,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         bank_update_coeffs_one(x, k);
         if (m->active) {
             nact++;
+            sumg2 += (double)m->gain * (double)m->gain;
             double w_in = (double)m->pos_w * (double)m->aniso_w * (double)m->bright_w;
             if (w_in < 0.0) w_in = 0.0;
             if (w_in > 64.0) w_in = 64.0;
@@ -267,7 +269,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         }
     }
     x->n_active = nact;
-    x->mix_scale = (nact>0)? (1.0f / sqrtf((float)nact)) : 1.0f;
+    x->mix_scale = (sumg2>1e-12)? (float)(1.0 / sqrt(sumg2)) : ((nact>0)? (1.0f / sqrtf((float)nact)) : 1.0f);
     double wnorm = (wsum>0.0)? (wsum / (double)(nact>0?nact:1)) : 1.0;
     if (wnorm <= 0.0) wnorm = 1.0;
 
@@ -365,9 +367,11 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             m->y1 = y1;
         }
 
-        // only apply **safety** scaling if we truly exceed a hot peak
+        // apply linear headroom normalization to avoid any clip/drive
         double peak = fmax(fabs(accL), fabs(accR));
-        double scl = (peak > 1.2) ? (0.95 / peak) : 1.0;
+        double scl = 1.0;
+        const double HEADROOM = 0.98; // keep under float [-1,1]
+        if (peak > HEADROOM) scl = HEADROOM / peak;
 
         outL[i] = (t_sample)(accL * scl);
         outR[i] = (t_sample)(accR * scl);
