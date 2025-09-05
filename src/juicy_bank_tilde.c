@@ -245,4 +245,3 @@ class_addmethod(juicy_bank_tilde_class, (t_method)msg_reset, gensym("reset"), 0)
 class_addmethod(juicy_bank_tilde_class, (t_method)msg_bang, gensym("bang"), 0);
 class_addmethod(juicy_bank_tilde_class, (t_method)msg_debug, gensym("debug"), A_FLOAT, 0);
 class_addmethod(juicy_bank_tilde_class, (t_method)msg_bug_catch, gensym("bug_catch"), 0);
-}
