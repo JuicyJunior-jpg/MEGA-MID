@@ -123,9 +123,15 @@ double posw = fabs(sin(M_PI * (double)k * (double)clampf(x->position,0.f,1.f)));
 if (posw < 0.05) posw = 0.05;
 int P = (x->aniso_P<1?1:x->aniso_P);
 double aniso = 1.0 + (double)x->aniso_gamma * cos(2.0*M_PI * (double)(k-1) / (double)P);
-if (aniso < 0.25) aniso = 0.25; if (aniso > 2.0) aniso = 2.0;
+if (aniso < 0.25)
+    aniso = 0.25;
+else if (aniso > 2.0)
+    aniso = 2.0;
 double bright = pow(fr/base, (double)clampf(x->bright_slope, -2.f, 2.f));
-if (bright < 0.05) bright = 0.05; if (bright > 20.0) bright = 20.0;
+if (bright < 0.05)
+    bright = 0.05;
+else if (bright > 20.0)
+    bright = 20.0;
 
 m->pos_w = (float)posw;
 m->aniso_w = (float)aniso;
@@ -214,21 +220,24 @@ double env=m->env;
 double fs = (double)x->sr;
 double att = (m->attack_ms<=0? 0.0 : exp(-1.0/( (double)m->attack_ms*0.001 * fs )));
 double dec = (m->decay_ms <=0? 0.0 : exp(-1.0/( (double)m->decay_ms *0.001 * fs )));
-double gl=m->gl, gr=m->gr;
-double amp = (double)m->gain * (double)x->mix_scale * (double)m->amp_w * (double)m->aniso_w;
+    double gl=m->gl, gr=m->gr;
+    double amp = (double)m->gain * (double)x->mix_scale;
 
-for (int i=0;i<n;++i){
-double xin = 0.5*((double)inL[i] + (double)inR[i]) * (double)m->pos_w;
-double tgt = (fabs(xin) > 1e-9) ? 1.0 : 0.0;
-if (tgt > env) env = tgt + (env - tgt) * att; else env = tgt + (env - tgt) * dec;
-double y0 = a1*y1 + a2*y2 + xin;
-y2 = y1; y1 = y0;
-double ynl = contact_shaper(y0, c_amt, c_soft);
-double yamp= amp * env * ynl;
-outL[i] = (t_sample)denorm_fix( (double)outL[i] + yamp * gl );
-outR[i] = (t_sample)denorm_fix( (double)outR[i] + yamp * gr );
-}
-m->y1=y1; m->y2=y2; m->env=env;
+    for (int i=0;i<n;++i){
+        double xin = 0.5*((double)inL[i] + (double)inR[i]) * (double)m->amp_w;
+        xin = contact_shaper(xin, c_amt, c_soft);
+        double tgt = (fabs(xin) > 1e-9) ? 1.0 : 0.0;
+        if (tgt > env)
+            env = tgt + (env - tgt) * att;
+        else
+            env = tgt + (env - tgt) * dec;
+        double y0 = a1*y1 + a2*y2 + xin;
+        y2 = y1; y1 = y0;
+        double yamp = amp * env * y0;
+        outL[i] = (t_sample)denorm_fix( (double)outL[i] + yamp * gl );
+        outR[i] = (t_sample)denorm_fix( (double)outR[i] + yamp * gr );
+    }
+    m->y1=y1; m->y2=y2; m->env=env;
 }
 
 return (t_int *)(w+7);
@@ -352,7 +361,7 @@ static void *juicy_bank_tilde_new(t_symbol *s, int argc, t_atom *argv){
 (void)s;
 t_juicy_bank_tilde *x = (t_juicy_bank_tilde*)pd_new(juicy_bank_tilde_class);
 x->N=12; x->base_hz=440;
-x->damping=0; x->brightness=0; x->position=0.5f; x->dispersion=0;
+x->damping=0; x->brightness=0; x->position=0.37f; x->dispersion=0;
 x->coupling=0; x->density=0; x->anisotropy=0; x->contact=0;
 x->aniso_P=2; x->contact_soft=2; x->couple_df=200;
 x->edit_idx=1; x->sr=44100; x->debug=0; x->n_active=0; x->mix_scale=1.f;
