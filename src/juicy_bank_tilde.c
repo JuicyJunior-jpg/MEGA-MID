@@ -1,3 +1,4 @@
+
 // juicy_bank_tilde.c (fixed)
 // Resolves compile errors on Linux/macOS (mode_t conflict & Pd class boilerplate).
 
@@ -87,6 +88,12 @@ typedef struct _juicy_bank_tilde {
     float pos_weight[JB_MAX_MODES];
     float disp_offset[JB_MAX_MODES];
     float disp_target[JB_MAX_MODES];
+
+    float last_basef0; // last seen base f0 (Hz) from signal inlet; <=0 means 'unused'
+
+    // GUI inlets
+    t_inlet *in_basef0_sig; // signal inlet for base fundamental freq (Hz)
+    t_inlet *in_damp, *in_bright, *in_pos, *in_disp, *in_aniso, *in_contact, *in_contact_sym, *in_density;
 } t_juicy_bank_tilde;
 
 static t_class *juicy_bank_class; // PD class pointer
@@ -201,6 +208,18 @@ static void jb_update_per_mode_gains(t_juicy_bank_tilde* x){
     }
 }
 
+
+static inline void jb_sanitize_params(t_juicy_bank_tilde* x){
+    x->damping     = jb_clamp(x->damping,     0.f, 1.f);
+    x->brightness  = jb_clamp(x->brightness,  0.f, 1.f);
+    x->position    = jb_clamp(x->position,    0.f, 1.f);
+    x->dispersion  = jb_clamp(x->dispersion,  0.f, 1.f);
+    if (x->anisotropy > 1.f) x->anisotropy = 1.f; else if (x->anisotropy < -1.f) x->anisotropy = -1.f;
+    x->contact_amt = jb_clamp(x->contact_amt, 0.f, 1.f);
+    if (x->contact_sym > 1.f) x->contact_sym = 1.f; else if (x->contact_sym < -1.f) x->contact_sym = -1.f;
+    if (x->density > 1.f) x->density = 1.f; else if (x->density < -1.f) x->density = -1.f;
+}
+
 static void jb_update_coeffs(t_juicy_bank_tilde* x){
     float sr = x->sr;
     for(int i=0;i<x->n_modes;i++){
@@ -208,7 +227,7 @@ static void jb_update_coeffs(t_juicy_bank_tilde* x){
         if(!md->active){ md->a1 = md->a2 = md->y1 = md->y2 = 0.f; continue; }
         float ratio = md->ratio_now + x->disp_offset[i];
         if(ratio < 0.0001f) ratio = 0.0001f;
-        float f = ratio; // interpret as absolute Hz
+        float f = (x->last_basef0 > 0.f) ? x->last_basef0 * ratio : ratio;
         float w = 2.f * M_PI * (f / sr);
         if (w > M_PI) w = M_PI;
 
@@ -234,12 +253,21 @@ static inline float jb_contact_shape(float y, float amt, float sym){
 static t_int *juicy_bank_tilde_perform(t_int *w){
     t_juicy_bank_tilde *x = (t_juicy_bank_tilde *)(w[1]);
     t_sample *in = (t_sample *)(w[2]);
-    t_sample *out = (t_sample *)(w[3]);
-    int n = (int)(w[4]);
+    t_sample *in2 = (t_sample *)(w[3]);
+    t_sample *out = (t_sample *)(w[4]);
+    int n = (int)(w[5]);
 
+    jb_sanitize_params(x);
     jb_slew_dispersion(x);
     jb_update_per_mode_gains(x);
     jb_update_coeffs(x);
+
+    
+    // estimate base f0 as mean of current block (cheap)
+    float basef0_sum = 0.f; int basef0_count = 0;
+    for(int i=0;i<n;i++){ basef0_sum += in2[i]; basef0_count++; }
+    float basef0_mean = (basef0_count > 0 ? basef0_sum / basef0_count : 0.f);
+    x->last_basef0 = basef0_mean;
 
     float env_tau = x->env_follower_tau;
     float th = x->contact_threshold;
@@ -248,6 +276,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
     for(int i=0;i<n;i++){
         float exc = in[i];
+        float basef0 = in2 ? in2[i] : 0.f;
+
         float sum = 0.f;
 
         for(int m=0;m<x->n_modes;m++){
@@ -276,7 +306,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
 static void juicy_bank_tilde_dsp(t_juicy_bank_tilde *x, t_signal **sp){
     x->sr = sp[0]->s_sr;
-    dsp_add(juicy_bank_tilde_perform, 4, x, sp[0]->s_vec, sp[1]->s_vec, sp[0]->s_n);
+    dsp_add(juicy_bank_tilde_perform, 5, x, sp[0]->s_vec, sp[1]->s_vec, sp[2]->s_vec, sp[0]->s_n);
 }
 
 // ----- Messages -----
@@ -463,10 +493,32 @@ static void *juicy_bank_tilde_new(t_symbol *s, int argc, t_atom *argv){
     x->density_slew    = 0.1f;
     x->brightness_slew = 0.1f;
 
+    // inlets
+    x->in_basef0_sig = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_signal, &s_signal); // right signal inlet (base f0)
+    x->in_damp   = floatinlet_new(&x->x_obj, &x->damping);
+    x->in_bright = floatinlet_new(&x->x_obj, &x->brightness);
+    x->in_pos    = floatinlet_new(&x->x_obj, &x->position);
+    x->in_disp   = floatinlet_new(&x->x_obj, &x->dispersion);
+    x->in_aniso  = floatinlet_new(&x->x_obj, &x->anisotropy);
+    x->in_contact= floatinlet_new(&x->x_obj, &x->contact_amt);
+    x->in_contact_sym = floatinlet_new(&x->x_obj, &x->contact_sym);
+    x->in_density= floatinlet_new(&x->x_obj, &x->density);
+
     return (void *)x;
 }
 
 static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
+    
+    if (x->in_basef0_sig) inlet_free(x->in_basef0_sig);
+    if (x->in_damp)       inlet_free(x->in_damp);
+    if (x->in_bright)     inlet_free(x->in_bright);
+    if (x->in_pos)        inlet_free(x->in_pos);
+    if (x->in_disp)       inlet_free(x->in_disp);
+    if (x->in_aniso)      inlet_free(x->in_aniso);
+    if (x->in_contact)    inlet_free(x->in_contact);
+    if (x->in_contact_sym)inlet_free(x->in_contact_sym);
+    if (x->in_density)    inlet_free(x->in_density);
+
     outlet_free(x->outlet);
 }
 
