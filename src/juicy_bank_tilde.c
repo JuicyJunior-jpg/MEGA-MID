@@ -1,449 +1,669 @@
-// juicy_bank_tilde.c — monophonic modal **bank** (N resonators inside one object)
-// Inlets (L→R):
-// 1) L~ 2) R~
-// 3) damping 4) brightness 5) position 6) dispersion 7) coupling 8) density 9) anisotropy 10) contact
-// 11) idx 12) ratio 13) gain 14) attack 15) decay 16) pan 17) keytrack
-// Outlets: 1) L~ 2) R~ 3) body_state (anything) 4) res_state (anything)
-// Messages (inlet 1): base <Hz>, N <int>, aniso_P <int>, contact_soft <f>, reset, bang, debug <0|1>, bug_catch
+// juicy_bank_tilde.c
+// Modal resonator bank for Pure Data / PlugData
+// Implements user-specified behaviors: damping, brightness tilt, position nodes, dispersion, density, anisotropy, contact, per-mode curve.
 //
-// Defaults/INT: N=12, base=440, only mode 1 audible (gain=1, ratio=1, decay=600ms).
-// Safety: clamp freq [1, 0.45*fs], r<=0.999999, pan[-1,1]. Attack=0ms => instant (no mute).
-// Mix normalization: mix_scale = 1/sqrt(n_active).
+// Build (macOS example):
+//   clang -O3 -DPD -std=c99 -fPIC -shared -o juicy_bank_tilde.pd_darwin juicy_bank_tilde.c
+//
+// (c) 2025 Juicy x ChatGPT — do something wonderful
 
 #include "m_pd.h"
 #include <math.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
-#define MAXN 128
+#define JB_MAX_MODES 20
 
-static t_class *juicy_bank_tilde_class;
+// small helpers
+static inline float jb_clamp(float x, float lo, float hi){ return x < lo ? lo : (x > hi ? hi : x); }
+static inline float jb_mmix(float a, float b, float t){ return a + (b - a) * t; } // linear mix
+static inline float jb_smoothstep(float x){ x = jb_clamp(x, 0.f, 1.f); return x*x*(3.f - 2.f*x); }
 
+// Random (xorshift32) for deterministic seeds
+typedef struct { uint32_t s; } jb_rng_t;
+static inline void jb_rng_seed(jb_rng_t* r, uint32_t s){ if(s==0) s=1u; r->s = s; }
+static inline uint32_t jb_rng_u32(jb_rng_t* r){ uint32_t x=r->s; x ^= x<<13; x ^= x>>17; x ^= x<<5; return r->s = x; }
+static inline float jb_rng_uniform(jb_rng_t* r){ return (jb_rng_u32(r) / 4294967296.0f); } // [0,1)
+static inline float jb_rng_bi(jb_rng_t* r){ return 2.f*jb_rng_uniform(r) - 1.f; } // [-1,1)
+
+typedef enum {
+    DENSITY_PIVOT = 0,      // pivot around fundamental (ratio 1.0)
+    DENSITY_INDIVIDUAL = 1  // chain spacing based on previous active
+} density_mode_e;
+
+// Per-mode state
 typedef struct {
-float ratio, gain, attack_ms, decay_ms, pan, keytrack;
-double a1, a2, y1, y2, env, gl, gr, freq_hz, rcur;
-float amp_w, r_w, pos_w, aniso_w;
-unsigned char active, dirty_coeffs;
-} t_mode;
+    int   active;         // 0/1
+    float base_ratio;     // user-set ratio (>= 0.0), fundamental ~1.0
+    float base_decay_ms;  // user-set decay ms
+    float base_gain;      // user-set linear gain 0..1
+
+    // Derived (recomputed on param changes)
+    float ratio_now;      // after density & dispersion
+    float decay_ms_now;   // after damping
+    float gain_now;       // after brightness, anisotropy, position, etc.
+
+    // Reson filter state: y[n] = 2 r cos(w) y[n-1] - r^2 y[n-2] + g * x[n]
+    float a1, a2;         // coeffs
+    float y1, y2;         // state
+
+    // Contact envelope follower (per-mode)
+    float env;            // simple abs-based follower 0..1
+    float curve_amt;      // per-mode curve control (-1..1)
+    
+    // Dispersion random (stable)
+    float disp_signature; // in [-1,1], signed random unique to the mode
+} mode_t;
 
 typedef struct _juicy_bank_tilde {
-t_object x_obj;
-t_float f_dummy;
+    t_object  x_obj;
+    t_float   f_dummy;
 
-// body
-int N;
-float base_hz;
-float damping, brightness, position, dispersion, coupling, density, anisotropy, contact;
-int aniso_P;
-float contact_soft, couple_df;
+    t_inlet*  in2;   // optional control-rate inlet (unused; placeholder)
+    t_outlet* outlet;
 
-// derived
-float r_mul, bright_slope, aniso_gamma, mix_scale;
-int n_active;
+    // Global parameters
+    float sr;
+    int   n_modes;
+    mode_t m[JB_MAX_MODES];
 
-// edit cursor
-int edit_idx;
+    // Fundamental index (auto-detected as closest to ratio=1.0 among active modes)
+    int fundamental_idx;
 
-// modes
-t_mode m[MAXN];
+    // Controls
+    float damping;       // 0..1: linear percentage cut of decay (new = base*(1-damping))
+    float brightness;    // 0..1: 0 mutes highs, 0.5 neutral, 1 boosts highs
+    float position;      // 0..1: 0 bypass; >0 true node cancellations via sin(pi*k*pos)
+    float dispersion;    // 0..1: scale of random ± up to 1.0 ratio offset (fundamental immune)
+    float anisotropy;    // -1..1: continuous mute of groups (non-integer "odd") vs near-integer "even"
+    float contact_amt;   // 0..1: strength of contact nonlinearity
+    float contact_sym;   // -1..1: asymmetry of contact shape
+    float density;       // -1..1: spacing scale (-50%..+50%)
+    density_mode_e density_mode;
 
-// dsp
-float sr;
+    // Bookkeeping
+    float brightness_alpha; // slope for tilt
+    float env_follower_tau; // for contact detection
+    float contact_threshold;
 
-int debug;
+    // Position behavior
+    int   use_true_nodes;  // always true
+    // Anisotropy epsilon for "near-integer" classification
+    float epsilon_near_int;
 
-// outlets
-t_outlet *outL, *outR, *outBody, *outRes;
+    // Dispersion RNG
+    jb_rng_t rng;
+    uint32_t seed_value;
+
+    // Small slews for control changes
+    float dispersion_slew; // 0..1, how fast offsets glide back (per block)
+    float density_slew;
+    float brightness_slew;
+
+    // Cached arrays for computed weights (smoothed)
+    float pos_weight[JB_MAX_MODES];
+    float disp_offset[JB_MAX_MODES];     // current applied offset
+    float disp_target[JB_MAX_MODES];     // target offset after re-roll / knob change
 } t_juicy_bank_tilde;
 
-static inline float clampf(float x, float lo, float hi){ if(x<lo) return lo; if(x>hi) return hi; return x; }
-static inline double denorm_fix(double v){ return (v<1e-30 && v>-1e-30)?0.0:v; }
+// ----- Utilities -----
 
-static void bank_recalc_body(t_juicy_bank_tilde *x){
-x->damping = clampf(x->damping, 0.f, 1.f);
-x->brightness = clampf(x->brightness, -1.f, 1.f);
-x->position = clampf(x->position, 0.f, 1.f);
-x->dispersion = clampf(x->dispersion, -0.5f, 0.5f);
-x->coupling = clampf(x->coupling, 0.f, 1.f);
-x->density = clampf(x->density, 0.f, 0.5f);
-x->anisotropy = clampf(x->anisotropy, -1.f, 1.f);
-x->contact = clampf(x->contact, 0.f, 1.f);
-if (x->base_hz <= 0) x->base_hz = 440.f;
-if (x->N < 1) x->N = 1;
-if (x->N > MAXN) x->N = MAXN;
-if (x->aniso_P < 1) x->aniso_P = 2;
-if (x->contact_soft < 0.5f) x->contact_soft = 2.f;
-if (x->couple_df <= 0) x->couple_df = 200.f;
-
-x->r_mul = 1.f - 0.5f * x->damping; // linear (Elements-inspired)
-x->aniso_gamma = x->anisotropy;
-x->bright_slope = x->brightness;
+static int jb_is_near_integer(float x, float eps){
+    float r = roundf(x);
+    return (fabsf(x - r) <= eps) ? 1 : 0;
 }
 
-static void mode_update_pan(t_mode *m){
-double p = clampf(m->pan, -1.f, 1.f);
-double th = (p + 1.0) * 0.25 * M_PI; // [-1,1] -> [0, pi/2]
-m->gl = cos(th);
-m->gr = sin(th);
+// Find fundamental index (active mode closest to ratio 1.0). Returns -1 if none.
+static int jb_find_fundamental(t_juicy_bank_tilde* x){
+    int best = -1;
+    float bestd = 1e9f;
+    for(int i=0;i<x->n_modes;i++){
+        if(!x->m[i].active) continue;
+        float d = fabsf(x->m[i].base_ratio - 1.f);
+        if(d < bestd){ bestd = d; best = i; }
+    }
+    return best;
 }
 
-static void bank_update_coeffs_one(t_juicy_bank_tilde *x, int k){
-if (k < 1 || k > x->N) return;
-t_mode *m = &x->m[k-1];
-int N = x->N;
-double base = (x->base_hz>0?x->base_hz:1.0);
-double fr = (m->keytrack!=0.f) ? base * (double)m->ratio : (double)m->ratio;
-if (fr < 1.0) fr = 1.0;
-fr *= (1.0 + (double)x->dispersion * (double)(k*k));
-double s = sin(M_PI * (double)k / (double)N);
-fr *= (1.0 + (double)x->density * s);
-double fs = (double)x->sr;
-if (fr > 0.45*fs) fr = 0.45*fs;
-m->freq_hz = fr;
-
-double d_s = (m->decay_ms<=0?0.0:m->decay_ms*0.001);
-double r = (d_s<=0.0)? 0.0 : exp(-1.0/(d_s*fs));
-double frel = fr / base; if (frel < 0.1) frel = 0.1;
-double expo = 1.0 + 0.8 * sqrt(frel);
-double r_w = pow(clampf(x->r_mul,0.f,1.f), expo);
-r *= r_w;
-if (r>0.999999) r = 0.999999;
-if (r<0.0) r = 0.0;
-m->rcur = r;
-
-double w = 2.0 * M_PI * fr / fs;
-m->a1 = 2.0 * r * cos(w);
-m->a2 = - (r * r);
-
-double posw = fabs(sin(M_PI * (double)k * (double)clampf(x->position,0.f,1.f)));
-if (posw < 0.05) posw = 0.05;
-int P = (x->aniso_P<1?1:x->aniso_P);
-double aniso = 1.0 + (double)x->aniso_gamma * cos(2.0*M_PI * (double)(k-1) / (double)P);
-if (aniso < 0.25) aniso = 0.25; if (aniso > 2.0) aniso = 2.0;
-double bright = pow(fr/base, (double)clampf(x->bright_slope, -2.f, 2.f));
-if (bright < 0.05) bright = 0.05; if (bright > 20.0) bright = 20.0;
-
-m->pos_w = (float)posw;
-m->aniso_w = (float)aniso;
-m->amp_w = (float)(posw * aniso * bright);
-m->r_w = (float)r_w;
-
-mode_update_pan(m);
-m->dirty_coeffs = 0;
+// Recompute density mapping to ratio_now for all active modes
+static void jb_apply_density(t_juicy_bank_tilde* x){
+    // density: -1..1 maps to scale s = 1 + 0.5*density
+    float s = 1.f + 0.5f * x->density;
+    if (x->density_mode == DENSITY_PIVOT){
+        // pivot = fundamental (ratio 1.0)
+        for(int i=0;i<x->n_modes;i++){
+            mode_t* md = &x->m[i];
+            if(!md->active){ md->ratio_now = md->base_ratio; continue; }
+            // fundamental unaffected (exactly 1 stays 1)
+            md->ratio_now = 1.f + (md->base_ratio - 1.f) * s;
+        }
+    } else {
+        // individual: chain spacing from previous ACTIVE mode
+        // We'll preserve order by base_ratio ascending, but we must write back to original indices.
+        // Build an array of indices of active modes sorted by base_ratio.
+        int idxs[JB_MAX_MODES]; int count=0;
+        for(int i=0;i<x->n_modes;i++) if(x->m[i].active) idxs[count++] = i;
+        // simple insertion sort by base_ratio
+        for(int a=1;a<count;a++){
+            int j=a; int id=idxs[a];
+            while(j>0 && x->m[idxs[j-1]].base_ratio > x->m[id].base_ratio){ idxs[j]=idxs[j-1]; j--; }
+            idxs[j]=id;
+        }
+        // apply spacing
+        int first = -1;
+        for(int k=0;k<count;k++){
+            int i = idxs[k];
+            mode_t* md = &x->m[i];
+            if(first < 0){
+                md->ratio_now = md->base_ratio; // first stays where it is
+                first = i;
+            } else {
+                int prev_i = idxs[k-1];
+                mode_t* pm = &x->m[prev_i];
+                float d = (md->base_ratio - x->m[prev_i].base_ratio) * s;
+                md->ratio_now = pm->ratio_now + d;
+            }
+        }
+        // inactive modes: keep base
+        for(int i=0;i<x->n_modes;i++) if(!x->m[i].active) x->m[i].ratio_now = x->m[i].base_ratio;
+    }
 }
 
-static void bank_emit_body_state(t_juicy_bank_tilde *x){
-t_atom av[64]; int i=0;
-SETSYMBOL(av+i, gensym("base_hz")); i++; SETFLOAT(av+i, x->base_hz); i++;
-SETSYMBOL(av+i, gensym("n_modes")); i++; SETFLOAT(av+i, (t_float)x->N); i++;
-SETSYMBOL(av+i, gensym("n_active")); i++; SETFLOAT(av+i, (t_float)x->n_active); i++;
-SETSYMBOL(av+i, gensym("mix_scale")); i++; SETFLOAT(av+i, x->mix_scale); i++;
-SETSYMBOL(av+i, gensym("damping")); i++; SETFLOAT(av+i, x->damping); i++;
-SETSYMBOL(av+i, gensym("brightness")); i++; SETFLOAT(av+i, x->brightness); i++;
-SETSYMBOL(av+i, gensym("position")); i++; SETFLOAT(av+i, x->position); i++;
-SETSYMBOL(av+i, gensym("dispersion")); i++; SETFLOAT(av+i, x->dispersion); i++;
-SETSYMBOL(av+i, gensym("coupling")); i++; SETFLOAT(av+i, x->coupling); i++;
-SETSYMBOL(av+i, gensym("density")); i++; SETFLOAT(av+i, x->density); i++;
-SETSYMBOL(av+i, gensym("anisotropy")); i++; SETFLOAT(av+i, x->anisotropy); i++;
-SETSYMBOL(av+i, gensym("aniso_P")); i++; SETFLOAT(av+i, (t_float)x->aniso_P); i++;
-SETSYMBOL(av+i, gensym("contact")); i++; SETFLOAT(av+i, x->contact); i++;
-SETSYMBOL(av+i, gensym("contact_soft")); i++; SETFLOAT(av+i, x->contact_soft); i++;
-outlet_anything(x->outBody, gensym("body_state"), i, av);
+// Re-roll dispersion targets (respect fundamental immunity)
+static void jb_reroll_dispersion_targets(t_juicy_bank_tilde* x){
+    // Deterministic per seed: use index to stir RNG for stable signature
+    for(int i=0;i<x->n_modes;i++){
+        mode_t* md = &x->m[i];
+        if(!md->active){ x->disp_target[i] = 0.f; continue; }
+        if(i == x->fundamental_idx){ x->disp_target[i] = 0.f; continue; }
+        // signature is fixed per mode; target is signature * amount * 1.0 (max ±1 ratio at full dispersion)
+        x->disp_target[i] = md->disp_signature * x->dispersion;
+    }
 }
 
-static void bank_emit_res_selected(t_juicy_bank_tilde *x){
-int k = x->edit_idx; if (k<1 || k>x->N) return;
-t_mode *m = &x->m[k-1];
-t_atom av[40]; int i=0;
-SETSYMBOL(av+i, gensym("id")); i++; SETFLOAT(av+i, (t_float)k); i++;
-SETSYMBOL(av+i, gensym("active")); i++; SETFLOAT(av+i, (t_float)(m->active!=0)); i++;
-SETSYMBOL(av+i, gensym("freq")); i++; SETFLOAT(av+i, (t_float)m->freq_hz); i++;
-SETSYMBOL(av+i, gensym("ratio")); i++; SETFLOAT(av+i, (t_float)m->ratio); i++;
-SETSYMBOL(av+i, gensym("key")); i++; SETFLOAT(av+i, (t_float)(m->keytrack!=0)); i++;
-SETSYMBOL(av+i, gensym("gain")); i++; SETFLOAT(av+i, (t_float)m->gain); i++;
-SETSYMBOL(av+i, gensym("attack_ms")); i++; SETFLOAT(av+i, (t_float)m->attack_ms); i++;
-SETSYMBOL(av+i, gensym("decay_ms")); i++; SETFLOAT(av+i, (t_float)m->decay_ms); i++;
-SETSYMBOL(av+i, gensym("pan")); i++; SETFLOAT(av+i, (t_float)m->pan); i++;
-SETSYMBOL(av+i, gensym("amp_w")); i++; SETFLOAT(av+i, m->amp_w); i++;
-SETSYMBOL(av+i, gensym("r_w")); i++; SETFLOAT(av+i, m->r_w); i++;
-SETSYMBOL(av+i, gensym("pos_w")); i++; SETFLOAT(av+i, m->pos_w); i++;
-SETSYMBOL(av+i, gensym("aniso_w")); i++; SETFLOAT(av+i, m->aniso_w); i++;
-outlet_anything(x->outRes, gensym("res_state"), i, av);
+// Smoothly move current offsets toward targets
+static void jb_slew_dispersion(t_juicy_bank_tilde* x){
+    float a = x->dispersion_slew;
+    for(int i=0;i<x->n_modes;i++){
+        x->disp_offset[i] = jb_mmix(x->disp_offset[i], x->disp_target[i], a);
+    }
 }
 
-static inline double contact_shaper(double x, double amt, double soft){
-if (amt<=0.0) return x;
-double k = amt / (soft>1e-6?soft:1.0);
-return tanh(k*x);
+// Apply brightness / anisotropy / position weights into gain_now (multiplicative on base_gain)
+static void jb_update_per_mode_gains(t_juicy_bank_tilde* x){
+    // Setup
+    float b = x->brightness; // 0..1
+    float t = 2.f*(b - 0.5f); // -1..+1 ; negative mutes highs, positive boosts highs
+    float alpha = x->brightness_alpha; // slope
+    float eps = x->epsilon_near_int;
+
+    // Determine integer-ish harmonic index for position (using nearest integer of ratio)
+    // Position default 0 means bypass.
+    float pos = x->position;
+    int use_pos = (pos > 0.f);
+
+    for(int i=0;i<x->n_modes;i++){
+        mode_t* md = &x->m[i];
+        if(!md->active){
+            md->gain_now = 0.f;
+            continue;
+        }
+
+        // Start from base gain
+        float g = md->base_gain;
+
+        // Brightness tilt: factor = pow(ratio_now / 1.0, alpha * t)
+        float r = md->ratio_now + x->disp_offset[i];
+        if (r < 0.0001f) r = 0.0001f;
+        float bright_fac = powf(r, alpha * t);
+        // Keep fundamental exactly 1.0 always
+        if(i == x->fundamental_idx) bright_fac = 1.f;
+        g *= bright_fac;
+
+        // Anisotropy: classify "even" if near-integer, else "odd"
+        int is_even = jb_is_near_integer(r, eps);
+        float a = x->anisotropy; // -1..+1; +1 => mute "odd", -1 => mute "even"
+        float w = 1.f;
+        if (i != x->fundamental_idx){
+            if (a > 0.f){ // favor even => mute odd proportionally
+                if(!is_even){
+                    float k = jb_clamp(a, 0.f, 1.f);
+                    // continuous mute
+                    w *= (1.f - k);
+                }
+            } else if (a < 0.f){ // favor odd => mute even proportionally
+                if(is_even){
+                    float k = jb_clamp(-a, 0.f, 1.f);
+                    w *= (1.f - k);
+                }
+            }
+        }
+        g *= jb_clamp(w, 0.f, 1.f);
+
+        // Position: if pos>0, apply node weighting by integer harmonic index k=round(ratio)
+        if (use_pos){
+            int k = (int)floorf(r + 0.5f);
+            if (k < 1) k = 1;
+            float pw = fabsf(sinf(M_PI * (float)k * pos));
+            // true nodes allowed => no floor
+            g *= pw;
+        }
+
+        md->gain_now = g;
+    }
 }
 
+// Given decay_ms_now per mode, compute filter coeffs a1,a2
+static void jb_update_coeffs(t_juicy_bank_tilde* x){
+    float sr = x->sr;
+    for(int i=0;i<x->n_modes;i++){
+        mode_t* md = &x->m[i];
+        if(!md->active){
+            md->a1 = 0.f; md->a2 = 0.f; md->y1 = md->y2 = 0.f;
+            continue;
+        }
+        float ratio = md->ratio_now + x->disp_offset[i];
+        if(ratio < 0.0001f) ratio = 0.0001f;
+        // Assume fundamental frequency is provided separately through "base frequency" * ratio outside this object,
+        // but if not, we can treat base as 100 Hz (user should set actual freqs via "freq" list).
+        // For safety, we will expect user-provided absolute frequencies through freq[] list, not ratio.
+        // Here we interpret ratio_now as a multiplier applied to a base fundamental f0 of 100Hz unless freq list sets absolute.
+        // We'll store absolute freq into ratio_now for simplicity: treat ratio_now as absolute Hz if freq[] used.
+        float f = ratio; // assume absolute Hz already set
+        float w = 2.f * M_PI * (f / sr);
+        if (w > M_PI) w = M_PI;
+
+        // Map decay_ms_now to r such that -60dB in T60 = decay_ms_now
+        float T60 = jb_clamp(md->decay_ms_now, 0.f, 1e6f) * 0.001f; // seconds
+        float r = (T60 <= 0.f) ? 0.f : powf(10.f, -3.f / (T60 * sr)); // 0.001 factor over T60
+
+        float c = cosf(w);
+        md->a1 = 2.f * r * c;
+        md->a2 = -r * r;
+        // note: base_gain (and later weights) go on the input drive
+    }
+}
+
+// Contact shaping (with symmetry and make-up).
+// - sym in [-1,1], amt in [0,1].
+// - y is mode signal; env controls engagement threshold.
+static inline float jb_contact_shape(float y, float amt, float sym){
+    if(amt <= 0.f) return y;
+    // asymmetric soft clip:
+    // shift via symmetry: positive half boosted when sym>0, negative when sym<0
+    float sign_bias = sym * 0.5f; // in [-0.5, 0.5]
+    float z = y + sign_bias * y * y; // quadratic asymmetry
+    // soft clip with amt controlling drive
+    float drive = 1.f + 10.f * amt;
+    float shaped = tanhf(drive * z);
+    // auto-makeup: scale to keep small-signal slope ~1
+    // derivative at 0 = drive, for tanh(drive*x) -> slope = drive; compensate by 1/drive
+    float makeup = (drive > 0.f) ? (1.f / drive) : 1.f;
+    return shaped * makeup;
+}
+
+// DSP perform
 static t_int *juicy_bank_tilde_perform(t_int *w){
-t_juicy_bank_tilde *x = (t_juicy_bank_tilde *)(w[1]);
-t_sample *inL = (t_sample *)(w[2]);
-t_sample *inR = (t_sample *)(w[3]);
-t_sample *outL= (t_sample *)(w[4]);
-t_sample *outR= (t_sample *)(w[5]);
-int n = (int)(w[6]);
+    t_juicy_bank_tilde *x = (t_juicy_bank_tilde *)(w[1]);
+    t_sample *in = (t_sample *)(w[2]);
+    t_sample *out = (t_sample *)(w[3]);
+    int n = (int)(w[4]);
 
-bank_recalc_body(x);
+    // Smooth dispersion toward target each block
+    jb_slew_dispersion(x);
 
-int N = x->N;
-int nact = 0;
-for (int k=1; k<=N; ++k){
-t_mode *m = &x->m[k-1];
-m->active = (m->gain > 0.0005f) || (fabs(m->env) > 1e-6);
-if (m->active) nact++;
-bank_update_coeffs_one(x, k); // refresh each block
+    // Update per-mode gains (brightness/position/anisotropy), then coeffs (in case decay changed by damping)
+    jb_update_per_mode_gains(x);
+    jb_update_coeffs(x);
+
+    float env_tau = x->env_follower_tau;
+    float th = x->contact_threshold;
+    float camt = x->contact_amt;
+    float csym = x->contact_sym;
+
+    for(int i=0;i<n;i++){
+        float exc = in[i];
+        float sum = 0.f;
+
+        for(int m=0;m<x->n_modes;m++){
+            mode_t* md = &x->m[m];
+            if(!md->active || md->gain_now <= 0.f) continue;
+
+            // simple reson driven by input
+            float y = (md->a1 * md->y1 + md->a2 * md->y2) + (md->gain_now * exc);
+            md->y2 = md->y1;
+            md->y1 = y;
+
+            // envelope follower for contact gating
+            float abs_y = fabsf(y);
+            md->env = md->env + env_tau * (abs_y - md->env); // 1st order
+
+            // contact apply only when env exceeds threshold
+            if (camt > 0.f && md->env > th){
+                y = jb_contact_shape(y, camt, csym);
+            }
+
+            // (future) per-mode curve shaping could be applied here by scaling y using md->curve_amt and md->env
+
+            sum += y;
+        }
+
+        out[i] = sum;
+    }
+
+    return (w + 5);
 }
-x->n_active = nact;
-x->mix_scale = (nact>0)? (1.0f / sqrtf((float)nact)) : 1.0f;
 
-for (int i=0;i<n;++i){ outL[i]=0; outR[i]=0; }
-
-const double c_amt = x->contact;
-const double c_soft= x->contact_soft;
-for (int k=1; k<=N; ++k){
-t_mode *m = &x->m[k-1];
-if (!m->active) continue;
-double a1=m->a1, a2=m->a2, y1=m->y1, y2=m->y2;
-double env=m->env;
-double fs = (double)x->sr;
-double att = (m->attack_ms<=0? 0.0 : exp(-1.0/( (double)m->attack_ms*0.001 * fs )));
-double dec = (m->decay_ms <=0? 0.0 : exp(-1.0/( (double)m->decay_ms *0.001 * fs )));
-double gl=m->gl, gr=m->gr;
-double amp = (double)m->gain * (double)x->mix_scale * (double)m->amp_w * (double)m->aniso_w;
-
-for (int i=0;i<n;++i){
-double xin = 0.5*((double)inL[i] + (double)inR[i]) * (double)m->pos_w;
-double tgt = (fabs(xin) > 1e-9) ? 1.0 : 0.0;
-if (tgt > env) env = tgt + (env - tgt) * att; else env = tgt + (env - tgt) * dec;
-double y0 = a1*y1 + a2*y2 + xin;
-y2 = y1; y1 = y0;
-double ynl = contact_shaper(y0, c_amt, c_soft);
-double yamp= amp * env * ynl;
-outL[i] = (t_sample)denorm_fix( (double)outL[i] + yamp * gl );
-outR[i] = (t_sample)denorm_fix( (double)outR[i] + yamp * gr );
-}
-m->y1=y1; m->y2=y2; m->env=env;
-}
-
-return (t_int *)(w+7);
-}
+// ----- Pd boilerplate -----
 
 static void juicy_bank_tilde_dsp(t_juicy_bank_tilde *x, t_signal **sp){
-x->sr = sp[0]->s_sr;
-dsp_add(juicy_bank_tilde_perform, 6, x, sp[0]->s_vec, sp[1]->s_vec, sp[2]->s_vec, sp[3]->s_vec, sp[0]->s_n);
+    x->sr = sp[0]->s_sr;
+    dsp_add(juicy_bank_tilde_perform, 4, x, sp[0]->s_vec, sp[1]->s_vec, sp[0]->s_n);
 }
 
-// body setters
-static void set_damping (t_juicy_bank_tilde *x, t_floatarg f){ x->damping=f; }
-static void set_brightness(t_juicy_bank_tilde *x, t_floatarg f){ x->brightness=f; }
-static void set_position (t_juicy_bank_tilde *x, t_floatarg f){ x->position=f; }
-static void set_dispersion(t_juicy_bank_tilde *x, t_floatarg f){ x->dispersion=f; }
-static void set_coupling (t_juicy_bank_tilde *x, t_floatarg f){ x->coupling=f; }
-static void set_density (t_juicy_bank_tilde *x, t_floatarg f){ x->density=f; }
-static void set_anisotropy(t_juicy_bank_tilde *x, t_floatarg f){ x->anisotropy=f; }
-static void set_contact (t_juicy_bank_tilde *x, t_floatarg f){ x->contact=f; }
+// ----- Messages / Setters -----
 
-// edit cursor + per-mode setters
-static void set_idx (t_juicy_bank_tilde *x, t_floatarg f){
-int i = (int)f; if (i<1) i=1; if (i>x->N) i=x->N;
-x->edit_idx = i;
-bank_update_coeffs_one(x, x->edit_idx);
-bank_emit_res_selected(x);
-}
-static void set_ratio (t_juicy_bank_tilde *x, t_floatarg f){
-int k=x->edit_idx; if (k<1||k>x->N) return;
-if (f <= 0) f = 0.0001f;
-x->m[k-1].ratio = (float)f; x->m[k-1].dirty_coeffs = 1;
-bank_update_coeffs_one(x,k); bank_emit_res_selected(x);
-}
-static void set_gain (t_juicy_bank_tilde *x, t_floatarg f){
-int k=x->edit_idx; if (k<1||k>x->N) return;
-x->m[k-1].gain = clampf((float)f, 0.f, 1.f);
-bank_emit_body_state(x); bank_emit_res_selected(x);
-}
-static void set_attack (t_juicy_bank_tilde *x, t_floatarg f){
-int k=x->edit_idx; if (k<1||k>x->N) return;
-x->m[k-1].attack_ms = (f<0?0:f);
-bank_emit_res_selected(x);
-}
-static void set_decay (t_juicy_bank_tilde *x, t_floatarg f){
-int k=x->edit_idx; if (k<1||k>x->N) return;
-x->m[k-1].decay_ms = (f<0?0:f); x->m[k-1].dirty_coeffs = 1;
-bank_update_coeffs_one(x,k); bank_emit_res_selected(x);
-}
-static void set_pan (t_juicy_bank_tilde *x, t_floatarg f){
-int k=x->edit_idx; if (k<1||k>x->N) return;
-x->m[k-1].pan = clampf((float)f, -1.f, 1.f); mode_update_pan(&x->m[k-1]);
-bank_emit_res_selected(x);
-}
-static void set_keytr (t_juicy_bank_tilde *x, t_floatarg f){
-int k=x->edit_idx; if (k<1||k>x->N) return;
-x->m[k-1].keytrack = (f!=0)?1.f:0.f; x->m[k-1].dirty_coeffs = 1;
-bank_update_coeffs_one(x,k); bank_emit_res_selected(x);
+// Set number of modes (1..JB_MAX_MODES)
+static void juicy_bank_tilde_modes(t_juicy_bank_tilde *x, t_floatarg f){
+    int nm = (int)f;
+    if(nm < 1) nm = 1;
+    if(nm > JB_MAX_MODES) nm = JB_MAX_MODES;
+    x->n_modes = nm;
 }
 
-// global messages
-static void msg_base(t_juicy_bank_tilde *x, t_floatarg f){
-x->base_hz = (f>0?f:440.f);
-for (int k=1;k<=x->N;++k){ x->m[k-1].dirty_coeffs=1; bank_update_coeffs_one(x,k); }
-bank_emit_body_state(x); bank_emit_res_selected(x);
-}
-static void msg_N(t_juicy_bank_tilde *x, t_floatarg f){
-int oldN = x->N;
-int n = (int)f; if (n<1) n=1; if (n>MAXN) n=MAXN;
-x->N = n;
-if (n > oldN){
-for (int k=oldN+1; k<=n; ++k){
-t_mode *m=&x->m[k-1];
-m->ratio=1.f; m->gain=0.f; m->attack_ms=0.f; m->decay_ms=600.f; m->pan=0.f; m->keytrack=1.f;
-m->a1=m->a2=m->y1=m->y2=m->env=0.0; m->gl=1.0; m->gr=0.0; m->freq_hz=0.0; m->rcur=0.0;
-m->amp_w=1.f; m->r_w=1.f; m->pos_w=1.f; m->aniso_w=1.f;
-m->active=0; m->dirty_coeffs=1;
-bank_update_coeffs_one(x,k);
-}
-}
-if (x->edit_idx > x->N) x->edit_idx = x->N;
-bank_emit_body_state(x); bank_emit_res_selected(x);
-}
-static void msg_anisoP(t_juicy_bank_tilde *x, t_floatarg f){
-int p=(int)f; if (p<1) p=1; x->aniso_P=p;
-for (int k=1;k<=x->N;++k){ x->m[k-1].dirty_coeffs=1; bank_update_coeffs_one(x,k); }
-bank_emit_body_state(x); bank_emit_res_selected(x);
-}
-static void msg_contact_soft(t_juicy_bank_tilde *x, t_floatarg f){
-x->contact_soft = clampf(f, 0.5f, 10.f); bank_emit_body_state(x);
-}
-static void msg_reset(t_juicy_bank_tilde *x){ for (int k=1;k<=x->N;++k){ x->m[k-1].y1=0; x->m[k-1].y2=0; x->m[k-1].env=0; } }
-static void msg_bang(t_juicy_bank_tilde *x){ bank_emit_body_state(x); bank_emit_res_selected(x); }
-static void msg_debug(t_juicy_bank_tilde *x, t_floatarg f){
-x->debug = (f!=0);
-if (!x->debug) return;
-post("[juicy_bank~] base=%.2f N=%d damp=%.3f bright=%.3f pos=%.3f disp=%.3f dens=%.3f aniso=%.3f P=%d contact=%.3f soft=%.3f",
-x->base_hz, x->N, x->damping, x->brightness, x->position, x->dispersion, x->density, x->anisotropy, x->aniso_P, x->contact, x->contact_soft);
-for (int k=1;k<=x->N;++k){
-t_mode *m=&x->m[k-1];
-post(" id=%d act=%d f=%.2fHz r=%.6f ratio=%.3f key=%d gain=%.3f att=%.1fms dec=%.1fms pan=%.2f ampW=%.3f rW=%.3f posW=%.3f anisoW=%.3f",
-k, m->active, m->freq_hz, m->rcur, m->ratio, (int)(m->keytrack!=0), m->gain, m->attack_ms, m->decay_ms, m->pan,
-m->amp_w, m->r_w, m->pos_w, m->aniso_w);
-}
-}
-static void msg_bug_catch(t_juicy_bank_tilde *x){
-post("=== juicy_bank~ bug_catch ===");
-post("fs=%.1f base=%.2f N=%d damp=%.3f bright=%.3f pos=%.3f disp=%.3f dens=%.3f aniso=%.3f P=%d contact=%.3f soft=%.3f couple_df=%.1f",
-(double)x->sr, x->base_hz, x->N, x->damping, x->brightness, x->position, x->dispersion, x->density, x->anisotropy, x->aniso_P, x->contact, x->contact_soft, x->couple_df);
-post("n_active=%d mix_scale=%.3f edit_idx=%d", x->n_active, x->mix_scale, x->edit_idx);
-for (int k=1;k<=x->N;++k){
-t_mode *m=&x->m[k-1];
-post("id=%d act=%d f=%.2fHz r=%.6f ratio=%.3f key=%d gain=%.3f att=%.1fms dec=%.1fms pan=%.2f ampW=%.3f posW=%.3f anisoW=%.3f",
-k, m->active, m->freq_hz, m->rcur, m->ratio, (int)(m->keytrack!=0), m->gain, m->attack_ms, m->decay_ms, m->pan, m->amp_w, m->pos_w, m->aniso_w);
-}
-bank_emit_body_state(x);
-bank_emit_res_selected(x);
+// Activate/deactivate a mode by index (1-based)
+static void juicy_bank_tilde_active(t_juicy_bank_tilde *x, t_floatarg idxf, t_floatarg onf){
+    int idx = (int)idxf - 1;
+    if(idx < 0 || idx >= x->n_modes) return;
+    x->m[idx].active = (onf > 0.f) ? 1 : 0;
+    // if activated new mode, assign a new dispersion signature based on seed+index
+    jb_rng_t tmp = x->rng;
+    for(int k=0;k<=idx;k++) jb_rng_u32(&tmp);
+    x->m[idx].disp_signature = jb_rng_bi(&tmp);
+    // recompute fundamental
+    x->fundamental_idx = jb_find_fundamental(x);
 }
 
-// ctor/dtor
+// Set per-mode base ratio (interpreted as absolute frequency in Hz if you prefer; typical workflow sets absolute freqs)
+static void juicy_bank_tilde_ratio(t_juicy_bank_tilde *x, t_floatarg idxf, t_floatarg ratio){
+    int idx = (int)idxf - 1;
+    if(idx < 0 || idx >= x->n_modes) return;
+    if(ratio < 0.f) ratio = 0.f;
+    x->m[idx].base_ratio = ratio;
+    x->m[idx].ratio_now = ratio;
+    x->fundamental_idx = jb_find_fundamental(x);
+}
+
+// Set per-mode base decay (ms)
+static void juicy_bank_tilde_decay(t_juicy_bank_tilde *x, t_floatarg idxf, t_floatarg ms){
+    int idx = (int)idxf - 1;
+    if(idx < 0 || idx >= x->n_modes) return;
+    if(ms < 0.f) ms = 0.f;
+    x->m[idx].base_decay_ms = ms;
+}
+
+// Set per-mode base gain (0..1)
+static void juicy_bank_tilde_gain(t_juicy_bank_tilde *x, t_floatarg idxf, t_floatarg g){
+    int idx = (int)idxf - 1;
+    if(idx < 0 || idx >= x->n_modes) return;
+    x->m[idx].base_gain = jb_clamp(g, 0.f, 1.f);
+}
+
+// Batch lists: freq[], decay[], amp[] — lengths up to n_modes
+static void juicy_bank_tilde_freqlist(t_juicy_bank_tilde *x, t_symbol* s, int argc, t_atom* argv){
+    int n = (argc < x->n_modes)? argc : x->n_modes;
+    for(int i=0;i<n;i++){
+        if(argv[i].a_type == A_FLOAT){
+            float v = atom_getfloat(argv+i);
+            if (v < 0.f) v = 0.f;
+            x->m[i].base_ratio = v; // interpret as absolute Hz for simplicity
+            x->m[i].ratio_now  = v;
+        }
+    }
+    x->fundamental_idx = jb_find_fundamental(x);
+}
+static void juicy_bank_tilde_decaylist(t_juicy_bank_tilde *x, t_symbol* s, int argc, t_atom* argv){
+    int n = (argc < x->n_modes)? argc : x->n_modes;
+    for(int i=0;i<n;i++){
+        if(argv[i].a_type == A_FLOAT){
+            float v = atom_getfloat(argv+i);
+            if (v < 0.f) v = 0.f;
+            x->m[i].base_decay_ms = v;
+        }
+    }
+}
+static void juicy_bank_tilde_amplist(t_juicy_bank_tilde *x, t_symbol* s, int argc, t_atom* argv){
+    int n = (argc < x->n_modes)? argc : x->n_modes;
+    for(int i=0;i<n;i++){
+        if(argv[i].a_type == A_FLOAT){
+            float v = atom_getfloat(argv+i);
+            x->m[i].base_gain = jb_clamp(v, 0.f, 1.f);
+        }
+    }
+}
+
+// Global params
+
+static void juicy_bank_tilde_damping(t_juicy_bank_tilde *x, t_floatarg f){
+    x->damping = jb_clamp(f, 0.f, 1.f);
+    // apply to decay_now immediately
+    for(int i=0;i<x->n_modes;i++){
+        mode_t* md = &x->m[i];
+        md->decay_ms_now = md->base_decay_ms * (1.f - x->damping);
+    }
+}
+
+static void juicy_bank_tilde_brightness(t_juicy_bank_tilde *x, t_floatarg f){
+    x->brightness = jb_clamp(f, 0.f, 1.f);
+}
+
+static void juicy_bank_tilde_position(t_juicy_bank_tilde *x, t_floatarg f){
+    x->position = jb_clamp(f, 0.f, 1.f);
+}
+
+static void juicy_bank_tilde_dispersion(t_juicy_bank_tilde *x, t_floatarg f){
+    x->dispersion = jb_clamp(f, 0.f, 1.f);
+    // update targets based on current amount
+    jb_reroll_dispersion_targets(x);
+}
+
+static void juicy_bank_tilde_anisotropy(t_juicy_bank_tilde *x, t_floatarg f){
+    float a = f;
+    if(a < -1.f) a = -1.f;
+    if(a >  1.f) a =  1.f;
+    x->anisotropy = a;
+}
+
+static void juicy_bank_tilde_contact(t_juicy_bank_tilde *x, t_floatarg f){
+    x->contact_amt = jb_clamp(f, 0.f, 1.f);
+}
+static void juicy_bank_tilde_contact_sym(t_juicy_bank_tilde *x, t_floatarg f){
+    if(f < -1.f) f = -1.f;
+    if(f >  1.f) f =  1.f;
+    x->contact_sym = f;
+}
+
+// Density controls
+static void juicy_bank_tilde_density(t_juicy_bank_tilde *x, t_floatarg f){
+    float d = f; if(d < -1.f) d = -1.f; if(d > 1.f) d = 1.f;
+    x->density = d;
+    jb_apply_density(x); // recompute ratio_now baseline
+    jb_reroll_dispersion_targets(x); // update target offsets based on new ratios
+}
+
+static void juicy_bank_tilde_density_pivot(t_juicy_bank_tilde *x){
+    x->density_mode = DENSITY_PIVOT;
+    jb_apply_density(x);
+    jb_reroll_dispersion_targets(x);
+}
+static void juicy_bank_tilde_density_individual(t_juicy_bank_tilde *x){
+    x->density_mode = DENSITY_INDIVIDUAL;
+    jb_apply_density(x);
+    jb_reroll_dispersion_targets(x);
+}
+
+// Curve per mode: curve <index> <amount [-1..1]>
+static void juicy_bank_tilde_curve(t_juicy_bank_tilde *x, t_floatarg idxf, t_floatarg amt){
+    int idx = (int)idxf - 1;
+    if(idx < 0 || idx >= x->n_modes) return;
+    if(amt < -1.f) amt = -1.f;
+    if(amt >  1.f) amt =  1.f;
+    x->m[idx].curve_amt = amt;
+}
+
+// Seed + reroll
+static void juicy_bank_tilde_seed(t_juicy_bank_tilde *x, t_floatarg f){
+    uint32_t s = (uint32_t) (f < 0 ? -f : f);
+    if(s == 0) s = 1u;
+    x->seed_value = s;
+    jb_rng_seed(&x->rng, s);
+    // assign per-mode signatures deterministically
+    for(int i=0;i<x->n_modes;i++){
+        jb_rng_t tmp = x->rng;
+        for(int k=0;k<=i;k++) jb_rng_u32(&tmp);
+        x->m[i].disp_signature = jb_rng_bi(&tmp);
+    }
+    jb_reroll_dispersion_targets(x);
+}
+static void juicy_bank_tilde_dispersion_reroll(t_juicy_bank_tilde *x){
+    // rotate seed slightly for new constellation
+    x->seed_value = x->seed_value * 1664525u + 1013904223u;
+    jb_rng_seed(&x->rng, x->seed_value);
+    for(int i=0;i<x->n_modes;i++){
+        jb_rng_t tmp = x->rng;
+        for(int k=0;k<=i;k++) jb_rng_u32(&tmp);
+        x->m[i].disp_signature = jb_rng_bi(&tmp);
+    }
+    jb_reroll_dispersion_targets(x);
+}
+
+// ----- New -----
+// optional: set epsilon for "near-integer" classification (default 0.02)
+static void juicy_bank_tilde_aniso_epsilon(t_juicy_bank_tilde *x, t_floatarg f){
+    float e = f;
+    if(e < 0.f) e = 0.f;
+    if(e > 0.25f) e = 0.25f;
+    x->epsilon_near_int = e;
+}
+
+// ----- Constructor / Destructor -----
+
 static void *juicy_bank_tilde_new(t_symbol *s, int argc, t_atom *argv){
-(void)s;
-t_juicy_bank_tilde *x = (t_juicy_bank_tilde*)pd_new(juicy_bank_tilde_class);
-x->N=12; x->base_hz=440;
-x->damping=0; x->brightness=0; x->position=0.5f; x->dispersion=0;
-x->coupling=0; x->density=0; x->anisotropy=0; x->contact=0;
-x->aniso_P=2; x->contact_soft=2; x->couple_df=200;
-x->edit_idx=1; x->sr=44100; x->debug=0; x->n_active=0; x->mix_scale=1.f;
+    t_juicy_bank_tilde *x = (t_juicy_bank_tilde *)pd_new(gensym("juicy_bank_tilde")->s_thing);
+    inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_signal, &s_signal); // signal inlet (not strictly used)
+    x->outlet = outlet_new(&x->x_obj, &s_signal);
 
-for (int i=0;i<argc;i++){
-if (argv[i].a_type==A_SYMBOL){
-const char *k = atom_getsymbol(argv+i)->s_name;
-if ((!strcmp(k,"@N") || !strcmp(k,"N")) && i+1<argc && argv[i+1].a_type==A_FLOAT){
-int n=(int)atom_getfloat(argv+i+1); if (n<1) n=1; if (n>MAXN) n=MAXN; x->N=n; i++;
-} else if ((!strcmp(k,"@base") || !strcmp(k,"base")) && i+1<argc && argv[i+1].a_type==A_FLOAT){
-float b=atom_getfloat(argv+i+1); if (b>0) x->base_hz=b; i++;
-} else if ((!strcmp(k,"@aniso_P") || !strcmp(k,"aniso_P")) && i+1<argc && argv[i+1].a_type==A_FLOAT){
-int p=(int)atom_getfloat(argv+i+1); if (p<1) p=1; x->aniso_P=p; i++;
-} else if ((!strcmp(k,"@contact_soft") || !strcmp(k,"contact_soft")) && i+1<argc && argv[i+1].a_type==A_FLOAT){
-float cs=atom_getfloat(argv+i+1); if (cs<0.5f) cs=0.5f; if (cs>10.f) cs=10.f; x->contact_soft=cs; i++;
-}
-}
+    x->sr = sys_getsr();
+    if (x->sr <= 0) x->sr = 48000.f;
+
+    x->n_modes = JB_MAX_MODES;
+    for(int i=0;i<JB_MAX_MODES;i++){
+        mode_t* md = &x->m[i];
+        md->active = (i < 8) ? 1 : 0;
+        md->base_ratio = (float)(i+1); // default rough harmonic-ish
+        md->base_decay_ms = 500.f;
+        md->base_gain = 0.2f;
+        md->ratio_now = md->base_ratio;
+        md->decay_ms_now = md->base_decay_ms;
+        md->gain_now = md->base_gain;
+        md->a1 = 0.f; md->a2 = 0.f; md->y1 = 0.f; md->y2 = 0.f;
+        md->env = 0.f;
+        md->curve_amt = 0.f;
+        md->disp_signature = 0.f;
+        // defaults for cached
+    }
+
+    x->fundamental_idx = jb_find_fundamental(x);
+
+    // params defaults
+    x->damping = 0.f;
+    x->brightness = 0.5f;
+    x->position = 0.f;
+    x->dispersion = 0.f;
+    x->anisotropy = 0.f;
+    x->contact_amt = 0.f;
+    x->contact_sym = 0.f;
+    x->density = 0.f;
+    x->density_mode = DENSITY_PIVOT;
+
+    x->brightness_alpha = 0.75f;
+    x->env_follower_tau = 0.01f;  // follower smoothing
+    x->contact_threshold = 0.02f; // small threshold
+
+    x->epsilon_near_int = 0.02f;
+
+    jb_rng_seed(&x->rng, 1234567u);
+    x->seed_value = 1234567u;
+    for(int i=0;i<JB_MAX_MODES;i++){
+        x->pos_weight[i]=1.f;
+        x->disp_offset[i]=0.f;
+        x->disp_target[i]=0.f;
+        // signature
+        jb_rng_t tmp = x->rng;
+        for(int k=0;k<=i;k++) jb_rng_u32(&tmp);
+        x->m[i].disp_signature = jb_rng_bi(&tmp);
+    }
+
+    x->dispersion_slew = 0.05f; // smooth toward targets per block
+    x->density_slew    = 0.1f;
+    x->brightness_slew = 0.1f;
+
+    return (void *)x;
 }
 
-bank_recalc_body(x);
-for (int k=1; k<=x->N; ++k){
-t_mode *m=&x->m[k-1];
-m->ratio=1.f; m->gain=0.f; m->attack_ms=0.f; m->decay_ms=600.f; m->pan=0.f; m->keytrack=1.f;
-m->a1=m->a2=m->y1=m->y2=m->env=0.0; m->gl=1.0; m->gr=0.0; m->freq_hz=0.0; m->rcur=0.0;
-m->amp_w=1.f; m->r_w=1.f; m->pos_w=1.f; m->aniso_w=1.f;
-m->active=0; m->dirty_coeffs=1;
-bank_update_coeffs_one(x,k);
+static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
+    outlet_free(x->outlet);
 }
-// INT audible mode
-x->m[0].gain=1.f; x->m[0].ratio=1.f; x->m[0].decay_ms=600.f; x->edit_idx=1;
 
-// outlets
-x->outL = outlet_new(&x->x_obj, &s_signal);
-x->outR = outlet_new(&x->x_obj, &s_signal);
-x->outBody = outlet_new(&x->x_obj, &s_anything);
-x->outRes = outlet_new(&x->x_obj, &s_anything);
-
-// extra inlets
-inlet_new(&x->x_obj, &x->x_obj.ob_pd, gensym("signal"), gensym("signal"));
-inlet_new(&x->x_obj, &x->x_obj.ob_pd, gensym("float"), gensym("damping"));
-inlet_new(&x->x_obj, &x->x_obj.ob_pd, gensym("float"), gensym("brightness"));
-inlet_new(&x->x_obj, &x->x_obj.ob_pd, gensym("float"), gensym("position"));
-inlet_new(&x->x_obj, &x->x_obj.ob_pd, gensym("float"), gensym("dispersion"));
-inlet_new(&x->x_obj, &x->x_obj.ob_pd, gensym("float"), gensym("coupling"));
-inlet_new(&x->x_obj, &x->x_obj.ob_pd, gensym("float"), gensym("density"));
-inlet_new(&x->x_obj, &x->x_obj.ob_pd, gensym("float"), gensym("anisotropy"));
-inlet_new(&x->x_obj, &x->x_obj.ob_pd, gensym("float"), gensym("contact"));
-inlet_new(&x->x_obj, &x->x_obj.ob_pd, gensym("float"), gensym("idx"));
-inlet_new(&x->x_obj, &x->x_obj.ob_pd, gensym("float"), gensym("ratio"));
-inlet_new(&x->x_obj, &x->x_obj.ob_pd, gensym("float"), gensym("gain"));
-inlet_new(&x->x_obj, &x->x_obj.ob_pd, gensym("float"), gensym("attack"));
-inlet_new(&x->x_obj, &x->x_obj.ob_pd, gensym("float"), gensym("decay"));
-inlet_new(&x->x_obj, &x->x_obj.ob_pd, gensym("float"), gensym("pan"));
-inlet_new(&x->x_obj, &x->x_obj.ob_pd, gensym("float"), gensym("keytrack"));
-
-bank_emit_body_state(x);
-bank_emit_res_selected(x);
-return (void*)x;
-}
+// ----- Setup -----
 
 void juicy_bank_tilde_setup(void){
-juicy_bank_tilde_class = class_new(gensym("juicy_bank~"),
-(t_newmethod)juicy_bank_tilde_new, 0,
-sizeof(t_juicy_bank_tilde), CLASS_DEFAULT, A_GIMME, 0);
+    t_class *c = class_new(gensym("juicy_bank_tilde"),
+                           (t_newmethod)juicy_bank_tilde_new,
+                           (t_method)juicy_bank_tilde_free,
+                           sizeof(t_juicy_bank_tilde),
+                           CLASS_DEFAULT,
+                           A_GIMME, 0);
 
-class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_dsp, gensym("dsp"), A_CANT, 0);
-CLASS_MAINSIGNALIN(juicy_bank_tilde_class, t_juicy_bank_tilde, f_dummy);
+    class_addmethod(c, (t_method)juicy_bank_tilde_dsp, gensym("dsp"), A_CANT, 0);
 
-class_addmethod(juicy_bank_tilde_class, (t_method)set_damping, gensym("damping"), A_FLOAT, 0);
-class_addmethod(juicy_bank_tilde_class, (t_method)set_brightness, gensym("brightness"), A_FLOAT, 0);
-class_addmethod(juicy_bank_tilde_class, (t_method)set_position, gensym("position"), A_FLOAT, 0);
-class_addmethod(juicy_bank_tilde_class, (t_method)set_dispersion, gensym("dispersion"), A_FLOAT, 0);
-class_addmethod(juicy_bank_tilde_class, (t_method)set_coupling, gensym("coupling"), A_FLOAT, 0);
-class_addmethod(juicy_bank_tilde_class, (t_method)set_density, gensym("density"), A_FLOAT, 0);
-class_addmethod(juicy_bank_tilde_class, (t_method)set_anisotropy, gensym("anisotropy"), A_FLOAT, 0);
-class_addmethod(juicy_bank_tilde_class, (t_method)set_contact, gensym("contact"), A_FLOAT, 0);
+    CLASS_MAINSIGNALIN(c, t_juicy_bank_tilde, f_dummy);
 
-class_addmethod(juicy_bank_tilde_class, (t_method)set_idx, gensym("idx"), A_FLOAT, 0);
-class_addmethod(juicy_bank_tilde_class, (t_method)set_ratio, gensym("ratio"), A_FLOAT, 0);
-class_addmethod(juicy_bank_tilde_class, (t_method)set_gain, gensym("gain"), A_FLOAT, 0);
-class_addmethod(juicy_bank_tilde_class, (t_method)set_attack, gensym("attack"), A_FLOAT, 0);
-class_addmethod(juicy_bank_tilde_class, (t_method)set_decay, gensym("decay"), A_FLOAT, 0);
-class_addmethod(juicy_bank_tilde_class, (t_method)set_pan, gensym("pan"), A_FLOAT, 0);
-class_addmethod(juicy_bank_tilde_class, (t_method)set_keytr, gensym("keytrack"),A_FLOAT,0);
+    // Messages
+    class_addmethod(c, (t_method)juicy_bank_tilde_modes, gensym("modes"), A_DEFFLOAT, 0);
+    class_addmethod(c, (t_method)juicy_bank_tilde_active, gensym("active"), A_DEFFLOAT, A_DEFFLOAT, 0);
+    class_addmethod(c, (t_method)juicy_bank_tilde_ratio, gensym("ratio"), A_DEFFLOAT, A_DEFFLOAT, 0);
+    class_addmethod(c, (t_method)juicy_bank_tilde_decay, gensym("decay"), A_DEFFLOAT, A_DEFFLOAT, 0);
+    class_addmethod(c, (t_method)juicy_bank_tilde_gain,  gensym("gain"),  A_DEFFLOAT, A_DEFFLOAT, 0);
 
-class_addmethod(juicy_bank_tilde_class, (t_method)msg_base, gensym("base"), A_FLOAT, 0);
-class_addmethod(juicy_bank_tilde_class, (t_method)msg_N, gensym("N"), A_FLOAT, 0);
-class_addmethod(juicy_bank_tilde_class, (t_method)msg_anisoP, gensym("aniso_P"), A_FLOAT, 0);
-class_addmethod(juicy_bank_tilde_class, (t_method)msg_contact_soft, gensym("contact_soft"), A_FLOAT, 0);
-class_addmethod(juicy_bank_tilde_class, (t_method)msg_reset, gensym("reset"), 0);
-class_addmethod(juicy_bank_tilde_class, (t_method)msg_bang, gensym("bang"), 0);
-class_addmethod(juicy_bank_tilde_class, (t_method)msg_debug, gensym("debug"), A_FLOAT, 0);
-class_addmethod(juicy_bank_tilde_class, (t_method)msg_bug_catch, gensym("bug_catch"), 0);
+    class_addmethod(c, (t_method)juicy_bank_tilde_freqlist,   gensym("freq"),   A_GIMME, 0);
+    class_addmethod(c, (t_method)juicy_bank_tilde_decaylist,  gensym("decays"), A_GIMME, 0);
+    class_addmethod(c, (t_method)juicy_bank_tilde_amplist,    gensym("amps"),   A_GIMME, 0);
+
+    class_addmethod(c, (t_method)juicy_bank_tilde_damping,    gensym("damping"), A_DEFFLOAT, 0);
+    class_addmethod(c, (t_method)juicy_bank_tilde_brightness, gensym("brightness"), A_DEFFLOAT, 0);
+    class_addmethod(c, (t_method)juicy_bank_tilde_position,   gensym("position"), A_DEFFLOAT, 0);
+    class_addmethod(c, (t_method)juicy_bank_tilde_dispersion, gensym("dispersion"), A_DEFFLOAT, 0);
+    class_addmethod(c, (t_method)juicy_bank_tilde_anisotropy, gensym("anisotropy"), A_DEFFLOAT, 0);
+    class_addmethod(c, (t_method)juicy_bank_tilde_contact,    gensym("contact"), A_DEFFLOAT, 0);
+    class_addmethod(c, (t_method)juicy_bank_tilde_contact_sym,gensym("contact_symmetry"), A_DEFFLOAT, 0);
+    class_addmethod(c, (t_method)juicy_bank_tilde_density,    gensym("density"), A_DEFFLOAT, 0);
+    class_addmethod(c, (t_method)juicy_bank_tilde_density_pivot, gensym("density_pivot"), 0);
+    class_addmethod(c, (t_method)juicy_bank_tilde_density_individual, gensym("density_individual"), 0);
+
+    class_addmethod(c, (t_method)juicy_bank_tilde_curve, gensym("curve"), A_DEFFLOAT, A_DEFFLOAT, 0);
+
+    class_addmethod(c, (t_method)juicy_bank_tilde_seed, gensym("seed"), A_DEFFLOAT, 0);
+    class_addmethod(c, (t_method)juicy_bank_tilde_dispersion_reroll, gensym("dispersion_reroll"), 0);
+
+    class_addmethod(c, (t_method)juicy_bank_tilde_aniso_epsilon, gensym("aniso_epsilon"), A_DEFFLOAT, 0);
+
+    // finalize
+    // store the class pointer in Pd's symbol (so new() can find it)
+    gensym("juicy_bank_tilde")->s_thing = (t_pd*)c;
 }
