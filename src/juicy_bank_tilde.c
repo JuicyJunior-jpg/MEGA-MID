@@ -1,4 +1,3 @@
-
 // juicy_bank_tilde.c (fixed)
 // Resolves compile errors on Linux/macOS (mode_t conflict & Pd class boilerplate).
 
@@ -276,7 +275,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
     for(int i=0;i<n;i++){
         float exc = in[i];
-        float basef0 = in2 ? in2[i] : 0.f;
 
         float sum = 0.f;
 
@@ -301,7 +299,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         out[i] = sum;
     }
 
-    return (w + 5);
+    return (w + 6);
 }
 
 static void juicy_bank_tilde_dsp(t_juicy_bank_tilde *x, t_signal **sp){
