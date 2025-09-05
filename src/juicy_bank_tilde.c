@@ -221,10 +221,12 @@ double fs = (double)x->sr;
 double att = (m->attack_ms<=0? 0.0 : exp(-1.0/( (double)m->attack_ms*0.001 * fs )));
 double dec = (m->decay_ms <=0? 0.0 : exp(-1.0/( (double)m->decay_ms *0.001 * fs )));
     double gl=m->gl, gr=m->gr;
+    // per-mode gain is a pure scalar; body weighting happens in the exciter path
     double amp = (double)m->gain * (double)x->mix_scale;
 
     for (int i=0;i<n;++i){
         double xin = 0.5*((double)inL[i] + (double)inR[i]) * (double)m->amp_w;
+        // apply optional contact non-linearity before the resonator
         xin = contact_shaper(xin, c_amt, c_soft);
         double tgt = (fabs(xin) > 1e-9) ? 1.0 : 0.0;
         if (tgt > env)
