@@ -159,11 +159,18 @@ static int jb_find_fundamental(t_juicy_bank_tilde* x){
 static void jb_apply_density(t_juicy_bank_tilde* x){
     float s = 1.f + 0.5f * x->density; // -1..1 -> 0.5..1.5
     if (x->density_mode == DENSITY_PIVOT){
+        float r_pivot = 1.f;
+        if (x->fundamental_idx >= 0)
+            r_pivot = x->m[x->fundamental_idx].base_ratio;
         for (int i=0;i<x->n_modes;i++){
             jb_mode_t* md=&x->m[i];
             if (!md->active){ md->ratio_now=md->base_ratio; continue; }
-            if (i == x->fundamental_idx){ md->ratio_now = 1.f; continue; }
-            md->ratio_now = 1.f + (md->base_ratio - 1.f) * s;
+            if (i == x->fundamental_idx){
+                // fundamental is the reference; do not move it
+                md->ratio_now = md->base_ratio;
+            } else {
+                md->ratio_now = r_pivot + (md->base_ratio - r_pivot) * s;
+            }
         }
     } else {
         // density_individual: scale spacing relative to previous ACTIVE, sorted by base_ratio
@@ -276,10 +283,22 @@ static void jb_update_coeffs(t_juicy_bank_tilde* x){
 
         float T60 = jb_clamp(md->decay_ms_now, 0.f, 1e6f) * 0.001f; // seconds
         float r = (T60 <= 0.f) ? 0.f : powf(10.f, -3.f / (T60 * sr));
+        // morph decay shape: curve<0 -> faster/exponential-ish; curve>0 -> slower/log-ish
+        float ca = md->curve_amt;
+        float r_eff = r;
+        if (ca < 0.f){
+            float p = 1.f + (-ca)*2.f;        // 1..3
+            r_eff = powf(r, p);
+        } else if (ca > 0.f){
+            float p = 1.f - 0.75f*ca;         // 1..0.25
+            float one_m_r = 1.f - r;
+            if (one_m_r < 1e-6f) one_m_r = 1e-6f;
+            r_eff = 1.f - powf(one_m_r, p);   // push toward slower/log-like tail
+        }
 
         float c = cosf(w);
-        md->a1 = 2.f * r * c;
-        md->a2 = -r * r;
+        md->a1 = 2.f * r_eff * c;
+        md->a2 = -r_eff * r_eff;
     }
 }
 
@@ -340,11 +359,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         if (!isnan(x->f_pan_in)){    md->pan           = jb_clamp(x->f_pan_in, -1.f, 1.f);                        x->f_pan_in    = NAN; }
     }
 
-    // determine active (gain > 0 or ringing), find fundamental
-    for (int i=0;i<x->n_modes;i++){
-        jb_mode_t* md=&x->m[i];
-        md->active = (md->base_gain > 0.0001f) || (fabsf(md->env) > 1e-6f);
-    }
+    // keep user-selected actives; just find fundamental among actives
     x->fundamental_idx = jb_find_fundamental(x);
 
     // density & dispersion
