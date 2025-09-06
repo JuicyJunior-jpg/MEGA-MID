@@ -520,6 +520,32 @@ static void juicy_bank_tilde_keytrack_on(t_juicy_bank_tilde *x, t_floatarg f){ x
 static void juicy_bank_tilde_basef0(t_juicy_bank_tilde *x, t_floatarg f){ x->basef0 = (f>0.f?f:x->basef0); }
 static void juicy_bank_tilde_base_alias(t_juicy_bank_tilde *x, t_floatarg f){ juicy_bank_tilde_basef0(x,f); }
 
+// reset: disable all modes except the fundamental; set that mode to ratio=1, gain=0.5, decay=500ms
+static void juicy_bank_tilde_reset(t_juicy_bank_tilde *x){
+    int idxF = jb_find_fundamental(x);
+    if (idxF < 0) idxF = 0;
+    // deactivate all
+    for (int i=0;i<x->n_modes;i++){
+        x->m[i].active = 0;
+        x->disp_offset[i] = 0.f;
+        x->disp_target[i] = 0.f;
+        x->m[i].y1 = x->m[i].y2 = x->m[i].drive = x->m[i].env = 0.f;
+    }
+    // configure fundamental
+    jb_mode_t* md = &x->m[idxF];
+    md->active = 1;
+    md->base_ratio = 1.f;
+    md->ratio_now  = 1.f;
+    md->base_gain  = 0.5f;
+    md->gain_now   = 0.5f;
+    md->base_decay_ms = 500.f;
+    md->decay_ms_now  = md->base_decay_ms * (1.f - x->damping);
+    md->curve_amt = 0.f;
+    md->attack_ms = 0.f;
+    md->pan = 0.f;
+}
+
+
 // seed / dispersion reroll
 static void juicy_bank_tilde_seed(t_juicy_bank_tilde *x, t_floatarg f){
     uint32_t s = (uint32_t)(f < 0 ? -f : f); if (s==0) s=1u;
@@ -695,4 +721,6 @@ void juicy_bank_tilde_setup(void){
     // dispersion randomization
     class_addmethod(juicy_bank_class, (t_method)juicy_bank_tilde_seed,             gensym("seed"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_class, (t_method)juicy_bank_tilde_dispersion_reroll,gensym("dispersion_reroll"), 0);
+    // utility
+    class_addmethod(juicy_bank_class, (t_method)juicy_bank_tilde_reset, gensym("reset"), 0);
 }
