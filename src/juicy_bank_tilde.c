@@ -551,18 +551,6 @@ static void juicy_bank_tilde_reset(t_juicy_bank_tilde *x){
     md->attack_ms = 0.f;
     md->pan = 0.f;
 }
-    // configure fundamental
-    jb_mode_t* md = &x->m[idxF];
-    md->active = 1;
-    md->base_ratio = 1.f;
-    md->ratio_now  = 1.f;
-    md->base_gain  = 0.5f;
-    md->gain_now   = 0.5f;
-    md->base_decay_ms = 500.f;
-    md->decay_ms_now  = md->base_decay_ms * (1.f - x->damping);
-    md->curve_amt = 0.f;
-    md->attack_ms = 0.f;
-    md->pan = 0.f;
 }
 
 
