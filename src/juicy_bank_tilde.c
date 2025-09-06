@@ -178,8 +178,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             }
             md->y_pre_last = y_lin;
             float e = (env>1.f)?1.f:((env<0.f)?0.f:env);
-            float e_sh=jb_shape_env(e,md->curve_amt);
-            float yamp=y*e_sh;
+            /* removed softening: do not multiply audio by envelope shape */
+            float yamp = y;
             outL[i]+=yamp*gl; outR[i]+=yamp*gr;
         }
         md->y1=y1; md->y2=y2; md->drive=drive; md->env=env;
