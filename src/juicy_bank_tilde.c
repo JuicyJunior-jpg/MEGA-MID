@@ -113,8 +113,11 @@ typedef struct _juicy_bank_tilde {
     float hp_a;
     float hpL_x1, hpL_y1, hpR_x1, hpR_y1;
 
-    // inlets (just to keep references if needed)
+    // inlets
     t_inlet *inR;
+    t_inlet *in_damp, *in_bright, *in_pos, *in_disp, *in_density,
+            *in_aniso, *in_contact, *in_idx, *in_ratio, *in_gain,
+            *in_attack, *in_decay, *in_curve, *in_pan, *in_keytrack;
     t_outlet *outL, *outR;
 } t_juicy_bank_tilde;
 
@@ -547,6 +550,11 @@ static void juicy_bank_tilde_dsp(t_juicy_bank_tilde *x, t_signal **sp){
 
 static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
     inlet_free(x->inR);
+    inlet_free(x->in_damp); inlet_free(x->in_bright); inlet_free(x->in_pos);
+    inlet_free(x->in_disp); inlet_free(x->in_density); inlet_free(x->in_aniso);
+    inlet_free(x->in_contact); inlet_free(x->in_idx); inlet_free(x->in_ratio);
+    inlet_free(x->in_gain); inlet_free(x->in_attack); inlet_free(x->in_decay);
+    inlet_free(x->in_curve); inlet_free(x->in_pan); inlet_free(x->in_keytrack);
     outlet_free(x->outL);
     outlet_free(x->outR);
 }
@@ -589,7 +597,30 @@ static void *juicy_bank_tilde_new(void){
         md->hit_gate=0; md->hit_cool=0; md->y_pre_last=0.f;
     }
 
+
+    // add inlets (left inlet is signal via CLASS_MAINSIGNALIN)
     x->inR = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_signal, &s_signal);
+
+    // float inlets routed to their setters
+    x->in_damp    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("damping"));
+    x->in_bright  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("brightness"));
+    x->in_pos     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("position"));
+    x->in_disp    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("dispersion"));
+    x->in_density = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("density"));
+
+    x->in_aniso   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("anisotropy"));
+    x->in_contact = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("contact"));
+
+    x->in_idx     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("idx"));
+    x->in_ratio   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("ratio"));
+    x->in_gain    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("gain"));
+    x->in_attack  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("attack"));
+    x->in_decay   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("decay"));
+    x->in_curve   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("curve"));
+    x->in_pan     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("pan"));
+
+    x->in_keytrack= inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("keytrack_on"));
+
     x->outL = outlet_new(&x->x_obj, &s_signal);
     x->outR = outlet_new(&x->x_obj, &s_signal);
 
