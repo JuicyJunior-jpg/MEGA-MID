@@ -524,13 +524,33 @@ static void juicy_bank_tilde_base_alias(t_juicy_bank_tilde *x, t_floatarg f){ ju
 static void juicy_bank_tilde_reset(t_juicy_bank_tilde *x){
     int idxF = jb_find_fundamental(x);
     if (idxF < 0) idxF = 0;
-    // deactivate all
+
+    // deactivate all and clear states/dispersion
     for (int i=0;i<x->n_modes;i++){
         x->m[i].active = 0;
         x->disp_offset[i] = 0.f;
         x->disp_target[i] = 0.f;
         x->m[i].y1 = x->m[i].y2 = x->m[i].drive = x->m[i].env = 0.f;
     }
+
+    // Set object to single-mode test state
+    x->n_modes = 1;
+    x->sel_index_f = 1.f;
+    x->sel_index   = 0;
+
+    // configure the fundamental (mode 0)
+    jb_mode_t* md = &x->m[0];
+    md->active = 1;
+    md->base_ratio = 1.f;
+    md->ratio_now  = 1.f;
+    md->base_gain  = 0.5f;
+    md->gain_now   = 0.5f;
+    md->base_decay_ms = 500.f;
+    md->decay_ms_now  = md->base_decay_ms * (1.f - x->damping);
+    md->curve_amt = 0.f;
+    md->attack_ms = 0.f;
+    md->pan = 0.f;
+}
     // configure fundamental
     jb_mode_t* md = &x->m[idxF];
     md->active = 1;
@@ -612,7 +632,7 @@ static void *juicy_bank_tilde_new(t_symbol *s, int argc, t_atom *argv){
     x->n_modes = 20;
     for (int i=0;i<JB_MAX_MODES;i++){
         jb_mode_t* md=&x->m[i];
-        md->active = (i < 8);
+        md->active = (i < 20);
         md->base_ratio = (float)(i+1);
         md->base_decay_ms = 500.f;
         md->base_gain = 0.2f;
@@ -725,4 +745,5 @@ void juicy_bank_tilde_setup(void){
     class_addmethod(juicy_bank_class, (t_method)juicy_bank_tilde_dispersion_reroll,gensym("dispersion_reroll"), 0);
     // utility
     class_addmethod(juicy_bank_class, (t_method)juicy_bank_tilde_reset, gensym("reset"), 0);
+    class_addmethod(juicy_bank_class, (t_method)juicy_bank_tilde_reset, gensym("restart"), 0);
 }
