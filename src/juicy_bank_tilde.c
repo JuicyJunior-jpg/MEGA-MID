@@ -397,7 +397,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     }
     x->hpL_x1 = x1L; x->hpL_y1 = y1L; x->hpR_x1 = x1R; x->hpR_y1 = y1R;
 
-    return (w + 6);
+    return (w + 7);
 }
 
 // ---------- messages
