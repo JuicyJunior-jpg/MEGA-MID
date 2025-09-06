@@ -16,6 +16,8 @@
 #include <string.h>
 #include <stdlib.h>
 
+static t_class *juicy_bank_tilde_class;
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -540,7 +542,7 @@ static void juicy_bank_tilde_restart(t_juicy_bank_tilde *x){ juicy_bank_tilde_re
 static void juicy_bank_tilde_dsp(t_juicy_bank_tilde *x, t_signal **sp){
     x->sr = sp[0]->s_sr;
     float fc = 8.f; float RC = 1.f/(2.f*M_PI*fc); float dt = 1.f/x->sr; x->hp_a = RC/(RC+dt);
-    dsp_add(juicy_bank_tilde_perform, 5, x, sp[0]->s_vec, sp[1]->s_vec, sp[2]->s_vec, sp[3]->s_vec, sp[0]->s_n);
+    dsp_add(juicy_bank_tilde_perform, 6, x, sp[0]->s_vec, sp[1]->s_vec, sp[2]->s_vec, sp[3]->s_vec, sp[0]->s_n);
 }
 
 static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
@@ -550,7 +552,7 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
 }
 
 static void *juicy_bank_tilde_new(void){
-    t_juicy_bank_tilde *x = (t_juicy_bank_tilde *)pd_new(gensym("juicy_bank_tilde")->s_thing);
+    t_juicy_bank_tilde *x = (t_juicy_bank_tilde *)pd_new(juicy_bank_tilde_class);
     // Default config
     x->sr = sys_getsr();
     if (x->sr <= 0) x->sr = 48000;
@@ -595,58 +597,57 @@ static void *juicy_bank_tilde_new(void){
 }
 
 void juicy_bank_tilde_setup(void){
-    t_class *c = class_new(gensym("juicy_bank~"),
+    juicy_bank_tilde_class = class_new(gensym("juicy_bank~"),
                            (t_newmethod)juicy_bank_tilde_new,
                            (t_method)juicy_bank_tilde_free,
                            sizeof(t_juicy_bank_tilde),
                            CLASS_DEFAULT, 0);
 
-    class_addmethod(c, (t_method)juicy_bank_tilde_dsp, gensym("dsp"), A_CANT, 0);
-    CLASS_MAINSIGNALIN(c, t_juicy_bank_tilde, f_dummy);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_dsp, gensym("dsp"), A_CANT, 0);
+    CLASS_MAINSIGNALIN(juicy_bank_tilde_class, t_juicy_bank_tilde, f_dummy);
 
     // structure
-    class_addmethod(c, (t_method)juicy_bank_tilde_modes, gensym("modes"), A_DEFFLOAT, 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_active, gensym("active"), A_DEFFLOAT, A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_modes, gensym("modes"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_active, gensym("active"), A_DEFFLOAT, A_DEFFLOAT, 0);
 
     // select + per-mode setters
-    class_addmethod(c, (t_method)juicy_bank_tilde_idx, gensym("idx"), A_DEFFLOAT, 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_ratio, gensym("ratio"), A_DEFFLOAT, 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_gain,  gensym("gain"),  A_DEFFLOAT, 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_attack,gensym("attack"),A_DEFFLOAT, 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_decay, gensym("decay"), A_DEFFLOAT, 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_curve, gensym("curve"), A_DEFFLOAT, 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_pan,   gensym("pan"),   A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_idx, gensym("idx"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_ratio, gensym("ratio"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_gain,  gensym("gain"),  A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_attack,gensym("attack"),A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_decay, gensym("decay"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_curve, gensym("curve"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pan,   gensym("pan"),   A_DEFFLOAT, 0);
 
     // batch
-    class_addmethod(c, (t_method)juicy_bank_tilde_freq,   gensym("freq"),   A_GIMME, 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_decays, gensym("decays"), A_GIMME, 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_amps,   gensym("amps"),   A_GIMME, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_freq,   gensym("freq"),   A_GIMME, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_decays, gensym("decays"), A_GIMME, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_amps,   gensym("amps"),   A_GIMME, 0);
 
     // globals
-    class_addmethod(c, (t_method)juicy_bank_tilde_damping,    gensym("damping"),    A_DEFFLOAT, 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_brightness, gensym("brightness"), A_DEFFLOAT, 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_position,   gensym("position"),   A_DEFFLOAT, 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_dispersion, gensym("dispersion"), A_DEFFLOAT, 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_seed,       gensym("seed"),       A_DEFFLOAT, 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_dispersion_reroll, gensym("dispersion_reroll"), 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_density,    gensym("density"),    A_DEFFLOAT, 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_density_pivot, gensym("density_pivot"), 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_density_individual, gensym("density_individual"), 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_anisotropy, gensym("anisotropy"), A_DEFFLOAT, 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_aniso_eps,  gensym("aniso_epsilon"), A_DEFFLOAT, 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_contact,    gensym("contact"),    A_DEFFLOAT, 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_contact_sym,gensym("contact_symmetry"), A_DEFFLOAT, 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_phase_random, gensym("phase_random"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_damping,    gensym("damping"),    A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_brightness, gensym("brightness"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_position,   gensym("position"),   A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_dispersion, gensym("dispersion"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_seed,       gensym("seed"),       A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_dispersion_reroll, gensym("dispersion_reroll"), 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_density,    gensym("density"),    A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_density_pivot, gensym("density_pivot"), 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_density_individual, gensym("density_individual"), 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_anisotropy, gensym("anisotropy"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_aniso_eps,  gensym("aniso_epsilon"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_contact,    gensym("contact"),    A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_contact_sym,gensym("contact_symmetry"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_phase_random, gensym("phase_random"), A_DEFFLOAT, 0);
 
     // pitch
-    class_addmethod(c, (t_method)juicy_bank_tilde_basef0,   gensym("basef0"), A_DEFFLOAT, 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_base_alias, gensym("base"), A_DEFFLOAT, 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_keytrack_on, gensym("keytrack_on"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_basef0,   gensym("basef0"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_base_alias, gensym("base"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_keytrack_on, gensym("keytrack_on"), A_DEFFLOAT, 0);
 
     // utility
-    class_addmethod(c, (t_method)juicy_bank_tilde_reset,   gensym("reset"), 0);
-    class_addmethod(c, (t_method)juicy_bank_tilde_restart, gensym("restart"), 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_reset,   gensym("reset"), 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_restart, gensym("restart"), 0);
 
-    class_sethelpsymbol(c, gensym("juicy_bank~"));
-    pd_class(&c);
+    class_sethelpsymbol(juicy_bank_tilde_class, gensym("juicy_bank~"));
 }
