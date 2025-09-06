@@ -551,7 +551,6 @@ static void juicy_bank_tilde_reset(t_juicy_bank_tilde *x){
     md->attack_ms = 0.f;
     md->pan = 0.f;
 }
-}
 
 
 // seed / dispersion reroll
