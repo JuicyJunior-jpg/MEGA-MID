@@ -685,6 +685,8 @@ void juicy_bank_tilde_setup(void){
 
     CLASS_MAINSIGNALIN(juicy_bank_class, t_juicy_bank_tilde, f_dummy);
     class_addmethod(juicy_bank_class, (t_method)juicy_bank_tilde_dsp, gensym("dsp"), A_CANT, 0);
+    class_addmethod(juicy_bank_class, (t_method)juicy_bank_tilde_modes, gensym("modes"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_class, (t_method)juicy_bank_tilde_active, gensym("active"), A_DEFFLOAT, A_DEFFLOAT, 0);
 
     // global setters
     class_addmethod(juicy_bank_class, (t_method)juicy_bank_tilde_damping,    gensym("damping"), A_DEFFLOAT, 0);
