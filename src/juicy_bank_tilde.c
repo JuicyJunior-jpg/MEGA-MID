@@ -1,7 +1,17 @@
-// juicy_bank~ — modal resonator bank (V2 + bandwidth + micro_detune)
-// This file includes the two new global messages:
-//   - bandwidth <0..1>      : twin-detuned partner per mode for subtle spectral width
-//   - micro_detune <0..1>   : stable ±0.01*depth ratio offsets per non-fundamental
+// juicy_bank~ — modal resonator bank (V3: proper curve shaping + bandwidth/micro_detune defaults + deeper micro_detune)
+// Changes in this version:
+//  1) Curve shaping is now a TRUE time-warp envelope that adapts to any decay length (ms).
+//     - curve = -1 .. +1 : -1 = full exponential (fast early, slow later),
+//                           0  = linear,
+//                           +1 = full logarithmic (slow early, fast later).
+//     - Implemented by multiplying the resonator output by S(u) = 10^{-3*(phi(u)-u)},
+//       where u = t/T60 (0..1), and phi(u) = u^gamma with gamma mapped from curve:
+//         curve < 0: gamma ∈ [0.35..1]  (more convex, faster early)
+//         curve > 0: gamma ∈ [1..3.0]  (more concave, slower early)
+//       This preserves the exact T60 but changes the decay *shape* correctly.
+//       Attack stays crisp because S(0)=1 and we reset u on hits (no env follower lag).
+//  2) Defaults at object creation: phase_random=1, bandwidth=1, micro_detune=1.
+//  3) micro_detune depth increased to ±0.05 * amount for all non-fundamentals (stable, seeded).
 //
 // Build (macOS):
 //   cc -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type \
@@ -50,6 +60,10 @@ typedef struct {
     float micro_sig;          // stable random in [-1,1] for micro_detune (fundamental = 0)
     int   hit_gate, hit_cool;
     float y_pre_last;
+
+    // curve shaping state
+    float t60_s;              // current T60 (seconds) for this mode
+    float decay_u;            // normalized time since last hit (0..1)
 } jb_mode_t;
 
 typedef struct _juicy_bank_tilde {
@@ -73,7 +87,7 @@ typedef struct _juicy_bank_tilde {
     // realism
     float phase_rand; int phase_debug;
     float bandwidth;          // 0..1, global twin-detune depth
-    float micro_detune;       // 0..1, global micro-ratio detune depth (±0.01 * depth)
+    float micro_detune;       // 0..1, global micro-ratio detune depth (±0.05 * depth)
 
     // rng
     jb_rng_t rng;
@@ -91,13 +105,7 @@ typedef struct _juicy_bank_tilde {
 
 static int jb_is_near_integer(float x, float eps){ float n=roundf(x); return fabsf(x-n)<=eps; }
 
-static float jb_shape_env(float e, float curve){
-    e = jb_clamp(e, 0.f, 1.f);
-    if (curve < 0.f){ float p = 1.f + (-curve)*2.f; return powf(e, p); }
-    else if (curve > 0.f){ float p = 1.f - 0.75f*curve; if (p<0.05f) p=0.05f; return 1.f - powf(1.f-e, p); }
-    else return e;
-}
-
+// Contact shaper (unchanged)
 static float jb_contact_shape(float x, float amt, float sym){
     float a = 1.f + 2.f*jb_clamp(amt,0.f,1.f);
     float s = 1.f + 0.5f*jb_clamp(sym,-1.f,1.f);
@@ -108,6 +116,7 @@ static float jb_contact_shape(float x, float amt, float sym){
     return y*makeup;
 }
 
+// Density mapping (unchanged)
 static void jb_update_density(t_juicy_bank_tilde *x){
     float s = 1.f + 0.5f * jb_clamp(x->density_amt, -1.f, 1.f);
     if (x->density_mode == DENSITY_PIVOT){
@@ -149,13 +158,38 @@ static float jb_position_weight(float ratio_rel, float pos){
     return fabsf(sinf((float)M_PI * k * jb_clamp(pos,0.f,1.f)));
 }
 
+// Compute multiplicative gain S(u) that warps linear T60 envelope into expo/log shape.
+// u in [0,1], curve in [-1,1].
+static inline float jb_curve_shape_gain(float u, float curve){
+    if (u <= 0.f) return 1.f;
+    if (u >= 1.f) return 1.f;
+    float gamma;
+    if (curve < 0.f){
+        // exponential: faster early, slower later -> gamma < 1
+        float t = -curve; // 0..1
+        gamma = 1.f - t*(1.f - 0.35f);  // map to [0.35..1]
+    } else if (curve > 0.f){
+        // logarithmic: slower early, faster later -> gamma > 1
+        float t = curve; // 0..1
+        gamma = 1.f + t*(3.0f - 1.f);   // map to [1..3]
+    } else {
+        return 1.f;
+    }
+    float phi = powf(jb_clamp(u,0.f,1.f), gamma);
+    float delta = phi - u;
+    // 60 dB over u in [0,1] -> linear envelope = 10^{-3 u}, shaped = 10^{-3 phi}
+    // multiplicative correction:
+    float g = powf(10.f, -3.f * delta);
+    return g;
+}
+
 static void jb_update_per_mode_gains(t_juicy_bank_tilde *x){
     for(int i=0;i<x->n_modes;i++){
         jb_mode_t *md=&x->m[i];
         if(!md->active){ md->gain_now=0.f; continue; }
 
         float ratio = md->ratio_now + x->disp_offset[i];
-        if(i!=0) ratio += md->micro_sig * 0.01f * jb_clamp(x->micro_detune,0.f,1.f);
+        if(i!=0) ratio += md->micro_sig * 0.05f * jb_clamp(x->micro_detune,0.f,1.f);
         if (ratio < 0.01f) ratio = 0.01f;
 
         float g = md->base_gain * jb_bright_gain(ratio, x->brightness);
@@ -184,10 +218,10 @@ static void jb_update_coeffs(t_juicy_bank_tilde *x){
 
     // update filter coeffs per mode (including micro_detune + bandwidth twin)
     for(int i=0;i<x->n_modes;i++){
-        jb_mode_t *md=&x->m[i]; if(!md->active){ md->a1=md->a2=0.f; md->a1b=md->a2b=0.f; continue; }
+        jb_mode_t *md=&x->m[i]; if(!md->active){ md->a1=md->a2=0.f; md->a1b=md->a2b=0.f; md->t60_s=0.f; continue; }
 
         float ratio = md->ratio_now + x->disp_offset[i];
-        if (i!=0) ratio += md->micro_sig * 0.01f * jb_clamp(x->micro_detune,0.f,1.f);
+        if (i!=0) ratio += md->micro_sig * 0.05f * jb_clamp(x->micro_detune,0.f,1.f);
         if (i==0) ratio = md->ratio_now; // fundamental immune to dispersion & micro_detune
 
         float Hz = x->keytrack_on ? (x->basef0 * ratio) : ratio;
@@ -195,13 +229,13 @@ static void jb_update_coeffs(t_juicy_bank_tilde *x){
         float w = 2.f * (float)M_PI * Hz / x->sr;
 
         md->decay_ms_now = md->base_decay_ms * (1.f - x->damping);
-        float T60 = jb_clamp(md->decay_ms_now, 0.f, 1e7f) * 0.001f;
+        float T60 = jb_clamp(md->decay_ms_now, 0.f, 1e7f) * 0.001f; // seconds
+        md->t60_s = T60;
         float r = (T60 <= 0.f) ? 0.f : powf(10.f, -3.f / (T60 * x->sr));
 
-        // curve shaping inside the feedback domain
-        float ca=md->curve_amt, r_eff=r;
-        if (ca<0.f){ float p=1.f+(-ca)*2.f; r_eff=powf(r,p); }
-        else if (ca>0.f){ float p=1.f-0.75f*ca; if(p<0.05f)p=0.05f; float one_m_r=1.f-r; if(one_m_r<1e-6f) one_m_r=1e-6f; r_eff=1.f-powf(one_m_r,p); }
+        // IMPORTANT: curve shaping is now in time domain (S(u) multiplier),
+        // so we keep filter radius r constant here.
+        float r_eff = r;
 
         float c=cosf(w);
         md->a1=2.f*r_eff*c; md->a2=-r_eff*r_eff;
@@ -209,9 +243,8 @@ static void jb_update_coeffs(t_juicy_bank_tilde *x){
         // bandwidth: add a second, slightly detuned twin
         float bw = jb_clamp(x->bandwidth, 0.f, 1.f);
         if (bw > 0.f){
-            // detune scales with mode index and bw depth, kept subtle
             float mode_scale = 0.15f + 0.85f * ((float)i / (float)(x->n_modes>1?x->n_modes-1:1));
-            float detune_ppm = 1000.f * bw * mode_scale; // parts-per-million equivalent (small)
+            float detune_ppm = 1000.f * bw * mode_scale; // small
             float w2 = w * (1.f + detune_ppm * 1e-6f);
             float c2 = cosf(w2);
             md->a1b = 2.f*r_eff*c2; md->a2b = -r_eff*r_eff;
@@ -237,24 +270,27 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     int phase_hits_block=0;
 
     float bw = jb_clamp(x->bandwidth, 0.f, 1.f);
-    float twin_mix = 0.12f * bw; // twin contribution, perceptual sweet spot
+    float twin_mix = 0.12f * bw; // twin contribution
 
     for(int m=0;m<x->n_modes;m++){
         jb_mode_t *md=&x->m[m]; if(!md->active || md->gain_now<=0.f) continue;
 
         float gl = sqrtf(0.5f*(1.f-md->pan)), gr = sqrtf(0.5f*(1.f+md->pan));
         float y1=md->y1, y2=md->y2, y1b=md->y1b, y2b=md->y2b, drive=md->drive, env=md->env;
+        float u = md->decay_u;  // normalized decay progress
 
         float att_ms = jb_clamp(md->attack_ms,0.f,500.f);
         float att_a = (att_ms<=0.f)?1.f:(1.f-expf(-1.f/(0.001f*att_ms*x->sr)));
         float th = 1e-4f;
+
+        float du = (md->t60_s > 1e-6f) ? (1.f / (md->t60_s * x->sr)) : 1.f;
 
         for(int i=0;i<n;i++){
             float exc=(inL[i]+inR[i]);
             float target=md->gain_now*exc;
             float abs_target=fabsf(target);
 
-            // per-hit phase randomization
+            // per-hit phase randomization + reset curve timer on hits
             if(x->phase_rand>0.f){
                 if(md->hit_cool>0) md->hit_cool--;
                 else {
@@ -262,11 +298,12 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                         float k=x->phase_rand*0.05f*abs_target;
                         float r1=jb_rng_bi(&x->rng), r2=jb_rng_bi(&x->rng);
                         y1+=k*r1; y2+=k*r2;
-                        if (bw>0.f){ // keep twin in step so it's coherent
+                        if (bw>0.f){
                             float r3=jb_rng_bi(&x->rng), r4=jb_rng_bi(&x->rng);
                             y1b+=k*r3; y2b+=k*r4;
                         }
                         md->hit_gate=1; md->hit_cool=(int)(x->sr*0.005f);
+                        u=0.f; // reset decay progress exactly at hit onset
                         phase_hits_block++;
                     }
                     if(abs_target<5e-4f) md->hit_gate=0;
@@ -288,6 +325,11 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 y_total += twin_mix * y_lin_b;
             }
 
+            // Proper curve shaping: multiply by time-warp gain S(u)
+            float S = jb_curve_shape_gain(u, md->curve_amt);
+            y_total *= S;
+            u += du; if(u>1.f) u=1.f;
+
             float abs_y=fabsf(y_total);
             env = env + 0.0015f*(abs_y - env);
 
@@ -300,11 +342,9 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             }
             md->y_pre_last = y_total;
 
-            // keep transients crisp (no per-sample env multiply)
-            float yamp = y;
-            outL[i]+=yamp*gl; outR[i]+=yamp*gr;
+            outL[i]+=y*gl; outR[i]+=y*gr;
         }
-        md->y1=y1; md->y2=y2; md->y1b=y1b; md->y2b=y2b; md->drive=drive; md->env=env;
+        md->y1=y1; md->y2=y2; md->y1b=y1b; md->y2b=y2b; md->drive=drive; md->env=env; md->decay_u=u;
     }
 
     // DC hygiene
@@ -431,6 +471,7 @@ static void juicy_bank_tilde_reset(t_juicy_bank_tilde *x){
         x->m[i].y1=x->m[i].y2=x->m[i].y1b=x->m[i].y2b=0.f;
         x->m[i].drive=x->m[i].env=0.f;
         x->m[i].hit_gate=0; x->m[i].hit_cool=0; x->m[i].y_pre_last=0.f;
+        x->m[i].decay_u=0.f;
     }
     x->n_modes=1; x->sel_index=0; x->sel_index_f=1.f;
     jb_mode_t *md=&x->m[0];
@@ -438,7 +479,7 @@ static void juicy_bank_tilde_reset(t_juicy_bank_tilde *x){
     md->base_gain=0.5f; md->gain_now=0.5f;
     md->base_decay_ms=500.f; md->decay_ms_now=md->base_decay_ms*(1.f-x->damping);
     md->curve_amt=0.f; md->attack_ms=0.f; md->pan=0.f;
-    md->a1=md->a2=md->a1b=md->a2b=0.f;
+    md->a1=md->a2=md->a1b=md->a2b=0.f; md->t60_s=md->base_decay_ms*0.001f; md->decay_u=0.f;
 }
 
 static void juicy_bank_tilde_restart(t_juicy_bank_tilde *x){ juicy_bank_tilde_reset(x); }
@@ -469,8 +510,10 @@ static void *juicy_bank_tilde_new(void){
     x->aniso=0.f; x->aniso_eps=0.02f;
     x->contact_amt=0.f; x->contact_sym=0.f;
     x->keytrack_on=1; x->keytrack_amount=1.f; x->basef0=440.f;
-    x->phase_rand=0.4f; x->phase_debug=0;
-    x->bandwidth=0.f; x->micro_detune=0.f;
+
+    // NEW defaults as requested:
+    x->phase_rand=1.f; x->phase_debug=0;
+    x->bandwidth=1.f; x->micro_detune=1.f;
 
     jb_rng_seed(&x->rng, 0xC0FFEEu);
 
@@ -490,6 +533,7 @@ static void *juicy_bank_tilde_new(void){
         md->disp_signature = (i==0) ? 0.f : jb_rng_bi(&x->rng);
         md->micro_sig      = (i==0) ? 0.f : jb_rng_bi(&x->rng);
         md->hit_gate=0; md->hit_cool=0; md->y_pre_last=0.f;
+        md->t60_s = md->base_decay_ms * 0.001f; md->decay_u=0.f;
     }
 
     x->inR = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_signal, &s_signal);
@@ -560,7 +604,6 @@ void juicy_bank_tilde_setup(void){
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_base_alias, gensym("base"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_keytrack_on, gensym("keytrack_on"), A_DEFFLOAT, 0);
 
-    // NEW realism messages
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bandwidth, gensym("bandwidth"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_micro_detune, gensym("micro_detune"), A_DEFFLOAT, 0);
 
