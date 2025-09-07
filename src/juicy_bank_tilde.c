@@ -1,17 +1,9 @@
-// juicy_bank~ — modal resonator bank (V3: proper curve shaping + bandwidth/micro_detune defaults + deeper micro_detune)
-// Changes in this version:
-//  1) Curve shaping is now a TRUE time-warp envelope that adapts to any decay length (ms).
-//     - curve = -1 .. +1 : -1 = full exponential (fast early, slow later),
-//                           0  = linear,
-//                           +1 = full logarithmic (slow early, fast later).
-//     - Implemented by multiplying the resonator output by S(u) = 10^{-3*(phi(u)-u)},
-//       where u = t/T60 (0..1), and phi(u) = u^gamma with gamma mapped from curve:
-//         curve < 0: gamma ∈ [0.35..1]  (more convex, faster early)
-//         curve > 0: gamma ∈ [1..3.0]  (more concave, slower early)
-//       This preserves the exact T60 but changes the decay *shape* correctly.
-//       Attack stays crisp because S(0)=1 and we reset u on hits (no env follower lag).
-//  2) Defaults at object creation: phase_random=1, bandwidth=1, micro_detune=1.
-//  3) micro_detune depth increased to ±0.05 * amount for all non-fundamentals (stable, seeded).
+// juicy_bank~ — modal resonator bank (V3.1: curve shaping + per‑hit micro_detune & bandwidth)
+// Updates in this drop:
+//  • Curve shaping preserved from V3 (true decay-length–aware expo/log time-warp)
+//  • NEW: micro_detune is now randomized per-hit (non-fundamentals), ±0.05 * amount (ratio units)
+//  • NEW: bandwidth twin detune is now randomized per-hit (small ± range chosen per mode index), scaled by amount
+//  • Defaults on load: phase_random=1, bandwidth=1, micro_detune=1
 //
 // Build (macOS):
 //   cc -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type \
@@ -57,13 +49,17 @@ typedef struct {
     float a1,a2, y1,y2, drive, env;
     float a1b,a2b, y1b,y2b;   // twin detuned partner for bandwidth
     float disp_signature;
-    float micro_sig;          // stable random in [-1,1] for micro_detune (fundamental = 0)
+    float micro_sig;          // legacy stable random in [-1,1] (kept for seeding)
     int   hit_gate, hit_cool;
     float y_pre_last;
 
     // curve shaping state
     float t60_s;              // current T60 (seconds) for this mode
     float decay_u;            // normalized time since last hit (0..1)
+
+    // NEW per-hit randomizations
+    float md_hit_offset;      // micro_detune per-hit raw offset in [-0.05..+0.05] (ratio units)
+    float bw_hit_ratio;       // bandwidth twin detune per-hit small ratio delta (e.g., ±0.0005..0.002)
 } jb_mode_t;
 
 typedef struct _juicy_bank_tilde {
@@ -86,8 +82,8 @@ typedef struct _juicy_bank_tilde {
 
     // realism
     float phase_rand; int phase_debug;
-    float bandwidth;          // 0..1, global twin-detune depth
-    float micro_detune;       // 0..1, global micro-ratio detune depth (±0.05 * depth)
+    float bandwidth;          // 0..1, scales bw_hit_ratio
+    float micro_detune;       // 0..1, scales md_hit_offset
 
     // rng
     jb_rng_t rng;
@@ -105,7 +101,7 @@ typedef struct _juicy_bank_tilde {
 
 static int jb_is_near_integer(float x, float eps){ float n=roundf(x); return fabsf(x-n)<=eps; }
 
-// Contact shaper (unchanged)
+// Contact shaper
 static float jb_contact_shape(float x, float amt, float sym){
     float a = 1.f + 2.f*jb_clamp(amt,0.f,1.f);
     float s = 1.f + 0.5f*jb_clamp(sym,-1.f,1.f);
@@ -116,7 +112,7 @@ static float jb_contact_shape(float x, float amt, float sym){
     return y*makeup;
 }
 
-// Density mapping (unchanged)
+// Density mapping
 static void jb_update_density(t_juicy_bank_tilde *x){
     float s = 1.f + 0.5f * jb_clamp(x->density_amt, -1.f, 1.f);
     if (x->density_mode == DENSITY_PIVOT){
@@ -158,38 +154,31 @@ static float jb_position_weight(float ratio_rel, float pos){
     return fabsf(sinf((float)M_PI * k * jb_clamp(pos,0.f,1.f)));
 }
 
-// Compute multiplicative gain S(u) that warps linear T60 envelope into expo/log shape.
-// u in [0,1], curve in [-1,1].
+// Curve time-warp multiplier S(u) with u in [0,1], curve in [-1,1]
 static inline float jb_curve_shape_gain(float u, float curve){
     if (u <= 0.f) return 1.f;
     if (u >= 1.f) return 1.f;
     float gamma;
     if (curve < 0.f){
-        // exponential: faster early, slower later -> gamma < 1
-        float t = -curve; // 0..1
-        gamma = 1.f - t*(1.f - 0.35f);  // map to [0.35..1]
+        float t = -curve; // 0..1, exponential: faster early, slower later
+        gamma = 1.f - t*(1.f - 0.35f);  // [0.35..1]
     } else if (curve > 0.f){
-        // logarithmic: slower early, faster later -> gamma > 1
-        float t = curve; // 0..1
-        gamma = 1.f + t*(3.0f - 1.f);   // map to [1..3]
-    } else {
-        return 1.f;
-    }
+        float t = curve;  // logarithmic: slower early, faster later
+        gamma = 1.f + t*(3.0f - 1.f);   // [1..3]
+    } else return 1.f;
     float phi = powf(jb_clamp(u,0.f,1.f), gamma);
     float delta = phi - u;
-    // 60 dB over u in [0,1] -> linear envelope = 10^{-3 u}, shaped = 10^{-3 phi}
-    // multiplicative correction:
-    float g = powf(10.f, -3.f * delta);
-    return g;
+    return powf(10.f, -3.f * delta);
 }
 
 static void jb_update_per_mode_gains(t_juicy_bank_tilde *x){
+    float md_amt = jb_clamp(x->micro_detune,0.f,1.f);
     for(int i=0;i<x->n_modes;i++){
         jb_mode_t *md=&x->m[i];
         if(!md->active){ md->gain_now=0.f; continue; }
 
         float ratio = md->ratio_now + x->disp_offset[i];
-        if(i!=0) ratio += md->micro_sig * 0.05f * jb_clamp(x->micro_detune,0.f,1.f);
+        if (i!=0) ratio += md_amt * md->md_hit_offset; // per-hit micro detune in ratio units
         if (ratio < 0.01f) ratio = 0.01f;
 
         float g = md->base_gain * jb_bright_gain(ratio, x->brightness);
@@ -216,13 +205,20 @@ static void jb_update_coeffs(t_juicy_bank_tilde *x){
     // apply density mapping (ratio_now updated here)
     jb_update_density(x);
 
-    // update filter coeffs per mode (including micro_detune + bandwidth twin)
-    for(int i=0;i<x->n_modes;i++){
-        jb_mode_t *md=&x->m[i]; if(!md->active){ md->a1=md->a2=0.f; md->a1b=md->a2b=0.f; md->t60_s=0.f; continue; }
+    float md_amt = jb_clamp(x->micro_detune,0.f,1.f);
+    float bw_amt = jb_clamp(x->bandwidth,0.f,1.f);
 
+    for(int i=0;i<x->n_modes;i++){
+        jb_mode_t *md=&x->m[i];
+        if(!md->active){
+            md->a1=md->a2=0.f; md->a1b=md->a2b=0.f; md->t60_s=0.f;
+            continue;
+        }
+
+        // micro detune per-hit (ratio units), dispersion, fundamental immunity
         float ratio = md->ratio_now + x->disp_offset[i];
-        if (i!=0) ratio += md->micro_sig * 0.05f * jb_clamp(x->micro_detune,0.f,1.f);
-        if (i==0) ratio = md->ratio_now; // fundamental immune to dispersion & micro_detune
+        if(i!=0) ratio += md_amt * md->md_hit_offset;
+        else { /* fundamental immune */ }
 
         float Hz = x->keytrack_on ? (x->basef0 * ratio) : ratio;
         Hz = jb_clamp(Hz, 0.f, 0.49f*x->sr);
@@ -233,19 +229,18 @@ static void jb_update_coeffs(t_juicy_bank_tilde *x){
         md->t60_s = T60;
         float r = (T60 <= 0.f) ? 0.f : powf(10.f, -3.f / (T60 * x->sr));
 
-        // IMPORTANT: curve shaping is now in time domain (S(u) multiplier),
-        // so we keep filter radius r constant here.
         float r_eff = r;
-
         float c=cosf(w);
         md->a1=2.f*r_eff*c; md->a2=-r_eff*r_eff;
 
-        // bandwidth: add a second, slightly detuned twin
-        float bw = jb_clamp(x->bandwidth, 0.f, 1.f);
-        if (bw > 0.f){
-            float mode_scale = 0.15f + 0.85f * ((float)i / (float)(x->n_modes>1?x->n_modes-1:1));
-            float detune_ppm = 1000.f * bw * mode_scale; // small
-            float w2 = w * (1.f + detune_ppm * 1e-6f);
+        // bandwidth twin per-hit ratio detune (very small), scaled with mode index and amount
+        if (bw_amt > 0.f){
+            float mode_scale = (x->n_modes>1)? ((float)i/(float)(x->n_modes-1)) : 0.f;
+            // choose per-mode per-hit small ± range: base 0.0005 up to 0.002 (0.05%..0.2%)
+            float max_det = 0.0005f + 0.0015f * mode_scale;
+            // ensure bw_hit_ratio is clamped (it was generated with this bound)
+            float det = jb_clamp(md->bw_hit_ratio, -max_det, max_det) * bw_amt;
+            float w2 = w * (1.f + det);
             float c2 = cosf(w2);
             md->a1b = 2.f*r_eff*c2; md->a2b = -r_eff*r_eff;
         } else {
@@ -269,8 +264,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     float csym=jb_clamp(x->contact_sym,-1.f,1.f);
     int phase_hits_block=0;
 
-    float bw = jb_clamp(x->bandwidth, 0.f, 1.f);
-    float twin_mix = 0.12f * bw; // twin contribution
+    float bw_amt = jb_clamp(x->bandwidth, 0.f, 1.f);
+    float twin_mix = 0.12f * bw_amt;
 
     for(int m=0;m<x->n_modes;m++){
         jb_mode_t *md=&x->m[m]; if(!md->active || md->gain_now<=0.f) continue;
@@ -290,24 +285,35 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             float target=md->gain_now*exc;
             float abs_target=fabsf(target);
 
-            // per-hit phase randomization + reset curve timer on hits
-            if(x->phase_rand>0.f){
+            // per-hit triggers: randomize phase, micro_detune offset, and bandwidth twin detune
+            if(abs_target>1e-3f){
                 if(md->hit_cool>0) md->hit_cool--;
-                else {
-                    if(!md->hit_gate && abs_target>1e-3f){
+                if(!md->hit_gate){
+                    // phase
+                    if(x->phase_rand>0.f){
                         float k=x->phase_rand*0.05f*abs_target;
                         float r1=jb_rng_bi(&x->rng), r2=jb_rng_bi(&x->rng);
                         y1+=k*r1; y2+=k*r2;
-                        if (bw>0.f){
+                        if (bw_amt>0.f){
                             float r3=jb_rng_bi(&x->rng), r4=jb_rng_bi(&x->rng);
                             y1b+=k*r3; y2b+=k*r4;
                         }
-                        md->hit_gate=1; md->hit_cool=(int)(x->sr*0.005f);
-                        u=0.f; // reset decay progress exactly at hit onset
                         phase_hits_block++;
                     }
-                    if(abs_target<5e-4f) md->hit_gate=0;
+                    // micro_detune per-hit: raw offset in [-0.05..+0.05]
+                    if(m!=0){ md->md_hit_offset = 0.05f * jb_rng_bi(&x->rng); } else { md->md_hit_offset = 0.f; }
+                    // bandwidth per-hit: choose tiny ratio delta range depending on mode index
+                    {
+                        float mode_scale = (x->n_modes>1)? ((float)m/(float)(x->n_modes-1)) : 0.f;
+                        float max_det = 0.0005f + 0.0015f * mode_scale; // 0.05%..0.2%
+                        md->bw_hit_ratio = max_det * jb_rng_bi(&x->rng);
+                    }
+
+                    md->hit_gate=1; md->hit_cool=(int)(x->sr*0.005f);
+                    u=0.f; // reset decay progress exactly at hit onset
                 }
+            } else {
+                md->hit_gate=0;
             }
 
             drive += att_a*(target-drive);
@@ -319,13 +325,13 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             float y_total = y_lin;
 
             // twin detuned partner (bandwidth)
-            if (bw > 0.f){
+            if (bw_amt > 0.f){
                 float y_lin_b = (md->a1b*y1b + md->a2b*y2b);
                 y2b=y1b; y1b=y_lin_b;
                 y_total += twin_mix * y_lin_b;
             }
 
-            // Proper curve shaping: multiply by time-warp gain S(u)
+            // Curve shaping multiplier
             float S = jb_curve_shape_gain(u, md->curve_amt);
             y_total *= S;
             u += du; if(u>1.f) u=1.f;
@@ -357,7 +363,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     }
     x->hpL_x1=x1L; x->hpL_y1=y1L; x->hpR_x1=x1R; x->hpR_y1=y1R;
 
-    if(x->phase_debug && phase_hits_block>0){ post("juicy_bank~ phase kicks this block: %d", phase_hits_block); }
+    if(x->phase_debug && phase_hits_block>0){ post("juicy_bank~ per-hit randomizations this block: %d", phase_hits_block); }
     return (w + 7);
 }
 
@@ -424,6 +430,9 @@ static void juicy_bank_tilde_seed(t_juicy_bank_tilde *x, t_floatarg f){
     for(int i=0;i<x->n_modes;i++){
         x->m[i].disp_signature=(i==0)?0.f:jb_rng_bi(&x->rng);
         x->m[i].micro_sig      =(i==0)?0.f:jb_rng_bi(&x->rng);
+        // Reset per-hit vars to neutral; next strike will re-roll
+        x->m[i].md_hit_offset = 0.f;
+        x->m[i].bw_hit_ratio  = 0.f;
     }
     x->dispersion_last=x->dispersion;
     for(int i=0;i<x->n_modes;i++){
@@ -440,13 +449,9 @@ static void juicy_bank_tilde_dispersion_reroll(t_juicy_bank_tilde *x){
     juicy_bank_tilde_dispersion(x,d);
 }
 
-// NEW: global realism messages
-static void juicy_bank_tilde_bandwidth(t_juicy_bank_tilde *x, t_floatarg f){
-    x->bandwidth = jb_clamp(f,0.f,1.f);
-}
-static void juicy_bank_tilde_micro_detune(t_juicy_bank_tilde *x, t_floatarg f){
-    x->micro_detune = jb_clamp(f,0.f,1.f);
-}
+// realism control
+static void juicy_bank_tilde_bandwidth(t_juicy_bank_tilde *x, t_floatarg f){ x->bandwidth = jb_clamp(f,0.f,1.f); }
+static void juicy_bank_tilde_micro_detune(t_juicy_bank_tilde *x, t_floatarg f){ x->micro_detune = jb_clamp(f,0.f,1.f); }
 
 static void juicy_bank_tilde_density(t_juicy_bank_tilde *x, t_floatarg f){ x->density_amt=jb_clamp(f,-1.f,1.f); }
 static void juicy_bank_tilde_density_pivot(t_juicy_bank_tilde *x){ x->density_mode=DENSITY_PIVOT; }
@@ -472,6 +477,7 @@ static void juicy_bank_tilde_reset(t_juicy_bank_tilde *x){
         x->m[i].drive=x->m[i].env=0.f;
         x->m[i].hit_gate=0; x->m[i].hit_cool=0; x->m[i].y_pre_last=0.f;
         x->m[i].decay_u=0.f;
+        x->m[i].md_hit_offset=0.f; x->m[i].bw_hit_ratio=0.f;
     }
     x->n_modes=1; x->sel_index=0; x->sel_index_f=1.f;
     jb_mode_t *md=&x->m[0];
@@ -511,7 +517,7 @@ static void *juicy_bank_tilde_new(void){
     x->contact_amt=0.f; x->contact_sym=0.f;
     x->keytrack_on=1; x->keytrack_amount=1.f; x->basef0=440.f;
 
-    // NEW defaults as requested:
+    // Defaults
     x->phase_rand=1.f; x->phase_debug=0;
     x->bandwidth=1.f; x->micro_detune=1.f;
 
@@ -534,6 +540,7 @@ static void *juicy_bank_tilde_new(void){
         md->micro_sig      = (i==0) ? 0.f : jb_rng_bi(&x->rng);
         md->hit_gate=0; md->hit_cool=0; md->y_pre_last=0.f;
         md->t60_s = md->base_decay_ms * 0.001f; md->decay_u=0.f;
+        md->md_hit_offset = 0.f; md->bw_hit_ratio = 0.f;
     }
 
     x->inR = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_signal, &s_signal);
