@@ -1,5 +1,5 @@
 
-// juicy_bank~ — modal resonator bank (V4.9)
+// juicy_bank~ — modal resonator bank (V4.10)
 // 4-voice playable poly with tail spill (extra release voices), true stereo banks,
 // Behavior + Body + Individual inlets.
 //
@@ -459,11 +459,19 @@ static int jb_spawn_tail_from_voice(t_juicy_bank_tilde *x, int front_idx){
 }
 
 // allocate a front voice index to play a new HELD note
+
 static int jb_alloc_front_voice(t_juicy_bank_tilde *x){
-    // free idle slot?
+    // 1) Prefer an IDLE front slot
     for(int i=0;i<x->held_limit;i++){
         if (x->v[i].state == V_IDLE) return i;
     }
+    // 2) If any RELEASE slot exists in the front pool, revive it
+    for(int i=0;i<x->held_limit;i++){
+        if (x->v[i].state == V_RELEASE) return i;
+    }
+    // 3) No free held slots: DO NOT steal HELD. Respect independence.
+    return -1;
+}
     // no idle: move quietest HELD to tail, reuse its slot
     int best=-1; float bestE=1e9f;
     for(int i=0;i<x->held_limit;i++){
@@ -481,6 +489,7 @@ static int jb_alloc_front_voice(t_juicy_bank_tilde *x){
 
 static void jb_note_on_internal(t_juicy_bank_tilde *x, float f0, float vel){
     int idx = jb_alloc_front_voice(x);
+    if (idx < 0) return; /* no free held slot; do not steal */
     jb_voice_t *v = &x->v[idx];
     v->state = V_HELD; v->f0 = (f0<=0.f)?1.f:f0; v->vel = jb_clamp(vel,0.f,1.f);
     jb_voice_reset_states(x, v, &x->rng);
@@ -509,8 +518,8 @@ static void jb_note_on_voice(t_juicy_bank_tilde *x, int vix1, float f0, float ve
     if (vix1 < 1) vix1 = 1;
     if (vix1 > x->held_limit) vix1 = x->held_limit; // clamp to playable set
     int idx = vix1 - 1;
-    // if the front voice is busy (HELD or RELEASE), spill it to a tail so tail keeps ringing
-    if (x->v[idx].state != V_IDLE) (void)jb_spawn_tail_from_voice(x, idx);
+    // strict held-lock: if this voice is HELD, do not steal/reassign it
+    if (x->v[idx].state == V_HELD) return;
     if (f0 <= 0.f) f0 = 1.f;
     if (vel < 0.f) vel = 0.f;
     if (vel > 1.f) vel = 1.f;
