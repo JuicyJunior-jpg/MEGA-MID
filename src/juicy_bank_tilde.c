@@ -276,6 +276,7 @@ static void jb_update_crossring(t_juicy_bank_tilde *x, int self_idx){
         if (vu->state==V_IDLE) continue;
 
         for(int m=0;m<x->n_modes;m++){
+            const float gexc = (v->state==V_HELD) ? 1.f : 0.f;
             if (!x->base[m].active) continue;
             float rm = vs->m[m].ratio_now;
             float rel = (vu->f0>0.f) ? (rm * vs->f0 / vu->f0) : rm;
@@ -485,6 +486,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         float twin_mix = 0.12f * bw_amt;
 
         for(int m=0;m<x->n_modes;m++){
+            const float gexc = (v->state==V_HELD) ? 1.f : 0.f;
             if(!x->base[m].active || v->m[m].gain_now<=0.f) continue;
             jb_mode_rt_t *md=&v->m[m];
 
@@ -498,7 +500,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
             for(int i=0;i<n;i++){
                 // LEFT
-                float excL = inL[i] * md->gain_now;
+                float excL = gexc * inL[i] * md->gain_now;
                 float absL = fabsf(excL);
                 if(absL>1e-3f){
                     if(md->hit_coolL>0){ md->hit_coolL--; }
@@ -536,7 +538,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 }
 
                 // RIGHT
-                float excR = inR[i] * md->gain_now;
+                float excR = gexc * inR[i] * md->gain_now;
                 float absR = fabsf(excR);
                 if(absR>1e-3f){
                     if(md->hit_coolR>0){ md->hit_coolR--; }
