@@ -1,15 +1,20 @@
 
-// juicy_bank~ — modal resonator bank (V4.8)
-// 4-voice poly, true stereo banks, Behavior + Body + Individual inlets.
-// Voice-addressed poly via Pd [poly]: note_poly / note_poly_midi / off_poly.
+// juicy_bank~ — modal resonator bank (V4.9)
+// 4-voice playable poly with tail spill (extra release voices), true stereo banks,
+// Behavior + Body + Individual inlets.
+//
+// Voice-addressed poly via Pd [poly]:
+//   note_poly           <v> <Hz>       <vel>
+//   note_poly_midi      <v> <midinote> <vel>
+//   off_poly            <v>
 //
 // INLET GROUPS (left → right):
 //  • BEHAVIOR (7): stiffen, shortscle, linger, tilt, bite, bloom, crossring
 //  • BODY (7):     damping, brightness, position, density, dispersion, anisotropy, contact
-//  • INDIVIDUAL (8, per-mode via index): index, ratio, gain, attack, decya, curve, pan, keytrack
+//  • INDIVIDUAL (8, via index): index, ratio, gain, attack, decya, curve, pan, keytrack
 //
-// Messages kept: freq/decays/amps (lists), modes, active, density_pivot/individual, dispersion, seed,
-// dispersion_reroll, note/note_midi/off/voices, **note_poly <v> <Hz> <vel>**, **note_poly_midi <v> <midinote> <vel>**, **off_poly <v>**,
+// Messages: freq/decays/amps (lists), modes, active, density_pivot/individual, dispersion, seed,
+// dispersion_reroll, note/note_midi/off/voices, note_poly/note_poly_midi/off_poly,
 // phase_random/phase_debug, bandwidth, micro_detune, basef0, aniso_epsilon, contact_symmetry.
 //
 // Build (macOS):
@@ -33,8 +38,13 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-#define JB_MAX_MODES   64
-#define JB_MAX_VOICES   4
+#define JB_MAX_MODES    64
+#define JB_MAX_VOICES   12   // front playable voices use indices [0..held_limit-1], tails use remaining
+#define JB_HELD_LIMIT    4   // default playable polyphony
+
+#define LINGER_MAX  2.0f     // max extra T60 at full knob & vel (×2)
+#define BITE_MAX    0.60f    // max brightness tilt from velocity at full knob & vel
+#define BLOOM_MAX   0.60f    // max added bandwidth from velocity at full knob & vel
 
 // ---------- utils ----------
 static inline float jb_clamp(float x, float lo, float hi){ return (x<lo)?lo:((x>hi)?hi:x); }
@@ -46,6 +56,14 @@ static inline float jb_rng_bi(jb_rng_t *r){ return 2.f * jb_rng_uni(r) - 1.f; }
 static int jb_is_near_integer(float x, float eps){ float n=roundf(x); return fabsf(x-n)<=eps; }
 static inline float jb_midi_to_hz(float n){ return 440.f * powf(2.f, (n-69.f)/12.f); }
 
+// map a "ratio knob" (nominal 1..20) to absolute Hz 1..1000 (log map)
+static inline float jb_ratio_to_abs_hz(float ratio){
+    float r = jb_clamp(ratio, 1.f, 20.f);
+    float t = (r - 1.f) / 19.f;
+    float lo = 1.f, hi = 1000.f;
+    return lo * powf(hi/lo, t);
+}
+
 typedef enum { DENSITY_PIVOT=0, DENSITY_INDIV=1 } jb_density_mode;
 
 typedef struct {
@@ -53,7 +71,7 @@ typedef struct {
     float base_ratio, base_decay_ms, base_gain;
     float attack_ms, curve_amt, pan;
     int   active;
-    int   keytrack; // 1 = track f0 (ratio), 0 = absolute Hz
+    int   keytrack; // 1 = track f0 (ratio), 0 = absolute Hz via jb_ratio_to_abs_hz
 
     // signatures (random)
     float disp_signature;
@@ -131,7 +149,10 @@ typedef struct _juicy_bank_tilde {
     float stiffen_amt, shortscale_amt, linger_amt, tilt_amt, bite_amt, bloom_amt, crossring_amt;
 
     // voices
-    int   max_voices;
+    int   held_limit;          // first N indices are front playable voices
+    int   tail_limit;          // maximum number of tail (release) slots
+    float tail_thresh_lin;     // if tail energy < this, eligible to reuse
+    int   max_voices;          // total allocated (held_limit + tail_limit)
     jb_voice_t v[JB_MAX_VOICES];
 
     // current edit index for Individual setters
@@ -179,7 +200,7 @@ static inline float jb_curve_shape_gain(float u, float curve){
 }
 
 // ---------- density mapping ----------
-// Only keytracked modes are spread by density; absolute-Hz modes keep base_ratio.
+// Only keytracked modes are spread by density; absolute-Hz modes keep base_ratio as knob position.
 static void jb_apply_density(const t_juicy_bank_tilde *x, jb_voice_t *v){
     float s = 1.f + 0.5f * jb_clamp(x->density_amt, -1.f, 1.f);
     int idxs[JB_MAX_MODES], count=0;
@@ -222,6 +243,7 @@ static void jb_apply_density(const t_juicy_bank_tilde *x, jb_voice_t *v){
 
 // ---------- behavior projection ----------
 static void jb_project_behavior_into_voice(t_juicy_bank_tilde *x, jb_voice_t *v){
+    float vel = jb_clamp(v->vel, 0.f, 1.f);
     float xfac = (x->basef0_ref>0.f)? (v->f0 / x->basef0_ref) : 1.f;
     if (xfac < 1e-6f) xfac = 1e-6f;
     v->pitch_x = xfac;
@@ -235,26 +257,27 @@ static void jb_project_behavior_into_voice(t_juicy_bank_tilde *x, jb_voice_t *v)
     float beta = 0.40f + 0.50f * x->shortscale_amt;
     v->decay_pitch_mul = powf(xfac, -beta);
 
-    // Linger → velocity extends decays
-    v->decay_vel_mul = (1.f + (0.30f + 1.20f * x->linger_amt) * jb_clamp(v->vel,0.f,1.f));
+    // Linger → velocity extends decays (strict vel scaling)
+    v->decay_vel_mul = 1.f + (x->linger_amt * LINGER_MAX) * vel;
 
-    // Tilt + Bite → brightness
+    // Tilt (pitch-driven) + Bite (strict vel scaling) → brightness
     float dbright_pitch = (0.02f + 0.08f * x->tilt_amt) * log2f(xfac);
-    float dbright_vel   = (0.25f + 0.35f * x->bite_amt) * jb_clamp(v->vel,0.f,1.f);
+    float dbright_vel   = (x->bite_amt * BITE_MAX) * vel;
     v->brightness_v = jb_clamp(x->brightness + dbright_pitch + dbright_vel, 0.f, 1.f);
 
-    // Bloom → bandwidth
+    // Bloom → bandwidth (strict vel scaling)
     float baseBW = x->bandwidth;
-    float addBW  = (0.15f + 0.45f * x->bloom_amt) * jb_clamp(v->vel,0.f,1.f);
+    float addBW  = (x->bloom_amt * BLOOM_MAX) * vel;
     v->bandwidth_v = jb_clamp(baseBW + addBW, 0.f, 1.f);
 
     // per-mode dispersion targets (ignore fundamental)
     float total_disp = jb_clamp(x->dispersion + v->stiffen_add, 0.f, 1.f);
-    if (x->dispersion_last<0.f){ x->dispersion_last = -1.f; }
     for(int i=0;i<x->n_modes;i++){
-        if (!x->base[i].active || i==0){ v->disp_target[i]=0.f; continue; }
+        if (!x->base[i].active || i==0){ v->disp_target[i]=0.f; v->disp_offset[i]=0.f; continue; }
         float sig = x->base[i].disp_signature;
-        v->disp_target[i] = jb_clamp(sig * total_disp, -1.f, 1.f);
+        float t = jb_clamp(sig * total_disp, -1.f, 1.f);
+        v->disp_target[i] = t;
+        v->disp_offset[i] = t; // instant lock: no glide
     }
 }
 
@@ -291,9 +314,9 @@ static void jb_update_crossring(t_juicy_bank_tilde *x, int self_idx){
 
 // ---------- update voice coeffs ----------
 static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
+    // Instant dispersion (no glide)
     for(int i=0;i<x->n_modes;i++){
-        float d=v->disp_target[i]-v->disp_offset[i];
-        v->disp_offset[i]+=0.0025f*d;
+        v->disp_offset[i]=v->disp_target[i];
     }
 
     jb_apply_density(x, v);
@@ -311,13 +334,21 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
         }
 
         float ratio_base = md->ratio_now + v->disp_offset[i];
-        float ratioL = ratio_base;
-        float ratioR = ratio_base;
+        float ratioL = ratio_base, ratioR = ratio_base;
+        // micro detune per ear
         if(i!=0){ ratioL += md_amt * md->md_hit_offsetL; ratioR += md_amt * md->md_hit_offsetR; }
-        if (ratioL < 0.01f) ratioL = 0.01f; if (ratioR < 0.01f) ratioR = 0.01f;
 
-        float HzL = x->base[i].keytrack ? (v->f0 * ratioL) : ratioL;
-        float HzR = x->base[i].keytrack ? (v->f0 * ratioR) : ratioR;
+        float HzL, HzR;
+        if (x->base[i].keytrack){
+            if (ratioL < 0.01f) ratioL = 0.01f;
+            if (ratioR < 0.01f) ratioR = 0.01f;
+            HzL = v->f0 * ratioL;
+            HzR = v->f0 * ratioR;
+        } else {
+            HzL = jb_ratio_to_abs_hz(ratioL);
+            HzR = jb_ratio_to_abs_hz(ratioR);
+        }
+
         HzL = jb_clamp(HzL, 0.f, 0.49f*x->sr);
         HzR = jb_clamp(HzR, 0.f, 0.49f*x->sr);
         float wL = 2.f * (float)M_PI * HzL / x->sr;
@@ -389,7 +420,7 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
         md->gain_now = x->base[i].base_gain;
         md->t60_s = md->decay_ms_now*0.001f; md->decay_u=0.f;
         md->a1L=md->a2L=md->y1L=md->y2L=0.f; md->a1bL=md->a2bL=md->y1bL=md->y2bL=0.f;
-        md->a1R=md->a2R=md->y1R=md->y2R=0.f; md->a1bR=md->a2bR=md->y1bR=md->y2bR=0.f;
+        md->a1R=md->a2R=md->y1R=md->y2R=0.f; md->a1bR=md->a2bR=md->y2bR=md->y1bR=0.f;
         md->driveL=md->driveR=0.f; md->envL=md->envR=0.f;
         md->y_pre_lastL=md->y_pre_lastR=0.f;
         md->hit_gateL=md->hit_gateR=0; md->hit_coolL=md->hit_coolR=0;
@@ -401,27 +432,65 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
     }
 }
 
-static int jb_find_voice_to_steal(t_juicy_bank_tilde *x){
-    int best=-1; float bestE=1e9f;
-    for(int i=0;i<x->max_voices;i++){
-        if (x->v[i].state==V_IDLE) return i;
-        float e = x->v[i].energy;
-        if (e<bestE){ bestE=e; best=i; }
+// copy a front voice into a tail slot (as RELEASE) so we can reuse the front slot for a new HELD
+static int jb_spawn_tail_from_voice(t_juicy_bank_tilde *x, int front_idx){
+    // find idle tail slot
+    for(int i=x->held_limit; i<x->max_voices; ++i){
+        if (x->v[i].state == V_IDLE){
+            x->v[i] = x->v[front_idx];
+            x->v[i].state = V_RELEASE;
+            return 1;
+        }
     }
-    return (best<0)?0:best;
+    // reuse quietest release (prefer below threshold)
+    int candidate=-1; float bestE=1e9f;
+    for(int i=x->held_limit; i<x->max_voices; ++i){
+        if (x->v[i].state == V_RELEASE && x->v[i].energy < x->tail_thresh_lin){
+            candidate = i; break;
+        }
+        if (x->v[i].state == V_RELEASE && x->v[i].energy < bestE){ bestE = x->v[i].energy; candidate = i; }
+    }
+    if (candidate>=0){
+        x->v[candidate] = x->v[front_idx];
+        x->v[candidate].state = V_RELEASE;
+        return 1;
+    }
+    return 0; // no room
 }
 
-static void jb_note_on(t_juicy_bank_tilde *x, float f0, float vel){
-    int idx = jb_find_voice_to_steal(x);
+// allocate a front voice index to play a new HELD note
+static int jb_alloc_front_voice(t_juicy_bank_tilde *x){
+    // free idle slot?
+    for(int i=0;i<x->held_limit;i++){
+        if (x->v[i].state == V_IDLE) return i;
+    }
+    // no idle: move quietest HELD to tail, reuse its slot
+    int best=-1; float bestE=1e9f;
+    for(int i=0;i<x->held_limit;i++){
+        if (x->v[i].state == V_HELD){
+            if (x->v[i].energy < bestE){ bestE = x->v[i].energy; best = i; }
+        }
+    }
+    if (best>=0 && jb_spawn_tail_from_voice(x, best)) return best;
+
+    // last resort: steal quietest RELEASE tail (rare), and reuse its front partner anyway
+    // but we still need a front slot; pick quietest HELD if any, else 0
+    if (best<0) best = 0;
+    return best;
+}
+
+static void jb_note_on_internal(t_juicy_bank_tilde *x, float f0, float vel){
+    int idx = jb_alloc_front_voice(x);
     jb_voice_t *v = &x->v[idx];
     v->state = V_HELD; v->f0 = (f0<=0.f)?1.f:f0; v->vel = jb_clamp(vel,0.f,1.f);
     jb_voice_reset_states(x, v, &x->rng);
     jb_project_behavior_into_voice(x, v);
 }
 
-static void jb_note_off(t_juicy_bank_tilde *x, float f0){
+static void jb_note_off_internal(t_juicy_bank_tilde *x, float f0){
+    // release the nearest pitched HELD (front voices only)
     int match=-1; float best=1e9f; float tol=0.5f;
-    for(int i=0;i<x->max_voices;i++){
+    for(int i=0;i<x->held_limit;i++){
         if (x->v[i].state==V_HELD){
             float d=fabsf(x->v[i].f0 - f0);
             if (d<tol){ match=i; break; }
@@ -431,11 +500,17 @@ static void jb_note_off(t_juicy_bank_tilde *x, float f0){
     if (match>=0) x->v[match].state = V_RELEASE;
 }
 
+// ===== public wrappers =====
+static void jb_note_on(t_juicy_bank_tilde *x, float f0, float vel){ jb_note_on_internal(x, f0, vel); }
+static void jb_note_off(t_juicy_bank_tilde *x, float f0){ jb_note_off_internal(x, f0); }
+
 // ===== Explicit voice-addressed control (for Pd [poly]) =====
 static void jb_note_on_voice(t_juicy_bank_tilde *x, int vix1, float f0, float vel){
     if (vix1 < 1) vix1 = 1;
-    if (vix1 > x->max_voices) vix1 = x->max_voices;
+    if (vix1 > x->held_limit) vix1 = x->held_limit; // clamp to playable set
     int idx = vix1 - 1;
+    // if the front voice is busy (HELD or RELEASE), spill it to a tail so tail keeps ringing
+    if (x->v[idx].state != V_IDLE) (void)jb_spawn_tail_from_voice(x, idx);
     if (f0 <= 0.f) f0 = 1.f;
     if (vel < 0.f) vel = 0.f;
     if (vel > 1.f) vel = 1.f;
@@ -447,7 +522,7 @@ static void jb_note_on_voice(t_juicy_bank_tilde *x, int vix1, float f0, float ve
 
 static void jb_note_off_voice(t_juicy_bank_tilde *x, int vix1){
     if (vix1 < 1) vix1 = 1;
-    if (vix1 > x->max_voices) vix1 = x->max_voices;
+    if (vix1 > x->held_limit) vix1 = x->held_limit;
     int idx = vix1 - 1;
     if (x->v[idx].state != V_IDLE) x->v[idx].state = V_RELEASE;
 }
@@ -455,12 +530,13 @@ static void jb_note_off_voice(t_juicy_bank_tilde *x, int vix1){
 // Message handlers (voice-addressed)
 static void juicy_bank_tilde_note_poly(t_juicy_bank_tilde *x, t_floatarg vix, t_floatarg f0, t_floatarg vel){
     if (vel <= 0.f) { jb_note_off_voice(x, (int)vix); }
-    else            { jb_note_on_voice(x, (int)vix, f0, vel); }
+    else            { jb_note_on_voice(x, (int)vix, f0, jb_clamp(vel,0.f,1.f)); }
 }
 
 static void juicy_bank_tilde_note_poly_midi(t_juicy_bank_tilde *x, t_floatarg vix, t_floatarg midi, t_floatarg vel){
-    if (vel <= 0.f) { jb_note_off_voice(x, (int)vix); }
-    else            { jb_note_on_voice(x, (int)vix, jb_midi_to_hz(midi), vel); }
+    float v = (vel > 1.5f) ? jb_clamp(vel/127.f, 0.f, 1.f) : jb_clamp(vel,0.f,1.f);
+    if (v <= 0.f) { jb_note_off_voice(x, (int)vix); }
+    else          { jb_note_on_voice(x, (int)vix, jb_midi_to_hz(midi), v); }
 }
 
 static void juicy_bank_tilde_off_poly(t_juicy_bank_tilde *x, t_floatarg vix){
@@ -746,17 +822,19 @@ static void juicy_bank_tilde_shortscle_alias(t_juicy_bank_tilde *x, t_floatarg f
 
 // Notes/poly (non-voice-addressed)
 static void juicy_bank_tilde_note(t_juicy_bank_tilde *x, t_floatarg f0, t_floatarg vel){
+    float v = (vel > 1.5f) ? jb_clamp(vel/127.f, 0.f, 1.f) : jb_clamp(vel,0.f,1.f);
     if (f0<=0.f){ f0=1.f; }
-    jb_note_on(x, f0, vel);
+    jb_note_on_internal(x, f0, v);
 }
 static void juicy_bank_tilde_note_midi(t_juicy_bank_tilde *x, t_floatarg midi, t_floatarg vel){
-    jb_note_on(x, jb_midi_to_hz(midi), vel);
+    float v = (vel > 1.5f) ? jb_clamp(vel/127.f, 0.f, 1.f) : jb_clamp(vel,0.f,1.f);
+    jb_note_on_internal(x, jb_midi_to_hz(midi), v);
 }
 static void juicy_bank_tilde_off(t_juicy_bank_tilde *x, t_floatarg f0){
-    jb_note_off(x, (f0<=0.f)?1.f:f0);
+    jb_note_off_internal(x, (f0<=0.f)?1.f:f0);
 }
 static void juicy_bank_tilde_voices(t_juicy_bank_tilde *x, t_floatarg nf){
-    (void)nf; x->max_voices = JB_MAX_VOICES; // fixed 4
+    (void)nf; /* kept fixed by design */ 
 }
 
 // basef0 reference (message)
@@ -829,7 +907,12 @@ static void *juicy_bank_tilde_new(void){
     x->basef0_ref=261.626f; // C4
     x->stiffen_amt=x->shortscale_amt=x->linger_amt=x->tilt_amt=x->bite_amt=x->bloom_amt=x->crossring_amt=0.f;
 
+    // voice/tail config
+    x->held_limit = JB_HELD_LIMIT;         // 4 playable
+    x->tail_limit = JB_MAX_VOICES - JB_HELD_LIMIT; // 8 tails
+    x->tail_thresh_lin = 0.001f;           // ~ -60 dB amplitude proxy
     x->max_voices = JB_MAX_VOICES;
+
     for(int v=0; v<JB_MAX_VOICES; ++v){
         x->v[v].state=V_IDLE; x->v[v].f0=x->basef0_ref; x->v[v].vel=0.f; x->v[v].energy=0.f;
         for(int i=0;i<JB_MAX_MODES;i++){
