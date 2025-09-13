@@ -1,7 +1,7 @@
 
-// juicy_bank~ — modal resonator bank (V4.5)
+// juicy_bank~ — modal resonator bank (V4.7)
 // 4-voice poly, true stereo banks, Behavior + Body + Individual inlets.
-// Now supports Pd [poly] front-end via explicit voice-addressed messages.
+// Voice-addressed poly via Pd [poly]: note_poly / note_poly_midi / off_poly.
 //
 // INLET GROUPS (left → right):
 //  • BEHAVIOR (7): stiffen, shortscle, linger, tilt, bite, bloom, crossring
@@ -276,7 +276,6 @@ static void jb_update_crossring(t_juicy_bank_tilde *x, int self_idx){
         if (vu->state==V_IDLE) continue;
 
         for(int m=0;m<x->n_modes;m++){
-            const float gexc = (v->state==V_HELD) ? 1.f : 0.f;
             if (!x->base[m].active) continue;
             float rm = vs->m[m].ratio_now;
             float rel = (vu->f0>0.f) ? (rm * vs->f0 / vu->f0) : rm;
@@ -427,7 +426,8 @@ static void jb_note_on_voice(t_juicy_bank_tilde *x, int vix1, float f0, float ve
     if (vix1 > x->max_voices) vix1 = x->max_voices;
     int idx = vix1 - 1;
     if (f0 <= 0.f) f0 = 1.f;
-    if (vel < 0.f) vel = 0.f; if (vel > 1.f) vel = 1.f;
+    if (vel < 0.f) vel = 0.f;
+    if (vel > 1.f) vel = 1.f;
     jb_voice_t *v = &x->v[idx];
     v->state = V_HELD; v->f0 = f0; v->vel = vel;
     jb_voice_reset_states(x, v, &x->rng);
@@ -484,9 +484,10 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
         float bw_amt = jb_clamp(v->bandwidth_v, 0.f, 1.f);
         float twin_mix = 0.12f * bw_amt;
+        // Per-voice excitation gate: only HELD voices are excited by input.
+        const float gexc = (v->state==V_HELD) ? 1.f : 0.f;
 
         for(int m=0;m<x->n_modes;m++){
-            const float gexc = (v->state==V_HELD) ? 1.f : 0.f;
             if(!x->base[m].active || v->m[m].gain_now<=0.f) continue;
             jb_mode_rt_t *md=&v->m[m];
 
