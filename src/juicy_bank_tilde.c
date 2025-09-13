@@ -1,5 +1,5 @@
 
-// juicy_bank~ — modal resonator bank (V4.7)
+// juicy_bank~ — modal resonator bank (V4.8)
 // 4-voice poly, true stereo banks, Behavior + Body + Individual inlets.
 // Voice-addressed poly via Pd [poly]: note_poly / note_poly_midi / off_poly.
 //
@@ -10,7 +10,7 @@
 //
 // Messages kept: freq/decays/amps (lists), modes, active, density_pivot/individual, dispersion, seed,
 // dispersion_reroll, note/note_midi/off/voices, **note_poly <v> <Hz> <vel>**, **note_poly_midi <v> <midinote> <vel>**, **off_poly <v>**,
-// phase_random/phase_debug, basef0, aniso_epsilon, contact_symmetry.
+// phase_random/phase_debug, bandwidth, micro_detune, basef0, aniso_epsilon, contact_symmetry.
 //
 // Build (macOS):
 //   cc -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type \
@@ -64,8 +64,10 @@ typedef struct {
     // runtime per-mode
     float ratio_now, decay_ms_now, gain_now;
     float t60_s, decay_u;
-    float md_hit_offset;   // per-hit micro detune offset
-    float bw_hit_ratio;    // per-hit twin detune ratio
+
+    // per-ear per-hit randomizations
+    float md_hit_offsetL, md_hit_offsetR;   // micro detune offsets
+    float bw_hit_ratioL, bw_hit_ratioR;     // twin detune ratios
 
     // LEFT states
     float a1L,a2L, y1L,y2L, a1bL,a2bL, y1bL,y2bL, envL, y_pre_lastL;
@@ -308,13 +310,18 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
             continue;
         }
 
-        float ratio = md->ratio_now + v->disp_offset[i];
-        if(i!=0) ratio += md_amt * md->md_hit_offset;
-        if (ratio < 0.01f) ratio = 0.01f;
+        float ratio_base = md->ratio_now + v->disp_offset[i];
+        float ratioL = ratio_base;
+        float ratioR = ratio_base;
+        if(i!=0){ ratioL += md_amt * md->md_hit_offsetL; ratioR += md_amt * md->md_hit_offsetR; }
+        if (ratioL < 0.01f) ratioL = 0.01f; if (ratioR < 0.01f) ratioR = 0.01f;
 
-        float Hz = x->base[i].keytrack ? (v->f0 * ratio) : ratio;
-        Hz = jb_clamp(Hz, 0.f, 0.49f*x->sr);
-        float w = 2.f * (float)M_PI * Hz / x->sr;
+        float HzL = x->base[i].keytrack ? (v->f0 * ratioL) : ratioL;
+        float HzR = x->base[i].keytrack ? (v->f0 * ratioR) : ratioR;
+        HzL = jb_clamp(HzL, 0.f, 0.49f*x->sr);
+        HzR = jb_clamp(HzR, 0.f, 0.49f*x->sr);
+        float wL = 2.f * (float)M_PI * HzL / x->sr;
+        float wR = 2.f * (float)M_PI * HzR / x->sr;
 
         float base_ms = x->base[i].base_decay_ms;
         float T60 = jb_clamp(base_ms, 0.f, 1e7f) * 0.001f;
@@ -325,19 +332,22 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
         md->t60_s = T60;
 
         float r = (T60 <= 0.f) ? 0.f : powf(10.f, -3.f / (T60 * x->sr));
-        float c=cosf(w);
+        float cL=cosf(wL), cR=cosf(wR);
 
-        md->a1L=2.f*r*c; md->a2L=-r*r;
-        md->a1R=md->a1L;  md->a2R=md->a2L;
+        md->a1L=2.f*r*cL; md->a2L=-r*r;
+        md->a1R=2.f*r*cR; md->a2R=-r*r;
 
         if (bw_amt > 0.f){
             float mode_scale = (x->n_modes>1)? ((float)i/(float)(x->n_modes-1)) : 0.f;
             float max_det = 0.0005f + 0.0015f * mode_scale;
-            float det = jb_clamp(md->bw_hit_ratio, -max_det, max_det) * bw_amt;
-            float w2 = w * (1.f + det);
-            float c2 = cosf(w2);
-            md->a1bL = 2.f*r*c2; md->a2bL = -r*r;
-            md->a1bR = md->a1bL;  md->a2bR = md->a2bL;
+            float detL = jb_clamp(md->bw_hit_ratioL, -max_det, max_det) * bw_amt;
+            float detR = jb_clamp(md->bw_hit_ratioR, -max_det, max_det) * bw_amt;
+            float w2L = wL * (1.f + detL);
+            float w2R = wR * (1.f + detR);
+            float c2L = cosf(w2L);
+            float c2R = cosf(w2R);
+            md->a1bL = 2.f*r*c2L; md->a2bL = -r*r;
+            md->a1bR = 2.f*r*c2R; md->a2bR = -r*r;
         } else {
             md->a1bL=md->a2bL=0.f; md->a1bR=md->a2bR=0.f;
         }
@@ -383,7 +393,8 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
         md->driveL=md->driveR=0.f; md->envL=md->envR=0.f;
         md->y_pre_lastL=md->y_pre_lastR=0.f;
         md->hit_gateL=md->hit_gateR=0; md->hit_coolL=md->hit_coolR=0;
-        md->md_hit_offset = 0.f; md->bw_hit_ratio = 0.f;
+        md->md_hit_offsetL = 0.f; md->md_hit_offsetR = 0.f;
+        md->bw_hit_ratioL = 0.f;  md->bw_hit_ratioR = 0.f;
         v->disp_offset[i]=0.f; v->disp_target[i]=0.f;
         v->cr_gain_mul[i]=1.f; v->cr_decay_mul[i]=1.f;
         (void)rng;
@@ -516,11 +527,11 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                             }
                             phase_hits_block++;
                         }
-                        if(m!=0){ md->md_hit_offset = 0.05f * jb_rng_bi(&x->rng); } else { md->md_hit_offset = 0.f; }
+                        if(m!=0){ md->md_hit_offsetL = 0.05f * jb_rng_bi(&x->rng); } else { md->md_hit_offsetL = 0.f; }
                         {
                             float mode_scale = (x->n_modes>1)? ((float)m/(float)(x->n_modes-1)) : 0.f;
                             float max_det = 0.0005f + 0.0015f * mode_scale;
-                            md->bw_hit_ratio = max_det * jb_rng_bi(&x->rng);
+                            md->bw_hit_ratioL = max_det * jb_rng_bi(&x->rng);
                         }
                         md->hit_gateL=1; md->hit_coolL=(int)(x->sr*0.005f);
                         u=0.f;
@@ -553,6 +564,12 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                                 y1bR+=k*r3; y2bR+=k*r4;
                             }
                             phase_hits_block++;
+                        }
+                        if(m!=0){ md->md_hit_offsetR = 0.05f * jb_rng_bi(&x->rng); } else { md->md_hit_offsetR = 0.f; }
+                        {
+                            float mode_scale = (x->n_modes>1)? ((float)m/(float)(x->n_modes-1)) : 0.f;
+                            float max_det = 0.0005f + 0.0015f * mode_scale;
+                            md->bw_hit_ratioR = max_det * jb_rng_bi(&x->rng);
                         }
                         md->hit_gateR=1; md->hit_coolR=(int)(x->sr*0.005f);
                         u=0.f;
@@ -691,6 +708,8 @@ static void juicy_bank_tilde_contact_sym(t_juicy_bank_tilde *x, t_floatarg f){ x
 // realism & misc
 static void juicy_bank_tilde_phase_random(t_juicy_bank_tilde *x, t_floatarg f){ x->phase_rand=jb_clamp(f,0.f,1.f); }
 static void juicy_bank_tilde_phase_debug(t_juicy_bank_tilde *x, t_floatarg on){ x->phase_debug=(on>0.f)?1:0; }
+static void juicy_bank_tilde_bandwidth(t_juicy_bank_tilde *x, t_floatarg f){ x->bandwidth=jb_clamp(f,0.f,1.f); }
+static void juicy_bank_tilde_micro_detune(t_juicy_bank_tilde *x, t_floatarg f){ x->micro_detune=jb_clamp(f,0.f,1.f); }
 
 // dispersion & seeds
 static void juicy_bank_tilde_dispersion(t_juicy_bank_tilde *x, t_floatarg f){
@@ -803,9 +822,9 @@ static void *juicy_bank_tilde_new(void){
     x->aniso=0.f; x->aniso_eps=0.02f;
     x->contact_amt=0.f; x->contact_sym=0.f;
 
-    // realism
+    // realism defaults
     x->phase_rand=1.f; x->phase_debug=0;
-    x->bandwidth=1.f; x->micro_detune=1.f;
+    x->bandwidth=0.1f; x->micro_detune=0.1f;
 
     x->basef0_ref=261.626f; // C4
     x->stiffen_amt=x->shortscale_amt=x->linger_amt=x->tilt_amt=x->bite_amt=x->bloom_amt=x->crossring_amt=0.f;
@@ -912,9 +931,11 @@ void juicy_bank_tilde_setup(void){
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_seed, gensym("seed"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_dispersion_reroll, gensym("dispersion_reroll"), 0);
 
-    // behavior realism & misc
+    // realism & misc
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_phase_random, gensym("phase_random"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_phase_debug, gensym("phase_debug"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bandwidth, gensym("bandwidth"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_micro_detune, gensym("micro_detune"), A_DEFFLOAT, 0);
 
     // notes/poly (non-voice-specific)
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_note, gensym("note"), A_DEFFLOAT, A_DEFFLOAT, 0);
