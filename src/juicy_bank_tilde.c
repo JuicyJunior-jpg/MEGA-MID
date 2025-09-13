@@ -1,5 +1,5 @@
 
-// juicy_bank~ — modal resonator bank (V4.3)
+// juicy_bank~ — modal resonator bank (V4.4)
 // 4-voice poly, true stereo banks, Behavior + Body + Individual inlets (exact spec)
 //
 // INLET GROUPS (left → right):
@@ -145,7 +145,7 @@ typedef struct _juicy_bank_tilde {
     // Behavior
     t_inlet *in_stiffen, *in_shortscle, *in_linger, *in_tilt, *in_bite, *in_bloom, *in_crossring;
     // Body
-    t_inlet *in_damping, *in_brightness, *in_position, *in_density, *in_aniso, *in_contact;
+    t_inlet *in_damping, *in_brightness, *in_position, *in_density, *in_dispersion, *in_aniso, *in_contact;
     // Individual
     t_inlet *in_index, *in_ratio, *in_gain, *in_attack, *in_decya, *in_curve, *in_pan, *in_keytrack;
 } t_juicy_bank_tilde;
@@ -724,7 +724,7 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
     inlet_free(x->in_stiffen); inlet_free(x->in_shortscle); inlet_free(x->in_linger);
     inlet_free(x->in_tilt); inlet_free(x->in_bite); inlet_free(x->in_bloom); inlet_free(x->in_crossring);
     inlet_free(x->in_damping); inlet_free(x->in_brightness); inlet_free(x->in_position);
-    inlet_free(x->in_density); inlet_free(x->in_aniso); inlet_free(x->in_contact);
+    inlet_free(x->in_density); inlet_free(x->in_dispersion); inlet_free(x->in_aniso); inlet_free(x->in_contact);
     inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     inlet_free(x->in_attack); inlet_free(x->in_decya); inlet_free(x->in_curve); inlet_free(x->in_pan); inlet_free(x->in_keytrack);
     inlet_free(x->inR);
@@ -780,6 +780,7 @@ static void *juicy_bank_tilde_new(void){
     x->in_brightness = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("brightness"));
     x->in_position   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("position"));
     x->in_density    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("density"));
+    x->in_dispersion = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("dispersion"));
     x->in_aniso      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("anisotropy"));
     x->in_contact    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("contact"));
 
