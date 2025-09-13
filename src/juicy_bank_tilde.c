@@ -1,3 +1,4 @@
+
 // juicy_bank~ — modal resonator bank (V4.0: 4-voice poly, true stereo, Behavior params)
 //
 // WHAT'S NEW
@@ -13,28 +14,16 @@
 //      crossring   (sympathetic ring across active voices)
 // • Keeps: decay curve shaping, per-hit micro_detune & bandwidth randomizations, DC hygiene
 //
-// MESSAGES (added):
-//   note f0 vel          : allocate/trigger a voice at base frequency f0 (Hz), velocity [0..1]
-//   note_midi n vel      : MIDI note number n (float), vel [0..1]
-//   off f0               : release voice that matches f0 (±0.5 Hz), else oldest/quietest
-//   voices 4             : (accepted; clamped to 4 for now)
-//   stiffen $f           : 0..1
-//   shortscale $f        : 0..1
-//   linger $f            : 0..1
-//   tilt $f              : 0..1
-//   bite $f              : 0..1
-//   bloom $f             : 0..1
-//   crossring $f         : 0..1
-//
 // BUILD (macOS):
-//   cc -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type \
-//     -I"/Applications/Pd-0.56-1.app/Contents/Resources/src" \
-//     -arch arm64 -arch x86_64 -mmacosx-version-min=10.13 \
-//     -bundle -undefined dynamic_lookup \
+//   cc -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type
+//     -I"/Applications/Pd-0.56-1.app/Contents/Resources/src"
+//     -arch arm64 -arch x86_64 -mmacosx-version-min=10.13
+//     -bundle -undefined dynamic_lookup
 //     -o juicy_bank~.pd_darwin juicy_bank_tilde.c
+//
 // BUILD (Linux):
-//   cc -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type \
-//     -I"/usr/include/pd" -shared -fPIC -Wl,-export-dynamic -lm \
+//   cc -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type
+//     -I"/usr/include/pd" -shared -fPIC -Wl,-export-dynamic -lm
 //     -o juicy_bank~.pd_linux juicy_bank_tilde.c
 
 #include "m_pd.h"
@@ -283,7 +272,7 @@ static void jb_project_behavior_into_voice(t_juicy_bank_tilde *x, jb_voice_t *v)
 }
 
 // ----------------- sympathetic (Crossring) multipliers per block -----------------
-static void jb_update_crossring(const t_juicy_bank_tilde *x, int self_idx){
+static void jb_update_crossring(t_juicy_bank_tilde *x, int self_idx){
     const float eps = 0.015f + 0.030f * x->crossring_amt;
     const float gmul = 1.f + (0.05f + 0.15f * x->crossring_amt);
     const float dmul = 1.f + (0.08f + 0.22f * x->crossring_amt);
@@ -296,7 +285,7 @@ static void jb_update_crossring(const t_juicy_bank_tilde *x, int self_idx){
 
     if (x->crossring_amt<=0.f) return;
 
-    const jb_voice_t *vs = &x->v[self_idx];
+    jb_voice_t *vs = &x->v[self_idx];
     if (vs->state==V_IDLE) return;
 
     for(int u=0; u<x->max_voices; ++u){
@@ -422,7 +411,6 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
         md->md_hit_offset = 0.f; md->bw_hit_ratio = 0.f;
         v->disp_offset[i]=0.f; v->disp_target[i]=0.f;
         v->cr_gain_mul[i]=1.f; v->cr_decay_mul[i]=1.f;
-        // seed signatures are in base[i]
         (void)rng;
     }
 }
@@ -439,12 +427,12 @@ static int jb_find_voice_to_steal(t_juicy_bank_tilde *x){
 }
 
 static void jb_note_on(t_juicy_bank_tilde *x, float f0, float vel){
-    int idx = jb_find_voice_to_steal((t_juicy_bank_tilde*)x);
-    jb_voice_t *v = &((t_juicy_bank_tilde*)x)->v[idx];
+    int idx = jb_find_voice_to_steal(x);
+    jb_voice_t *v = &x->v[idx];
     v->state = V_HELD; v->f0 = (f0<=0.f)?1.f:f0; v->vel = jb_clamp(vel,0.f,1.f);
-    jb_voice_reset_states(x, v, &((t_juicy_bank_tilde*)x)->rng);
+    jb_voice_reset_states(x, v, &x->rng);
     // project behavior into this voice & set dispersion targets
-    jb_project_behavior_into_voice((t_juicy_bank_tilde*)x, v);
+    jb_project_behavior_into_voice(x, v);
 }
 
 static void jb_note_off(t_juicy_bank_tilde *x, float f0){
@@ -531,7 +519,9 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                         md->hit_gateL=1; md->hit_coolL=(int)(x->sr*0.005f);
                         u=0.f;
                     }
-                } else md->hit_gateL=0;
+                } else {
+                    md->hit_gateL=0;
+                }
 
                 driveL += att_a*(excL-driveL);
                 float y_linL = (md->a1L*y1L + md->a2L*y2L) + driveL; y2L=y1L; y1L=y_linL;
@@ -562,7 +552,9 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                         md->hit_gateR=1; md->hit_coolR=(int)(x->sr*0.005f);
                         u=0.f;
                     }
-                } else md->hit_gateR=0;
+                } else {
+                    md->hit_gateR=0;
+                }
 
                 driveR += att_a*(excR-driveR);
                 float y_linR = (md->a1R*y1R + md->a2R*y2R) + driveR; y2R=y1R; y1R=y_linR;
@@ -622,8 +614,10 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     float a=x->hp_a; float x1L=x->hpL_x1, y1L=x->hpL_y1, x1R=x->hpR_x1, y1R=x->hpR_y1;
     for(int i=0;i<n;i++){
         float xl=outL[i], xr=outR[i];
-        float yl=a*(y1L + xl - x1L), yr=a*(y1R + xr - x1R);
-        if(fabsf(yl)<1e-20f) yl=0.f; if(fabsf(yr)<1e-20f) yr=0.f;
+        float yl=a*(y1L + xl - x1L);
+        float yr=a*(y1R + xr - x1R);
+        if(fabsf(yl)<1e-20f){ yl=0.f; }
+        if(fabsf(yr)<1e-20f){ yr=0.f; }
         outL[i]=yl; outR[i]=yr; x1L=xl; y1L=yl; x1R=xr; y1R=yr;
     }
     x->hpL_x1=x1L; x->hpL_y1=y1L; x->hpR_x1=x1R; x->hpR_y1=y1R;
@@ -712,7 +706,8 @@ static void juicy_bank_tilde_crossring(t_juicy_bank_tilde *x, t_floatarg f){ x->
 
 // Notes
 static void juicy_bank_tilde_note(t_juicy_bank_tilde *x, t_floatarg f0, t_floatarg vel){
-    if (f0<=0.f) f0=1.f; jb_note_on(x, f0, vel);
+    if (f0<=0.f){ f0=1.f; }
+    jb_note_on(x, f0, vel);
 }
 static void juicy_bank_tilde_note_midi(t_juicy_bank_tilde *x, t_floatarg midi, t_floatarg vel){
     jb_note_on(x, jb_midi_to_hz(midi), vel);
@@ -791,7 +786,8 @@ static void *juicy_bank_tilde_new(void){
     x->hp_a=0.f; x->hpL_x1=x->hpL_y1=x->hpR_x1=x->hpR_y1=0.f;
 
     // IO
-    x->inR = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_signal, &s_signal);
+    inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_signal, &s_signal); // in~ L (implicit)
+    x->inR = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_signal, &s_signal); // in~ R
 
     // Create behavior inlets early (closer to left side UI-wise)
     x->in_stiffen    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("stiffen"));
