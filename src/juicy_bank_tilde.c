@@ -77,10 +77,7 @@ typedef struct {
     // RIGHT states
     float a1R,a2R, y1R,y2R, a1bR,a2bR, y1bR,y2bR, envR, y_pre_lastR;
 
-    
-    // smoothed curve multiplier state
-    float curve_sL, curve_sR;
-// drive/hit
+    // drive/hit
     float driveL, driveR;
     int   hit_gateL, hit_coolL, hit_gateR, hit_coolR;
 } jb_mode_rt_t;
@@ -405,7 +402,7 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
         md->a1L=md->a2L=md->y1L=md->y2L=0.f; md->a1bL=md->a2bL=md->y1bL=md->y2bL=0.f;
         md->a1R=md->a2R=md->y1R=md->y2R=0.f; md->a1bR=md->a2bR=md->y1bR=md->y2bR=0.f;
         md->driveL=md->driveR=0.f; md->envL=md->envR=0.f;
-        md->y_pre_lastL=md->y_pre_lastR=0.f; md->curve_sL=1.f; md->curve_sR=1.f;
+        md->y_pre_lastL=md->y_pre_lastR=0.f;
         md->hit_gateL=md->hit_gateR=0; md->hit_coolL=md->hit_coolR=0;
         md->md_hit_offsetL = 0.f; md->md_hit_offsetR = 0.f;
         md->bw_hit_ratioL = 0.f;  md->bw_hit_ratioR = 0.f;
@@ -622,32 +619,14 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 }
 
                 
-                // curve shaping with anti-hiss smoothing and multiplicative slew clamp
-                {
-                    float Sraw = jb_curve_shape_gain(u, x->base[m].curve_amt);
-                    // One-pole smoothing (~2 ms)
-                    float a = expf(-1.f / (0.002f * x->sr));
-                    if (u <= 0.f){ md->curve_sL = Sraw; md->curve_sR = Sraw; }
-                    else {
-                        md->curve_sL = a * md->curve_sL + (1.f - a) * Sraw;
-                        md->curve_sR = a * md->curve_sR + (1.f - a) * Sraw;
-                    }
-                    // Multiplicative slew clamp (~24 dB/ms)
-                    float dt_ms = 1000.f / x->sr;
-                    float max_db_per_ms = 24.f;
-                    float rmax = powf(10.f, (max_db_per_ms * dt_ms) / 20.f);
-                    float rmin = 1.f / rmax;
-
-                    float rL = (md->curve_sL > 1e-8f) ? (Sraw / md->curve_sL) : 1.f;
-                    float rR = (md->curve_sR > 1e-8f) ? (Sraw / md->curve_sR) : 1.f;
-                    if (rL > rmax) md->curve_sL *= rmax; else if (rL < rmin) md->curve_sL *= rmin;
-                    if (rR > rmax) md->curve_sR *= rmax; else if (rR < rmin) md->curve_sR *= rmin;
-
-                    y_totalL *= md->curve_sL;
-                    y_totalR *= md->curve_sR;
-
-                    u += du; if(u>1.f){ u=1.f; }
+                // curve shaping + stability floor for exp side (no hiss/bitcrush with noise)
+                float S = jb_curve_shape_gain(u, x->base[m].curve_amt);
+                if (x->base[m].curve_amt < 0.f){
+                    // floor at -60 dB to avoid denormals / quantization steps near zero
+                    if (S < 0.001f) S = 0.001f;
                 }
+                y_totalL *= S; y_totalR *= S;
+                u += du; if(u>1.f){ u=1.f; }
     
 
                 // contact nonlinearity
