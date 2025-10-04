@@ -77,7 +77,10 @@ typedef struct {
     // RIGHT states
     float a1R,a2R, y1R,y2R, a1bR,a2bR, y1bR,y2bR, envR, y_pre_lastR;
 
-    // drive/hit
+    
+    // smoothed curve multiplier (to avoid AM hiss with noise)
+    float curve_sL, curve_sR;
+// drive/hit
     float driveL, driveR;
     int   hit_gateL, hit_coolL, hit_gateR, hit_coolR;
 } jb_mode_rt_t;
@@ -402,7 +405,7 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
         md->a1L=md->a2L=md->y1L=md->y2L=0.f; md->a1bL=md->a2bL=md->y1bL=md->y2bL=0.f;
         md->a1R=md->a2R=md->y1R=md->y2R=0.f; md->a1bR=md->a2bR=md->y1bR=md->y2bR=0.f;
         md->driveL=md->driveR=0.f; md->envL=md->envR=0.f;
-        md->y_pre_lastL=md->y_pre_lastR=0.f;
+        md->y_pre_lastL=md->y_pre_lastR=0.f; md->curve_sL=1.f; md->curve_sR=1.f;
         md->hit_gateL=md->hit_gateR=0; md->hit_coolL=md->hit_coolR=0;
         md->md_hit_offsetL = 0.f; md->md_hit_offsetR = 0.f;
         md->bw_hit_ratioL = 0.f;  md->bw_hit_ratioR = 0.f;
@@ -618,10 +621,25 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     y_totalR += 0.12f * bw_amt * y_lin_bR;
                 }
 
-                // curve shaping
-                float S = jb_curve_shape_gain(u, x->base[m].curve_amt);
-                y_totalL *= S; y_totalR *= S;
-                u += du; if(u>1.f){ u=1.f; }
+                
+                // curve shaping with 2 ms slew to avoid AM hiss on noisy exciter (especially with exp curves)
+                {
+                    float Sraw = jb_curve_shape_gain(u, x->base[m].curve_amt);
+                    // 2 ms time constant
+                    float a_slew = expf(-1.f / (0.002f * x->sr));
+                    if (x->base[m].curve_amt != 0.f){
+                        if (u <= 0.f){ md->curve_sL = Sraw; md->curve_sR = Sraw; }
+                        else {
+                            md->curve_sL = a_slew * md->curve_sL + (1.f - a_slew) * Sraw;
+                            md->curve_sR = a_slew * md->curve_sR + (1.f - a_slew) * Sraw;
+                        }
+                        y_totalL *= md->curve_sL;
+                        y_totalR *= md->curve_sR;
+                    }
+                    // linear curve_amt (0) falls through without extra multiply
+                    u += du; if(u>1.f){ u=1.f; }
+                }
+    
 
                 // contact nonlinearity
                 if(camt>0.f){
