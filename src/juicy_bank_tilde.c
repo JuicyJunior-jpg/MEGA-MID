@@ -78,7 +78,7 @@ typedef struct {
     float a1R,a2R, y1R,y2R, a1bR,a2bR, y1bR,y2bR, envR, y_pre_lastR;
 
     
-    // smoothed curve multiplier (to avoid AM hiss with noise)
+    // smoothed curve multiplier state
     float curve_sL, curve_sR;
 // drive/hit
     float driveL, driveR;
@@ -622,21 +622,30 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 }
 
                 
-                // curve shaping with 2 ms slew to avoid AM hiss on noisy exciter (especially with exp curves)
+                // curve shaping with anti-hiss smoothing and multiplicative slew clamp
                 {
                     float Sraw = jb_curve_shape_gain(u, x->base[m].curve_amt);
-                    // 2 ms time constant
-                    float a_slew = expf(-1.f / (0.002f * x->sr));
-                    if (x->base[m].curve_amt != 0.f){
-                        if (u <= 0.f){ md->curve_sL = Sraw; md->curve_sR = Sraw; }
-                        else {
-                            md->curve_sL = a_slew * md->curve_sL + (1.f - a_slew) * Sraw;
-                            md->curve_sR = a_slew * md->curve_sR + (1.f - a_slew) * Sraw;
-                        }
-                        y_totalL *= md->curve_sL;
-                        y_totalR *= md->curve_sR;
+                    // One-pole smoothing (~2 ms)
+                    float a = expf(-1.f / (0.002f * x->sr));
+                    if (u <= 0.f){ md->curve_sL = Sraw; md->curve_sR = Sraw; }
+                    else {
+                        md->curve_sL = a * md->curve_sL + (1.f - a) * Sraw;
+                        md->curve_sR = a * md->curve_sR + (1.f - a) * Sraw;
                     }
-                    // linear curve_amt (0) falls through without extra multiply
+                    // Multiplicative slew clamp (~24 dB/ms)
+                    float dt_ms = 1000.f / x->sr;
+                    float max_db_per_ms = 24.f;
+                    float rmax = powf(10.f, (max_db_per_ms * dt_ms) / 20.f);
+                    float rmin = 1.f / rmax;
+
+                    float rL = (md->curve_sL > 1e-8f) ? (Sraw / md->curve_sL) : 1.f;
+                    float rR = (md->curve_sR > 1e-8f) ? (Sraw / md->curve_sR) : 1.f;
+                    if (rL > rmax) md->curve_sL *= rmax; else if (rL < rmin) md->curve_sL *= rmin;
+                    if (rR > rmax) md->curve_sR *= rmax; else if (rR < rmin) md->curve_sR *= rmin;
+
+                    y_totalL *= md->curve_sL;
+                    y_totalR *= md->curve_sR;
+
                     u += du; if(u>1.f){ u=1.f; }
                 }
     
