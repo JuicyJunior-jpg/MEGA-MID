@@ -639,9 +639,14 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     }
                 }
 
-                // output sum
-                outL[i] += y_totalL;
-                outR[i] += y_totalR;
+                // output sum with per-mode equal-power pan
+                {
+                    float p = jb_clamp(x->base[m].pan, -1.f, 1.f);
+                    float wL = sqrtf(0.5f*(1.f - p));
+                    float wR = sqrtf(0.5f*(1.f + p));
+                    outL[i] += y_totalL * wL;
+                    outR[i] += y_totalR * wR;
+                }
 
                 // update envelopes
                 float ayL=fabsf(y_totalL); envL = envL + 0.0015f*(ayL - envL); md->y_pre_lastL = y_totalL;
@@ -691,7 +696,16 @@ static void juicy_bank_tilde_index(t_juicy_bank_tilde *x, t_floatarg f){
     int idx=(int)f; if(idx<1) idx=1; if(idx>x->n_modes) idx=x->n_modes; x->edit_idx=idx-1;
 }
 static void juicy_bank_tilde_ratio_i(t_juicy_bank_tilde *x, t_floatarg r){
-    int i=x->edit_idx; if(i<0||i>=x->n_modes) return; float v=(r<=0.f)?0.01f:r; x->base[i].base_ratio=v;
+    int i=x->edit_idx; if(i<0||i>=x->n_modes) return;
+    if (x->base[i].keytrack){
+        // keytrack ON: ratio is harmonic multiplier (floor at 0.01)
+        float v = (r<=0.f)?0.01f:r;
+        x->base[i].base_ratio = v;
+    } else {
+        // keytrack OFF: ratio inlet becomes absolute Hz manager: 0..10 -> 0..1000 Hz
+        float ui = r; if (ui < 0.f) ui = 0.f; if (ui > 10.f) ui = 10.f;
+        x->base[i].base_ratio = 100.f * ui; // store Hz directly
+    }
 }
 static void juicy_bank_tilde_gain_i(t_juicy_bank_tilde *x, t_floatarg g){
     int i=x->edit_idx; if(i<0||i>=x->n_modes) return; x->base[i].base_gain=jb_clamp(g,0.f,1.f);
