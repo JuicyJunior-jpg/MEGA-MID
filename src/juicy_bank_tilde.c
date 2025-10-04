@@ -938,6 +938,13 @@ static void juicy_bank_tilde_INIT(t_juicy_bank_tilde *x){
             x->base[i].pan = 0.f;
             x->base[i].keytrack = 1;
         } else {
+            x->base[i].active = 1;   // leave modes activatable
+            x->base[i].base_gain = 0.f;
+        }
+    }
+    x->edit_idx = 0;
+    juicy_bank_tilde_reset(x);
+} else {
             x->base[i].active = 0;
             x->base[i].base_gain = 0.f;
         }
