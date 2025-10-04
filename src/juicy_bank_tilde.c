@@ -925,6 +925,8 @@ static void *juicy_bank_tilde_new(void){
 // ---------- setup ----------
 
 // INIT: scratch mode (only mode 1 active with default center values)
+
+// INIT: scratch mode (only mode 1 audible; others available with gain>0)
 static void juicy_bank_tilde_INIT(t_juicy_bank_tilde *x){
     int n = x->n_modes; if (n < 1) n = 1;
     for (int i = 0; i < n; ++i){
@@ -938,15 +940,8 @@ static void juicy_bank_tilde_INIT(t_juicy_bank_tilde *x){
             x->base[i].pan = 0.f;
             x->base[i].keytrack = 1;
         } else {
-            x->base[i].active = 1;   // leave modes activatable
-            x->base[i].base_gain = 0.f;
-        }
-    }
-    x->edit_idx = 0;
-    juicy_bank_tilde_reset(x);
-} else {
-            x->base[i].active = 0;
-            x->base[i].base_gain = 0.f;
+            x->base[i].active = 1;            // keep activatable
+            x->base[i].base_gain = 0.f;       // silent until gain>0
         }
     }
     x->edit_idx = 0;
