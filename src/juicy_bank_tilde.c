@@ -165,6 +165,7 @@ typedef struct _juicy_bank_tilde {
     t_inlet *in_index, *in_ratio, *in_gain, *in_attack, *in_decya, *in_curve, *in_pan, *in_keytrack;
 } t_juicy_bank_tilde;
 
+static void juicy_bank_tilde_reset(t_juicy_bank_tilde *x);
 // ---------- helpers ----------
 static float jb_bright_gain(float ratio_rel, float b){
     float t=(jb_clamp(b,0.f,1.f)-0.5f)*2.f; float p=0.6f*t; float rr=jb_clamp(ratio_rel,1.f,1e6f);
@@ -245,12 +246,6 @@ static void jb_project_behavior_into_voice(t_juicy_bank_tilde *x, jb_voice_t *v)
     // per-mode dispersion targets (ignore fundamental)
     float total_disp = jb_clamp(x->dispersion + v->stiffen_add, 0.f, 1.f);
     if (x->dispersion_last<0.f){ x->dispersion_last = -1.f; }
-    for(int i=0;i<x->n_modes;i++){
-        if (!x->base[i].active || i==0){ v->disp_target[i]=0.f; continue; }
-        float sig = x->base[i].disp_signature;
-        v->disp_target[i] = jb_clamp(sig * total_disp, -1.f, 1.f);
-    }
-}
     for(int i=0;i<x->n_modes;i++){
         if (!x->base[i].active || i==0){ v->disp_target[i]=0.f; continue; }
         float sig = x->base[i].disp_signature;
