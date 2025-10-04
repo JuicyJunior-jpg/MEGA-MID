@@ -165,6 +165,8 @@ typedef struct _juicy_bank_tilde {
     t_inlet *in_index, *in_ratio, *in_gain, *in_attack, *in_decya, *in_curve, *in_pan, *in_keytrack;
 } t_juicy_bank_tilde;
 
+
+static void juicy_bank_tilde_reset(t_juicy_bank_tilde *x);
 // ---------- helpers ----------
 static float jb_bright_gain(float ratio_rel, float b){
     float t=(jb_clamp(b,0.f,1.f)-0.5f)*2.f; float p=0.6f*t; float rr=jb_clamp(ratio_rel,1.f,1e6f);
@@ -334,7 +336,7 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
 
         float base_ms = x->base[i].base_decay_ms;
         float T60 = jb_clamp(base_ms, 0.f, 1e7f) * 0.001f;
-        T60 *= (1.f - x->damping);
+        T60 *= (1.f - 0.5f * jb_clamp(x->damping, -1.f, 1.f));
         T60 *= v->decay_pitch_mul;
         T60 *= v->decay_vel_mul;
         T60 *= v->cr_decay_mul[i];
@@ -722,7 +724,7 @@ static void juicy_bank_tilde_amps(t_juicy_bank_tilde *x, t_symbol *s, int argc, 
 }
 
 // BODY globals
-static void juicy_bank_tilde_damping(t_juicy_bank_tilde *x, t_floatarg f){ x->damping=jb_clamp(f,0.f,1.f); }
+static void juicy_bank_tilde_damping(t_juicy_bank_tilde *x, t_floatarg f){ x->damping=jb_clamp(f,-1.f,1.f); }
 static void juicy_bank_tilde_brightness(t_juicy_bank_tilde *x, t_floatarg f){ x->brightness=jb_clamp(f,0.f,1.f); }
 static void juicy_bank_tilde_position(t_juicy_bank_tilde *x, t_floatarg f){ x->position=(f<=0.f)?0.f:jb_clamp(f,0.f,1.f); }
 static void juicy_bank_tilde_density(t_juicy_bank_tilde *x, t_floatarg f){ x->density_amt=jb_clamp(f,-1.f,1.f); }
@@ -921,6 +923,29 @@ static void *juicy_bank_tilde_new(void){
 }
 
 // ---------- setup ----------
+
+// INIT: scratch mode (only mode 1 active with default center values)
+static void juicy_bank_tilde_INIT(t_juicy_bank_tilde *x){
+    int n = x->n_modes; if (n < 1) n = 1;
+    for (int i = 0; i < n; ++i){
+        if (i == 0){
+            x->base[i].active = 1;
+            x->base[i].base_ratio = 1.f;
+            x->base[i].base_gain = 0.5f;
+            x->base[i].curve_amt = 0.f;       // linear
+            x->base[i].base_decay_ms = 500.f; // "middle"
+            x->base[i].attack_ms = 0.f;
+            x->base[i].pan = 0.f;
+            x->base[i].keytrack = 1;
+        } else {
+            x->base[i].active = 0;
+            x->base[i].base_gain = 0.f;
+        }
+    }
+    x->edit_idx = 0;
+    juicy_bank_tilde_reset(x);
+}
+
 void juicy_bank_tilde_setup(void){
     juicy_bank_tilde_class = class_new(gensym("juicy_bank~"),
                            (t_newmethod)juicy_bank_tilde_new,
@@ -1001,5 +1026,7 @@ void juicy_bank_tilde_setup(void){
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_reset, gensym("reset"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_restart, gensym("restart"), 0);
 
-    class_sethelpsymbol(juicy_bank_tilde_class, gensym("juicy_bank~"));
+    
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_INIT, gensym("INIT"), 0);
+class_sethelpsymbol(juicy_bank_tilde_class, gensym("juicy_bank~"));
 }
