@@ -302,10 +302,7 @@ static void jb_update_crossring(t_juicy_bank_tilde *x, int self_idx){
 
 // ---------- update voice coeffs ----------
 static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
-    for(int i=0;i<x->n_modes;i++){
-        float d=v->disp_target[i]-v->disp_offset[i];
-        v->disp_offset[i]+=0.0025f*d;
-    }
+    for(int i=0;i<x->n_modes;i++){ v->disp_offset[i] = v->disp_target[i]; }
 
     jb_apply_density(x, v);
 
@@ -336,7 +333,7 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
 
         float base_ms = x->base[i].base_decay_ms;
         float T60 = jb_clamp(base_ms, 0.f, 1e7f) * 0.001f;
-        T60 *= (1.f - 0.5f * jb_clamp(x->damping, -1.f, 1.f));
+        T60 *= (1.f - jb_clamp(x->damping, -1.f, 1.f));
         T60 *= v->decay_pitch_mul;
         T60 *= v->decay_vel_mul;
         T60 *= v->cr_decay_mul[i];
@@ -629,15 +626,24 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 u += du; if(u>1.f){ u=1.f; }
     
 
-                // contact nonlinearity
-                if(camt>0.f){
-                    if (envL > th){
-                        float mid=0.5f*(md->y_pre_lastL + y_totalL);
-                        float y_mid= tanhf(mid * (1.f + 2.f*camt*(1.f+0.5f*jb_clamp(csym,-1.f,1.f))));
-                        float y_hi = tanhf(y_totalL * (1.f + 2.f*camt*(1.f+0.5f*jb_clamp(csym,-1.f,1.f))));
-                        y_totalL = 0.5f*(y_mid+y_hi);
-                    }
-                    if (envR > th){
+                
+                // contact -> overdrive amount (0..1), asymmetry via contact_sym; no limiter stage
+                if (camt > 0.f){
+                    float drive = 1.f + 19.f * camt;
+                    float asym  = jb_clamp(csym, -1.f, 1.f) * 0.5f;
+
+                    float xL = y_totalL * drive;
+                    float biasL = asym * (xL >= 0.f ? (xL*xL) : -(xL*xL));
+                    xL += biasL;
+                    float k = 0.6f;
+                    y_totalL = xL - k * xL * xL * xL;
+
+                    float xR = y_totalR * drive;
+                    float biasR = asym * (xR >= 0.f ? (xR*xR) : -(xR*xR));
+                    xR += biasR;
+                    y_totalR = xR - k * xR * xR * xR;
+                }
+if (envR > th){
                         float mid=0.5f*(md->y_pre_lastR + y_totalR);
                         float y_mid= tanhf(mid * (1.f + 2.f*camt*(1.f+0.5f*jb_clamp(csym,-1.f,1.f))));
                         float y_hi = tanhf(y_totalR * (1.f + 2.f*camt*(1.f+0.5f*jb_clamp(csym,-1.f,1.f))));
