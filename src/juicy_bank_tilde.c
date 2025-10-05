@@ -29,6 +29,18 @@
 
 #include "m_pd.h"
 #include <math.h>
+
+static inline float jb_overdrive(float x, float amt, float asym)
+{
+    float drive = 1.f + 19.f * jb_clamp(amt, 0.f, 1.f);
+    float a = jb_clamp(asym, -1.f, 1.f) * 0.5f;
+    float y = x * drive;
+    float q = y * y;
+    y += (y >= 0.f ? +a*q : -a*q);
+    const float k = 0.6f;
+    return y - k * y * y * y;
+}
+
 #include <string.h>
 #include <stdlib.h>
 
@@ -322,7 +334,8 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
         float ratioL = ratio_base;
         float ratioR = ratio_base;
         if(i!=0){ ratioL += md_amt * md->md_hit_offsetL; ratioR += md_amt * md->md_hit_offsetR; }
-        if (ratioL < 0.01f) ratioL = 0.01f; if (ratioR < 0.01f) ratioR = 0.01f;
+        if (ratioL < 0.01f) ratioL = 0.01f;
+        if (ratioR < 0.01f) ratioR = 0.01f;
 
         float HzL = x->base[i].keytrack ? (v->f0 * ratioL) : ratioL;
         float HzR = x->base[i].keytrack ? (v->f0 * ratioR) : ratioR;
