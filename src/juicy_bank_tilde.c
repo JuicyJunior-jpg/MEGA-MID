@@ -659,7 +659,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     xR += biasR;
                     y_totalR = xR - k * xR * xR * xR;
                 }
-                }
 
                 // output sum with per-mode equal-power pan
                 {
