@@ -30,6 +30,10 @@
 #include "m_pd.h"
 #include <math.h>
 
+// forward decl to avoid implicit declaration in C99
+static inline float jb_clamp(float x, float lo, float hi);
+
+
 static inline float jb_overdrive(float x, float amt, float asym)
 {
     float drive = 1.f + 19.f * jb_clamp(amt, 0.f, 1.f);
@@ -176,7 +180,6 @@ typedef struct _juicy_bank_tilde {
     // Individual
     t_inlet *in_index, *in_ratio, *in_gain, *in_attack, *in_decya, *in_curve, *in_pan, *in_keytrack;
 } t_juicy_bank_tilde;
-
 
 static void juicy_bank_tilde_reset(t_juicy_bank_tilde *x);
 // ---------- helpers ----------
@@ -656,12 +659,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     xR += biasR;
                     y_totalR = xR - k * xR * xR * xR;
                 }
-if (envR > th){
-                        float mid=0.5f*(md->y_pre_lastR + y_totalR);
-                        float y_mid= tanhf(mid * (1.f + 2.f*camt*(1.f+0.5f*jb_clamp(csym,-1.f,1.f))));
-                        float y_hi = tanhf(y_totalR * (1.f + 2.f*camt*(1.f+0.5f*jb_clamp(csym,-1.f,1.f))));
-                        y_totalR = 0.5f*(y_mid+y_hi);
-                    }
                 }
 
                 // output sum with per-mode equal-power pan
