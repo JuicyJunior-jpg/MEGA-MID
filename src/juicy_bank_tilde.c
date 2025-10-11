@@ -171,8 +171,6 @@ typedef struct _juicy_bank_tilde {
     int exciter_mode; // 0 = use main L/R (legacy), 1 = use per-voice pairs
 
     t_outlet *outL, *outR;
-    t_outlet *out_vL[JB_MAX_VOICES];
-    t_outlet *out_vR[JB_MAX_VOICES];
 
     // INLET pointers
     // Behavior (reduced)
@@ -668,14 +666,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     float wL = sqrtf(0.5f*(1.f - p));
                     float wR = sqrtf(0.5f*(1.f + p));
                     outL[i] += y_totalL * wL;
-                outR[i] += y_totalR * wR;
-                switch(vix){
-                    case 0: v0L_out[i] += y_totalL * wL; v0R_out[i] += y_totalR * wR; break;
-                    case 1: v1L_out[i] += y_totalL * wL; v1R_out[i] += y_totalR * wR; break;
-                    case 2: v2L_out[i] += y_totalL * wL; v2R_out[i] += y_totalR * wR; break;
-                    case 3: v3L_out[i] += y_totalL * wL; v3R_out[i] += y_totalR * wR; break;
+                    outR[i] += y_totalR * wR;
                 }
-}
 
                 // update envelopes
                 float ayL=fabsf(y_totalL); envL = envL + 0.0015f*(ayL - envL); md->y_pre_lastL = y_totalL;
@@ -858,11 +850,11 @@ static void juicy_bank_tilde_dsp(t_juicy_bank_tilde *x, t_signal **sp){
     x->sr = sp[0]->s_sr;
     float fc=8.f; float RC=1.f/(2.f*M_PI*fc); float dt=1.f/x->sr; x->hp_a=RC/(RC+dt);
 
-    // sp layout: [inL, inR, v1L, v1R, v2L, v2R, v3L, v3R, v4L, v4R, outL, outR, v0L_out, v0R_out, v1L_out, v1R_out, v2L_out, v2R_out, v3L_out, v3R_out]
-    t_int argv[2 + 20 + 1];
+    // sp layout: [inL, inR, v1L, v1R, v2L, v2R, v3L, v3R, v4L, v4R, outL, outR]
+    t_int argv[2 + 12 + 1];
     int a=0;
     argv[a++] = (t_int)x;
-    for(int k=0;k<20;k++) argv[a++] = (t_int)(sp[k]->s_vec);
+    for(int k=0;k<12;k++) argv[a++] = (t_int)(sp[k]->s_vec);
     argv[a++] = (int)(sp[0]->s_n);
     dsp_addv(juicy_bank_tilde_perform, a, argv);
 }
@@ -878,7 +870,8 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){inlet_free(x->in_crossr
     inlet_free(x->inR);
     for(int i=0;i<JB_MAX_VOICES;i++){ if(x->in_vL[i]) inlet_free(x->in_vL[i]); if(x->in_vR[i]) inlet_free(x->in_vR[i]); }
 
-    }
+    outlet_free(x->outL); outlet_free(x->outR);
+}
 
 // ---------- new() ----------
 static void *juicy_bank_tilde_new(void){
@@ -961,10 +954,6 @@ static void *juicy_bank_tilde_new(void){
     // Outs
     x->outL = outlet_new(&x->x_obj, &s_signal);
     x->outR = outlet_new(&x->x_obj, &s_signal);
-    for(int vi=0; vi<JB_MAX_VOICES; ++vi){
-        x->out_vL[vi] = outlet_new(&x->x_obj, &s_signal);
-        x->out_vR[vi] = outlet_new(&x->x_obj, &s_signal);
-    }
     return (void *)x;
 }
 
