@@ -510,18 +510,9 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     // outputs
     t_sample *outL=(t_sample *)(w[12]);
     t_sample *outR=(t_sample *)(w[13]);
-    // per-voice outs
-    t_sample *v0L_out=(t_sample *)(w[14]);
-    t_sample *v0R_out=(t_sample *)(w[15]);
-    t_sample *v1L_out=(t_sample *)(w[16]);
-    t_sample *v1R_out=(t_sample *)(w[17]);
-    t_sample *v2L_out=(t_sample *)(w[18]);
-    t_sample *v2R_out=(t_sample *)(w[19]);
-    t_sample *v3L_out=(t_sample *)(w[20]);
-    t_sample *v3R_out=(t_sample *)(w[21]);
-    int n=(int)(w[22]);
+    int n=(int)(w[14]);
 
-    for(int i=0;i<n;i++){ outL[i]=0; outR[i]=0; v0L_out[i]=v0R_out[i]=v1L_out[i]=v1R_out[i]=v2L_out[i]=v2R_out[i]=v3L_out[i]=v3R_out[i]=0; }
+    for(int i=0;i<n;i++){ outL[i]=0; outR[i]=0; }
 
     // block updates
     for(int vix=0; vix<x->max_voices; ++vix){
@@ -677,15 +668,14 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     float wL = sqrtf(0.5f*(1.f - p));
                     float wR = sqrtf(0.5f*(1.f + p));
                     outL[i] += y_totalL * wL;
-                    outR[i] += y_totalR * wR;
-                    // write to per-voice outs
-                    switch(vix){
-                        case 0: v0L_out[i] += y_totalL * wL; v0R_out[i] += y_totalR * wR; break;
-                        case 1: v1L_out[i] += y_totalL * wL; v1R_out[i] += y_totalR * wR; break;
-                        case 2: v2L_out[i] += y_totalL * wL; v2R_out[i] += y_totalR * wR; break;
-                        case 3: v3L_out[i] += y_totalL * wL; v3R_out[i] += y_totalR * wR; break;
-                    }
-                    }
+                outR[i] += y_totalR * wR;
+                switch(vix){
+                    case 0: v0L_out[i] += y_totalL * wL; v0R_out[i] += y_totalR * wR; break;
+                    case 1: v1L_out[i] += y_totalL * wL; v1R_out[i] += y_totalR * wR; break;
+                    case 2: v2L_out[i] += y_totalL * wL; v2R_out[i] += y_totalR * wR; break;
+                    case 3: v3L_out[i] += y_totalL * wL; v3R_out[i] += y_totalR * wR; break;
+                }
+}
 
                 // update envelopes
                 float ayL=fabsf(y_totalL); envL = envL + 0.0015f*(ayL - envL); md->y_pre_lastL = y_totalL;
@@ -888,9 +878,7 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){inlet_free(x->in_crossr
     inlet_free(x->inR);
     for(int i=0;i<JB_MAX_VOICES;i++){ if(x->in_vL[i]) inlet_free(x->in_vL[i]); if(x->in_vR[i]) inlet_free(x->in_vR[i]); }
 
-    outlet_free(x->outL); outlet_free(x->outR);
-    for(int vi=0; vi<JB_MAX_VOICES; ++vi){ if(x->out_vL[vi]) outlet_free(x->out_vL[vi]); if(x->out_vR[vi]) outlet_free(x->out_vR[vi]); }
-}
+    }
 
 // ---------- new() ----------
 static void *juicy_bank_tilde_new(void){
@@ -973,7 +961,10 @@ static void *juicy_bank_tilde_new(void){
     // Outs
     x->outL = outlet_new(&x->x_obj, &s_signal);
     x->outR = outlet_new(&x->x_obj, &s_signal);
-    for(int vi=0; vi<JB_MAX_VOICES; ++vi){ x->out_vL[vi] = outlet_new(&x->x_obj, &s_signal); x->out_vR[vi] = outlet_new(&x->x_obj, &s_signal); }
+    for(int vi=0; vi<JB_MAX_VOICES; ++vi){
+        x->out_vL[vi] = outlet_new(&x->x_obj, &s_signal);
+        x->out_vR[vi] = outlet_new(&x->x_obj, &s_signal);
+    }
     return (void *)x;
 }
 
