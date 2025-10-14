@@ -128,12 +128,11 @@ typedef struct {
 static t_class *juicy_bank_tilde_class;
 
 typedef struct _juicy_bank_tilde {
-    // === BEGIN NEW: stereo mix/output gain (mix_gain) and per-voice excitation/send gain (send_gain) ===
+    // === NEW: global gains ===
     float mix_gain;      // 0..1, scales outL/outR (stereo mix)
-    float send_gain;     // 0..1, scales per-voice 8 outs (v1_L..v4_R) feeding the waveguide
+    float send_gain;     // 0..1, scales per-voice outs (ov1..ov4)
     t_inlet *in_mix_gain;
     t_inlet *in_send_gain;
-    // === END NEW ===
 
     t_object  x_obj; t_float f_dummy; t_float sr;
 
@@ -722,7 +721,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     x->hpL_x1=x1L; x->hpL_y1=y1L; x->hpR_x1=x1R; x->hpR_y1=y1R;
 
     
-    // === NEW: apply output (mix) and send (excitation) gains at end of block ===
+    // === NEW: apply mix/send gains at end (stable) ===
     {
         float mg = (x->mix_gain  < 0.f ? 0.f : (x->mix_gain  > 1.f ? 1.f : x->mix_gain));
         float sg = (x->send_gain < 0.f ? 0.f : (x->send_gain > 1.f ? 1.f : x->send_gain));
@@ -901,19 +900,19 @@ static void juicy_bank_tilde_dsp(t_juicy_bank_tilde *x, t_signal **sp){
     dsp_addv(juicy_bank_tilde_perform, a, argv);
 }
 
-static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){if (x->in_crossring) inlet_free(x->in_crossring);
+static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){inlet_free(x->in_crossring);
 
-    if (x->in_damping) inlet_free(x->in_damping); if (x->in_brightness) inlet_free(x->in_brightness); if (x->in_position) inlet_free(x->in_position);
-    if (x->in_density) inlet_free(x->in_density); if (x->in_dispersion) inlet_free(x->in_dispersion); if (x->in_aniso) inlet_free(x->in_aniso); if (x->in_contact) inlet_free(x->in_contact);
+    inlet_free(x->in_damping); inlet_free(x->in_brightness); inlet_free(x->in_position);
+    inlet_free(x->in_density); inlet_free(x->in_dispersion); inlet_free(x->in_aniso); inlet_free(x->in_contact);
 
-    if (x->in_index) inlet_free(x->in_index); if (x->in_ratio) inlet_free(x->in_ratio); if (x->in_gain) inlet_free(x->in_gain);
-    if (x->in_attack) inlet_free(x->in_attack); if (x->in_decya) inlet_free(x->in_decya); if (x->in_curve) inlet_free(x->in_curve); if (x->in_pan) inlet_free(x->in_pan); if (x->in_keytrack) inlet_free(x->in_keytrack);
+    inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
+    inlet_free(x->in_attack); inlet_free(x->in_decya); inlet_free(x->in_curve); inlet_free(x->in_pan); inlet_free(x->in_keytrack);
 
     
-    // NEW: guarded frees for our added inlets
-    if (x->in_mix_gain)  if (x->in_mix_gain) inlet_free(x->in_mix_gain);
-    if (x->in_send_gain) if (x->in_send_gain) inlet_free(x->in_send_gain);
-if (x->inR) inlet_free(x->inR);
+    // NEW: guarded frees for added inlets
+    if (x->in_mix_gain)  inlet_free(x->in_mix_gain);
+    if (x->in_send_gain) inlet_free(x->in_send_gain);
+inlet_free(x->inR);
     for(int i=0;i<JB_MAX_VOICES;i++){ if(x->in_vL[i]) inlet_free(x->in_vL[i]); if(x->in_vR[i]) inlet_free(x->in_vR[i]); }
 
     outlet_free(x->outL); outlet_free(x->outR);
@@ -951,10 +950,9 @@ static void *juicy_bank_tilde_new(void){
 
     x->basef0_ref=261.626f; // C4
 
-    // NEW defaults for gains
+    // NEW: gain defaults & NULL-init
     x->mix_gain  = 1.0f;
     x->send_gain = 1.0f;
-    // Ensure pointers start null (safe free if creation path changes)
     x->in_mix_gain  = NULL;
     x->in_send_gain = NULL;
     x->stiffen_amt=x->shortscale_amt=x->linger_amt=x->tilt_amt=x->bite_amt=x->bloom_amt=x->crossring_amt=0.f;
@@ -1004,11 +1002,7 @@ static void *juicy_bank_tilde_new(void){
     x->in_pan        = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("pan"));
     x->in_keytrack   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("keytrack"));
 
-    
-    // NEW: two control inlets after keytrack: mix (stereo out) and excitation/send (per-voice outs)
-    x->in_mix_gain  = floatinlet_new(&x->x_obj, &x->mix_gain);
-    x->in_send_gain = floatinlet_new(&x->x_obj, &x->send_gain);
-// Outs
+    // Outs
     x->outL = outlet_new(&x->x_obj, &s_signal);
     x->outR = outlet_new(&x->x_obj, &s_signal);
     
