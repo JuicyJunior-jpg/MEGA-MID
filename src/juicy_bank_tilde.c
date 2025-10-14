@@ -901,19 +901,19 @@ static void juicy_bank_tilde_dsp(t_juicy_bank_tilde *x, t_signal **sp){
     dsp_addv(juicy_bank_tilde_perform, a, argv);
 }
 
-static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){inlet_free(x->in_crossring);
+static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){if (x->in_crossring) inlet_free(x->in_crossring);
 
-    inlet_free(x->in_damping); inlet_free(x->in_brightness); inlet_free(x->in_position);
-    inlet_free(x->in_density); inlet_free(x->in_dispersion); inlet_free(x->in_aniso); inlet_free(x->in_contact);
+    if (x->in_damping) inlet_free(x->in_damping); if (x->in_brightness) inlet_free(x->in_brightness); if (x->in_position) inlet_free(x->in_position);
+    if (x->in_density) inlet_free(x->in_density); if (x->in_dispersion) inlet_free(x->in_dispersion); if (x->in_aniso) inlet_free(x->in_aniso); if (x->in_contact) inlet_free(x->in_contact);
 
-    inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
-    inlet_free(x->in_attack); inlet_free(x->in_decya); inlet_free(x->in_curve); inlet_free(x->in_pan); inlet_free(x->in_keytrack);
+    if (x->in_index) inlet_free(x->in_index); if (x->in_ratio) inlet_free(x->in_ratio); if (x->in_gain) inlet_free(x->in_gain);
+    if (x->in_attack) inlet_free(x->in_attack); if (x->in_decya) inlet_free(x->in_decya); if (x->in_curve) inlet_free(x->in_curve); if (x->in_pan) inlet_free(x->in_pan); if (x->in_keytrack) inlet_free(x->in_keytrack);
 
     
     // NEW: guarded frees for our added inlets
-    if (x->in_mix_gain)  inlet_free(x->in_mix_gain);
-    if (x->in_send_gain) inlet_free(x->in_send_gain);
-inlet_free(x->inR);
+    if (x->in_mix_gain)  if (x->in_mix_gain) inlet_free(x->in_mix_gain);
+    if (x->in_send_gain) if (x->in_send_gain) inlet_free(x->in_send_gain);
+if (x->inR) inlet_free(x->inR);
     for(int i=0;i<JB_MAX_VOICES;i++){ if(x->in_vL[i]) inlet_free(x->in_vL[i]); if(x->in_vR[i]) inlet_free(x->in_vR[i]); }
 
     outlet_free(x->outL); outlet_free(x->outR);
