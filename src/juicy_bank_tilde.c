@@ -128,12 +128,6 @@ typedef struct {
 static t_class *juicy_bank_tilde_class;
 
 typedef struct _juicy_bank_tilde {
-    // === NEW: global gains ===
-    float mix_gain;      // 0..1, scales outL/outR (stereo mix)
-    float send_gain;     // 0..1, scales per-voice outs (ov1..ov4)
-    t_inlet *in_mix_gain;
-    t_inlet *in_send_gain;
-
     t_object  x_obj; t_float f_dummy; t_float sr;
 
     int n_modes;
@@ -720,25 +714,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     }
     x->hpL_x1=x1L; x->hpL_y1=y1L; x->hpR_x1=x1R; x->hpR_y1=y1R;
 
-    
-    // === NEW: apply mix/send gains at end (stable) ===
-    {
-        float mg = (x->mix_gain  < 0.f ? 0.f : (x->mix_gain  > 1.f ? 1.f : x->mix_gain));
-        float sg = (x->send_gain < 0.f ? 0.f : (x->send_gain > 1.f ? 1.f : x->send_gain));
-        for (int _i_ = 0; _i_ < n; ++_i_) {
-            outL[_i_] *= mg;
-            outR[_i_] *= mg;
-            ov1L[_i_] *= sg;
-            ov1R[_i_] *= sg;
-            ov2L[_i_] *= sg;
-            ov2R[_i_] *= sg;
-            ov3L[_i_] *= sg;
-            ov3R[_i_] *= sg;
-            ov4L[_i_] *= sg;
-            ov4R[_i_] *= sg;
-        }
-    }
-return (w + 23);
+    return (w + 23);
 }
 
 // ---------- base setters & messages ----------
@@ -908,11 +884,7 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){inlet_free(x->in_crossr
     inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     inlet_free(x->in_attack); inlet_free(x->in_decya); inlet_free(x->in_curve); inlet_free(x->in_pan); inlet_free(x->in_keytrack);
 
-    
-    // NEW: guarded frees for added inlets
-    if (x->in_mix_gain)  inlet_free(x->in_mix_gain);
-    if (x->in_send_gain) inlet_free(x->in_send_gain);
-inlet_free(x->inR);
+    inlet_free(x->inR);
     for(int i=0;i<JB_MAX_VOICES;i++){ if(x->in_vL[i]) inlet_free(x->in_vL[i]); if(x->in_vR[i]) inlet_free(x->in_vR[i]); }
 
     outlet_free(x->outL); outlet_free(x->outR);
@@ -949,12 +921,6 @@ static void *juicy_bank_tilde_new(void){
     x->bandwidth=0.1f; x->micro_detune=0.1f;
 
     x->basef0_ref=261.626f; // C4
-
-    // NEW: gain defaults & NULL-init
-    x->mix_gain  = 1.0f;
-    x->send_gain = 1.0f;
-    x->in_mix_gain  = NULL;
-    x->in_send_gain = NULL;
     x->stiffen_amt=x->shortscale_amt=x->linger_amt=x->tilt_amt=x->bite_amt=x->bloom_amt=x->crossring_amt=0.f;
 
     x->max_voices = JB_MAX_VOICES;
