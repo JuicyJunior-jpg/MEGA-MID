@@ -128,14 +128,7 @@ typedef struct {
 static t_class *juicy_bank_tilde_class;
 
 typedef struct _juicy_bank_tilde {
-    // === NEW: global gains ===
-    float mix_gain;      // 0..1, scales outL/outR (stereo mix)
-    float send_gain;     // 0..1, scales per-voice outs (ov1..ov4)
-    t_inlet *in_mix_gain;
-    t_inlet *in_send_gain;
-
-    t_object  x_obj; t_float f_dummy; t_float sr;
-
+    
     int n_modes;
     jb_mode_base_t base[JB_MAX_MODES];
 
@@ -543,7 +536,14 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     int phase_hits_block=0;
 
     // choose buffer arrays for per-voice mode
-    t_sample *vinL[JB_MAX_VOICES] = { v1L, v2L, v3L, v4L };
+    t_sample *vinL[JB_MAX_VOICES] = { v1L, v2L, v3L, v4L
+    // === MIX/SEND GAINS appended at END (struct layout safe) ===
+    float mix_gain;      // 0..1 stereo mix
+    float send_gain;     // 0..1 per-voice send
+    t_inlet *in_mix_gain;
+    t_inlet *in_send_gain;
+
+};
     t_sample *vinR[JB_MAX_VOICES] = { v1R, v2R, v3R, v4R };
 
     for(int vix=0; vix<x->max_voices; ++vix){
@@ -1000,7 +1000,11 @@ static void *juicy_bank_tilde_new(void){
     x->in_pan        = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("pan"));
     x->in_keytrack   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("keytrack"));
 
-    // Outs
+    
+    // control inlets after keytrack
+    x->in_mix_gain  = floatinlet_new(&x->x_obj, &x->mix_gain);
+    x->in_send_gain = floatinlet_new(&x->x_obj, &x->send_gain);
+// Outs
     x->outL = outlet_new(&x->x_obj, &s_signal);
     x->outR = outlet_new(&x->x_obj, &s_signal);
     
