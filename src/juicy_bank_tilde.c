@@ -128,11 +128,12 @@ typedef struct {
 static t_class *juicy_bank_tilde_class;
 
 typedef struct _juicy_bank_tilde {
-    // === NEW: output/mix gain (stereo out) and excitation/send gain (per-voice outs) ===
-    float mix_gain;      // 0..1, scales outL/outR
-    float send_gain;     // 0..1, scales per-voice 8 outs to waveguide
+    // === BEGIN NEW: stereo mix/output gain (mix_gain) and per-voice excitation/send gain (send_gain) ===
+    float mix_gain;      // 0..1, scales outL/outR (stereo mix)
+    float send_gain;     // 0..1, scales per-voice 8 outs (v1_L..v4_R) feeding the waveguide
     t_inlet *in_mix_gain;
     t_inlet *in_send_gain;
+    // === END NEW ===
 
     t_object  x_obj; t_float f_dummy; t_float sr;
 
@@ -527,11 +528,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     t_sample *ov4R=(t_sample *)(w[21]);
     int n=(int)(w[22]);
 
-    
-    // NEW: cached gains (clamped 0..1)
-    float mix_gain  = (x->mix_gain  < 0.f ? 0.f : (x->mix_gain  > 1.f ? 1.f : x->mix_gain));
-    float send_gain = (x->send_gain < 0.f ? 0.f : (x->send_gain > 1.f ? 1.f : x->send_gain));
-for(int i=0;i<n;i++){ outL[i]=outR[i]=0; ov1L[i]=ov1R[i]=ov2L[i]=ov2R[i]=ov3L[i]=ov3R[i]=ov4L[i]=ov4R[i]=0; }
+    for(int i=0;i<n;i++){ outL[i]=outR[i]=0; ov1L[i]=ov1R[i]=ov2L[i]=ov2R[i]=ov3L[i]=ov3R[i]=ov4L[i]=ov4R[i]=0; }
 
     // block updates
     for(int vix=0; vix<x->max_voices; ++vix){
@@ -686,13 +683,13 @@ for(int i=0;i<n;i++){ outL[i]=outR[i]=0; ov1L[i]=ov1R[i]=ov2L[i]=ov2R[i]=ov3L[i]
                     float p = jb_clamp(x->base[m].pan, -1.f, 1.f);
                     float wL = sqrtf(0.5f*(1.f - p));
                     float wR = sqrtf(0.5f*(1.f + p));
-                    outL[i] += mix_gain * (y_totalL * wL);
-                    outR[i] += mix_gain * (y_totalR * wR);
+                    outL[i] += y_totalL * wL;
+                    outR[i] += y_totalR * wR;
                 switch(vix){
-                    case 0: ov1L[i]+= send_gain *  y_totalL * wL; ov1R[i]+= send_gain *  y_totalR * wR; break;
-                    case 1: ov2L[i]+= send_gain *  y_totalL * wL; ov2R[i]+= send_gain *  y_totalR * wR; break;
-                    case 2: ov3L[i]+= send_gain *  y_totalL * wL; ov3R[i]+= send_gain *  y_totalR * wR; break;
-                    case 3: ov4L[i]+= send_gain *  y_totalL * wL; ov4R[i]+= send_gain *  y_totalR * wR; break;
+                    case 0: ov1L[i]+= y_totalL * wL; ov1R[i]+= y_totalR * wR; break;
+                    case 1: ov2L[i]+= y_totalL * wL; ov2R[i]+= y_totalR * wR; break;
+                    case 2: ov3L[i]+= y_totalL * wL; ov3R[i]+= y_totalR * wR; break;
+                    case 3: ov4L[i]+= y_totalL * wL; ov4R[i]+= y_totalR * wR; break;
                 }
                 }
 
@@ -724,7 +721,25 @@ for(int i=0;i<n;i++){ outL[i]=outR[i]=0; ov1L[i]=ov1R[i]=ov2L[i]=ov2R[i]=ov3L[i]
     }
     x->hpL_x1=x1L; x->hpL_y1=y1L; x->hpR_x1=x1R; x->hpR_y1=y1R;
 
-    return (w + 23);
+    
+    // === NEW: apply output (mix) and send (excitation) gains at end of block ===
+    {
+        float mg = (x->mix_gain  < 0.f ? 0.f : (x->mix_gain  > 1.f ? 1.f : x->mix_gain));
+        float sg = (x->send_gain < 0.f ? 0.f : (x->send_gain > 1.f ? 1.f : x->send_gain));
+        for (int _i_ = 0; _i_ < n; ++_i_) {
+            outL[_i_] *= mg;
+            outR[_i_] *= mg;
+            ov1L[_i_] *= sg;
+            ov1R[_i_] *= sg;
+            ov2L[_i_] *= sg;
+            ov2R[_i_] *= sg;
+            ov3L[_i_] *= sg;
+            ov3R[_i_] *= sg;
+            ov4L[_i_] *= sg;
+            ov4R[_i_] *= sg;
+        }
+    }
+return (w + 23);
 }
 
 // ---------- base setters & messages ----------
@@ -895,8 +910,9 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){inlet_free(x->in_crossr
     inlet_free(x->in_attack); inlet_free(x->in_decya); inlet_free(x->in_curve); inlet_free(x->in_pan); inlet_free(x->in_keytrack);
 
     
-    inlet_free(x->in_mix_gain);
-    inlet_free(x->in_send_gain);
+    // NEW: guarded frees for our added inlets
+    if (x->in_mix_gain)  inlet_free(x->in_mix_gain);
+    if (x->in_send_gain) inlet_free(x->in_send_gain);
 inlet_free(x->inR);
     for(int i=0;i<JB_MAX_VOICES;i++){ if(x->in_vL[i]) inlet_free(x->in_vL[i]); if(x->in_vR[i]) inlet_free(x->in_vR[i]); }
 
@@ -934,11 +950,14 @@ static void *juicy_bank_tilde_new(void){
     x->bandwidth=0.1f; x->micro_detune=0.1f;
 
     x->basef0_ref=261.626f; // C4
-    
+
     // NEW defaults for gains
-    x->mix_gain = 1.0f;
+    x->mix_gain  = 1.0f;
     x->send_gain = 1.0f;
-x->stiffen_amt=x->shortscale_amt=x->linger_amt=x->tilt_amt=x->bite_amt=x->bloom_amt=x->crossring_amt=0.f;
+    // Ensure pointers start null (safe free if creation path changes)
+    x->in_mix_gain  = NULL;
+    x->in_send_gain = NULL;
+    x->stiffen_amt=x->shortscale_amt=x->linger_amt=x->tilt_amt=x->bite_amt=x->bloom_amt=x->crossring_amt=0.f;
 
     x->max_voices = JB_MAX_VOICES;
     for(int v=0; v<JB_MAX_VOICES; ++v){
