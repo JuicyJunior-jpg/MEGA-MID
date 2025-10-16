@@ -352,8 +352,6 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
         md->a1R=2.f*r*cR; md->a2R=-r*r;
 
         // --- NEW: frequency-normalized resonance drive factors ---
-        // Gain at resonance for y[n] = a1*y[n-1] + a2*y[n-2] + x[n] is ~1/(1 - 2 r cos w + r^2).
-        // Multiply input drive by that denominator to flatten loudness vs frequency.
         float denomL = (1.f - 2.f*r*cL + r*r);
         float denomR = (1.f - 2.f*r*cR + r*r);
         if (denomL < 1e-6f) denomL = 1e-6f;
@@ -536,8 +534,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
         float bw_amt = jb_clamp(v->bandwidth_v, 0.f, 1.f);
         // excitation gating:
-        //  • legacy mode (0): only HELD voices listen to the shared inL/inR
-        //  • per-voice mode (1): the dedicated input carries its own envelope
         const float use_gate = (x->exciter_mode==0) ? ((v->state==V_HELD)?1.f:0.f) : 1.f;
         t_sample *srcL = (x->exciter_mode==0) ? inL : vinL[vix];
         t_sample *srcR = (x->exciter_mode==0) ? inR : vinR[vix];
@@ -871,25 +867,40 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
     outlet_free(x->outL); outlet_free(x->outR);
 }
 
+
+// ---------- defaults helper ----------
+static void jb_apply_default_saw(t_juicy_bank_tilde *x){
+    x->n_modes = JB_MAX_MODES;
+    x->edit_idx = 0;
+    for(int i=0;i<JB_MAX_MODES;i++){
+        x->base[i].active = 1;
+        x->base[i].base_ratio = (float)(i+1);
+        x->base[i].base_decay_ms = 1000.f;   // 1 second
+        // True saw-like harmonic amplitude: ~1/n
+        x->base[i].base_gain = 1.0f / (float)(i+1);
+        x->base[i].attack_ms = 0.f;
+        x->base[i].curve_amt = 0.f;          // linear
+        x->base[i].pan = 0.f;
+        x->base[i].keytrack = 1;
+        x->base[i].disp_signature = 0.f;
+        x->base[i].micro_sig      = 0.f;
+    }
+    // sensible body defaults
+    x->damping = 0.f; x->brightness = 0.5f; x->position = 0.f;
+    x->density_amt = 0.f; x->density_mode = DENSITY_PIVOT;
+    x->dispersion = 0.f; x->dispersion_last = -1.f;
+    x->spacing = 0.f;
+    x->aniso = 0.f; x->aniso_eps = 0.02f;
+    x->contact_amt=0.f; x->contact_sym=0.f;
+}
+
 // ---------- new() ----------
 static void *juicy_bank_tilde_new(void){
     t_juicy_bank_tilde *x=(t_juicy_bank_tilde *)pd_new(juicy_bank_tilde_class);
     x->sr = sys_getsr(); if(x->sr<=0) x->sr=48000;
 
-    // --- Startup spec (64 modes) ---
-    x->n_modes=JB_MAX_MODES; x->edit_idx=0;
-    for(int i=0;i<JB_MAX_MODES;i++){
-        x->base[i].active=1;
-        x->base[i].base_ratio=(float)(i+1);
-        x->base[i].base_decay_ms=1000.f;   // 1 second
-        x->base[i].base_gain=1.0f;         // "max"
-        x->base[i].attack_ms=0.f;
-        x->base[i].curve_amt=0.f;          // linear
-        x->base[i].pan=0.f;
-        x->base[i].keytrack=1;
-        x->base[i].disp_signature = 0.f;
-        x->base[i].micro_sig      = 0.f;
-    }
+    // --- Startup spec (64 modes, real saw amplitude 1/n) ---
+    jb_apply_default_saw(x);
 
     // body defaults
     x->damping=0.f; x->brightness=0.5f; x->position=0.f;
@@ -958,6 +969,16 @@ static void *juicy_bank_tilde_new(void){
     x->outR = outlet_new(&x->x_obj, &s_signal);
     return (void *)x;
 }
+
+
+// ---------- INIT (factory re-init) ----------
+static void juicy_bank_tilde_INIT(t_juicy_bank_tilde *x){
+    // Apply 64-mode saw defaults (1/n amplitude), then reset states
+    jb_apply_default_saw(x);
+    juicy_bank_tilde_restart(x);
+    post("juicy_bank~: INIT complete (64 modes, saw-like gains 1/n, decay=1s).");
+}
+static void juicy_bank_tilde_init_alias(t_juicy_bank_tilde *x){ juicy_bank_tilde_INIT(x); }
 
 // ---------- setup ----------
 void juicy_bank_tilde_setup(void){
@@ -1036,4 +1057,6 @@ void juicy_bank_tilde_setup(void){
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_base_alias, gensym("base"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_exciter_mode, gensym("exciter_mode"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_restart, gensym("restart"), 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_INIT, gensym("INIT"), 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_init_alias, gensym("init"), 0);
 }
