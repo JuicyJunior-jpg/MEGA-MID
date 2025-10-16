@@ -171,8 +171,6 @@ typedef struct _juicy_bank_tilde {
     int exciter_mode; // 0 = use main L/R (legacy), 1 = use per-voice pairs
 
     t_outlet *outL, *outR;
-    t_outlet *out_vL[4];
-    t_outlet *out_vR[4];
 
     // INLET pointers
     // Behavior (reduced)
@@ -510,18 +508,9 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     // outputs
     t_sample *outL=(t_sample *)(w[12]);
     t_sample *outR=(t_sample *)(w[13]);
-    
-    t_sample *ov1L=(t_sample *)(w[14]);
-    t_sample *ov1R=(t_sample *)(w[15]);
-    t_sample *ov2L=(t_sample *)(w[16]);
-    t_sample *ov2R=(t_sample *)(w[17]);
-    t_sample *ov3L=(t_sample *)(w[18]);
-    t_sample *ov3R=(t_sample *)(w[19]);
-    t_sample *ov4L=(t_sample *)(w[20]);
-    t_sample *ov4R=(t_sample *)(w[21]);
-    int n=(int)(w[22]);
+    int n=(int)(w[14]);
 
-    for(int i=0;i<n;i++){ outL[i]=outR[i]=0; ov1L[i]=ov1R[i]=ov2L[i]=ov2R[i]=ov3L[i]=ov3R[i]=ov4L[i]=ov4R[i]=0; }
+    for(int i=0;i<n;i++){ outL[i]=0; outR[i]=0; }
 
     // block updates
     for(int vix=0; vix<x->max_voices; ++vix){
@@ -678,12 +667,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     float wR = sqrtf(0.5f*(1.f + p));
                     outL[i] += y_totalL * wL;
                     outR[i] += y_totalR * wR;
-                switch(vix){
-                    case 0: ov1L[i]+= y_totalL * wL; ov1R[i]+= y_totalR * wR; break;
-                    case 1: ov2L[i]+= y_totalL * wL; ov2R[i]+= y_totalR * wR; break;
-                    case 2: ov3L[i]+= y_totalL * wL; ov3R[i]+= y_totalR * wR; break;
-                    case 3: ov4L[i]+= y_totalL * wL; ov4R[i]+= y_totalR * wR; break;
-                }
                 }
 
                 // update envelopes
@@ -714,7 +697,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     }
     x->hpL_x1=x1L; x->hpL_y1=y1L; x->hpR_x1=x1R; x->hpR_y1=y1R;
 
-    return (w + 23);
+    return (w + 15);
 }
 
 // ---------- base setters & messages ----------
@@ -867,11 +850,11 @@ static void juicy_bank_tilde_dsp(t_juicy_bank_tilde *x, t_signal **sp){
     x->sr = sp[0]->s_sr;
     float fc=8.f; float RC=1.f/(2.f*M_PI*fc); float dt=1.f/x->sr; x->hp_a=RC/(RC+dt);
 
-    // sp layout: [inL, inR, v1L, v1R, v2L, v2R, v3L, v3R, v4L, v4R, outL, outR, ov1L, ov1R, ov2L, ov2R, ov3L, ov3R, ov4L, ov4R]
-    t_int argv[2 + 20 + 1];
+    // sp layout: [inL, inR, v1L, v1R, v2L, v2R, v3L, v3R, v4L, v4R, outL, outR]
+    t_int argv[2 + 12 + 1];
     int a=0;
     argv[a++] = (t_int)x;
-    for(int k=0;k<20;k++) argv[a++] = (t_int)(sp[k]->s_vec);
+    for(int k=0;k<12;k++) argv[a++] = (t_int)(sp[k]->s_vec);
     argv[a++] = (int)(sp[0]->s_n);
     dsp_addv(juicy_bank_tilde_perform, a, argv);
 }
@@ -971,9 +954,7 @@ static void *juicy_bank_tilde_new(void){
     // Outs
     x->outL = outlet_new(&x->x_obj, &s_signal);
     x->outR = outlet_new(&x->x_obj, &s_signal);
-    
-    for(int i=0;i<4;i++){ x->out_vL[i]=outlet_new(&x->x_obj,&s_signal); x->out_vR[i]=outlet_new(&x->x_obj,&s_signal);} 
-return (void *)x;
+    return (void *)x;
 }
 
 // ---------- setup ----------
