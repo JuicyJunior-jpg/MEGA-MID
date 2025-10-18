@@ -409,7 +409,8 @@ static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
         g *= v->cr_gain_mul[i];
 
         
-        // --- SINE AM mask across mode index ---
+float gn = g * w * wp;
+        // --- SINE AM mask (applied after gn is computed) ---
         {
             int N = x->n_modes;
             float pitch = jb_clamp(x->sine_pitch, 0.f, 1.f);
@@ -421,13 +422,12 @@ static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
             float cycles = cycles_min + pitch * (cycles_max - cycles_min);
             float k_norm = (N>1) ? ((float)i / (float)(N-1)) : 0.f;
             float theta = 2.f * (float)M_PI * (cycles * k_norm + phase);
-            float w01 = 0.5f * (1.f + cosf(theta));      // [0..1]
-            float sharp = 1.0f + 8.0f * depth;           // sharpen valleys
+            float w01 = 0.5f * (1.f + cosf(theta));
+            float sharp = 1.0f + 8.0f * depth;
             float w_sharp = powf(w01, sharp);
-            float mask = (1.f - depth) + depth * w_sharp; // cut-only
+            float mask = (1.f - depth) + depth * w_sharp;
             gn *= mask;
         }
-float gn = g * w * wp;
         v->m[i].gain_now = (gn<0.f)?0.f:gn;
     }
 }
