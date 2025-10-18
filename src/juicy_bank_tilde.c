@@ -158,6 +158,16 @@ typedef struct _juicy_bank_tilde {
     t_inlet *in_damping, *in_brightness, *in_position, *in_density, *in_dispersion, *in_spacing, *in_aniso, *in_contact;
     // Individual
     t_inlet *in_index, *in_ratio, *in_gain, *in_attack, *in_decya, *in_curve, *in_pan, *in_keytrack;
+
+    // --- SINE (AM across modes) ---
+    float sine_pitch;   // 0..1
+    float sine_depth;   // 0..1
+    float sine_phase;   // 0..1 (wraps)
+
+    // inlets for SINE
+    t_inlet *in_sine_pitch;
+    t_inlet *in_sine_depth;
+    t_inlet *in_sine_phase;
 } t_juicy_bank_tilde;
 
 // ---------- helpers ----------
@@ -398,7 +408,26 @@ static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
 
         g *= v->cr_gain_mul[i];
 
-        float gn = g * w * wp;
+        
+        // --- SINE AM mask across mode index ---
+        {
+            int N = x->n_modes;
+            float pitch = jb_clamp(x->sine_pitch, 0.f, 1.f);
+            float depth = jb_clamp(x->sine_depth, 0.f, 1.f);
+            float phase = x->sine_phase;
+            float cycles_min = 0.25f;
+            float cycles_max = floorf((float)N * 0.5f);
+            if (cycles_max < cycles_min) cycles_max = cycles_min;
+            float cycles = cycles_min + pitch * (cycles_max - cycles_min);
+            float k_norm = (N>1) ? ((float)i / (float)(N-1)) : 0.f;
+            float theta = 2.f * (float)M_PI * (cycles * k_norm + phase);
+            float w01 = 0.5f * (1.f + cosf(theta));      // [0..1]
+            float sharp = 1.0f + 8.0f * depth;           // sharpen valleys
+            float w_sharp = powf(w01, sharp);
+            float mask = (1.f - depth) + depth * w_sharp; // cut-only
+            gn *= mask;
+        }
+float gn = g * w * wp;
         v->m[i].gain_now = (gn<0.f)?0.f:gn;
     }
 }
@@ -768,6 +797,19 @@ static void juicy_bank_tilde_phase_random(t_juicy_bank_tilde *x, t_floatarg f){ 
 static void juicy_bank_tilde_phase_debug(t_juicy_bank_tilde *x, t_floatarg on){ x->phase_debug=(on>0.f)?1:0; }
 static void juicy_bank_tilde_bandwidth(t_juicy_bank_tilde *x, t_floatarg f){ x->bandwidth=jb_clamp(f,0.f,1.f); }
 static void juicy_bank_tilde_micro_detune(t_juicy_bank_tilde *x, t_floatarg f){ x->micro_detune=jb_clamp(f,0.f,1.f); }
+// --- SINE param setters ---
+static void juicy_bank_tilde_sine_pitch(t_juicy_bank_tilde *x, t_floatarg f){
+    x->sine_pitch = jb_clamp(f, 0.f, 1.f);
+}
+static void juicy_bank_tilde_sine_depth(t_juicy_bank_tilde *x, t_floatarg f){
+    x->sine_depth = jb_clamp(f, 0.f, 1.f);
+}
+static void juicy_bank_tilde_sine_phase(t_juicy_bank_tilde *x, t_floatarg f){
+    float p = f - floorf(f);
+    if (p < 0.f) p += 1.f;
+    x->sine_phase = p;
+}
+
 
 // dispersion & seeds
 static void juicy_bank_tilde_dispersion(t_juicy_bank_tilde *x, t_floatarg f){
@@ -861,7 +903,10 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
     inlet_free(x->in_density); inlet_free(x->in_dispersion); inlet_free(x->in_spacing);
     inlet_free(x->in_aniso); inlet_free(x->in_contact);
 
-    inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
+        inlet_free(x->in_sine_pitch);
+    inlet_free(x->in_sine_depth);
+    inlet_free(x->in_sine_phase);
+inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     inlet_free(x->in_attack); inlet_free(x->in_decya); inlet_free(x->in_curve); inlet_free(x->in_pan); inlet_free(x->in_keytrack);
 
     inlet_free(x->inR);
@@ -916,6 +961,8 @@ static void *juicy_bank_tilde_new(void){
     // realism defaults
     x->phase_rand=1.f; x->phase_debug=0;
     x->bandwidth=0.1f; x->micro_detune=0.1f;
+    x->sine_pitch=0.f; x->sine_depth=0.f; x->sine_phase=0.f;
+
 
     x->basef0_ref=261.626f; // C4
     x->stiffen_amt=x->shortscale_amt=x->linger_amt=x->tilt_amt=x->bite_amt=x->bloom_amt=x->crossring_amt=0.f;
@@ -957,7 +1004,12 @@ static void *juicy_bank_tilde_new(void){
     x->in_aniso      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("anisotropy"));
     x->in_contact    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("contact"));
 
-    // Individual
+    
+    // SINE controls
+    x->in_sine_pitch = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_pitch"));
+    x->in_sine_depth = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_depth"));
+    x->in_sine_phase = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_phase"));
+// Individual
     x->in_index      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("index"));
     x->in_ratio      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("ratio"));
     x->in_gain       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("gain"));
@@ -1016,7 +1068,12 @@ void juicy_bank_tilde_setup(void){
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_contact, gensym("contact"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_contact_sym, gensym("contact_symmetry"), A_DEFFLOAT, 0);
 
-    // INDIVIDUAL (per-mode)
+    
+    // SINE methods
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_sine_pitch, gensym("sine_pitch"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_sine_depth, gensym("sine_depth"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_sine_phase, gensym("sine_phase"), A_DEFFLOAT, 0);
+// INDIVIDUAL (per-mode)
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index, gensym("index"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_ratio_i, gensym("ratio"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_gain_i, gensym("gain"), A_DEFFLOAT, 0);
