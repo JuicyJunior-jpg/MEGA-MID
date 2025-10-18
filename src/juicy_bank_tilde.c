@@ -355,8 +355,7 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
         if (x->dispersion < 0.f){ float a = jb_clamp(-x->dispersion, 0.f, 1.f); float nearest = roundf(ratio_base); ratio_base = (1.f - a)*ratio_base + a*nearest; }
 
         // spacing inlet repurposed as density pivot bias; no harmonic stepping here.
-
-        // micro detune per-ear (except fundamental)
+// micro detune per-ear (except fundamental)
         float ratioL = ratio_base;
         float ratioR = ratio_base;
         if(i!=0){ ratioL += md_amt * md->md_hit_offsetL; ratioR += md_amt * md->md_hit_offsetR; }
