@@ -229,6 +229,7 @@ static void jb_apply_density(const t_juicy_bank_tilde *x, jb_voice_t *v){
         v->m[i].ratio_now = r;
     }
 
+}
 // ---------- behavior projection ----------
 static void jb_project_behavior_into_voice(t_juicy_bank_tilde *x, jb_voice_t *v){
     float xfac = (x->basef0_ref>0.f)? (v->f0 / x->basef0_ref) : 1.f;
@@ -305,7 +306,6 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
     jb_apply_density(x, v);
 
     float md_amt = jb_clamp(x->micro_detune,0.f,1.f);
-    float bw_amt = jb_clamp(v->bandwidth_v, 0.f, 1.f);
     float spacing = jb_clamp(x->spacing, 0.f, 1.f); // NEW
 
     for(int i=0;i<x->n_modes;i++){
@@ -337,6 +337,7 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
         float wL = 2.f * (float)M_PI * HzL / x->sr;
         float wR = 2.f * (float)M_PI * HzR / x->sr;
 
+        float base_ms = x->base[i].base_decay_ms;
         // T60 & radius
         float T60 = jb_clamp(base_ms, 0.f, 1e7f) * 0.001f;
         T60 *= (1.f - jb_clamp(x->damping, -1.f, 1.f));
@@ -778,10 +779,6 @@ static void juicy_bank_tilde_dispersion(t_juicy_bank_tilde *x, t_floatarg f){
     }
     x->dispersion = v;
 }
-        x->dispersion_last=v;
-    }
-    x->dispersion=v;
-}
 static void juicy_bank_tilde_seed(t_juicy_bank_tilde *x, t_floatarg f){
     jb_rng_seed(&x->rng, (unsigned int)((int)f*2654435761u));
     for(int i=0;i<x->n_modes;i++){
@@ -810,8 +807,7 @@ static void juicy_bank_tilde_note(t_juicy_bank_tilde *x, t_floatarg f0, t_floata
     if (f0<=0.f){ f0=1.f; }
     jb_note_on(x, f0, vel);
 }
-    jb_note_off(x, (f0<=0.f)?1.f:f0);
-}
+static void juicy_bank_tilde_off(t_juicy_bank_tilde *x, t_floatarg f0){ jb_note_off(x, (f0<=0.f)?1.f:f0); }
 static void juicy_bank_tilde_voices(t_juicy_bank_tilde *x, t_floatarg nf){
     (void)nf; x->max_voices = JB_MAX_VOICES; // fixed 4
 }
