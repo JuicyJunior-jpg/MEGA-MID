@@ -306,7 +306,7 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
     jb_apply_density(x, v);
 
     float md_amt = jb_clamp(x->micro_detune,0.f,1.f);
-    float spacing = jb_clamp(x->spacing, 0.f, 1.f); // NEW
+    float bw_amt = jb_clamp(v->bandwidth_v, 0.f, 1.f);
 
     for(int i=0;i<x->n_modes;i++){
         jb_mode_rt_t *md=&v->m[i];
@@ -812,6 +812,12 @@ static void juicy_bank_tilde_voices(t_juicy_bank_tilde *x, t_floatarg nf){
     (void)nf; x->max_voices = JB_MAX_VOICES; // fixed 4
 }
 
+static void juicy_bank_tilde_note_midi(t_juicy_bank_tilde *x, t_floatarg midi, t_floatarg vel){
+    // MIDI note -> Hz
+    float f0 = (float)(440.0f * powf(2.0f, (midi - 69.0f) / 12.0f));
+    if (f0<=0.f) f0 = 1.f;
+    jb_note_on(x, f0, vel);
+}
 // basef0 reference (message)
 static void juicy_bank_tilde_basef0(t_juicy_bank_tilde *x, t_floatarg f){ x->basef0_ref=(f<=0.f)?261.626f:f; }
 static void juicy_bank_tilde_base_alias(t_juicy_bank_tilde *x, t_floatarg f){ juicy_bank_tilde_basef0(x,f); }
