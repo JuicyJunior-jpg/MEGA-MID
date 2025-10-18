@@ -228,38 +228,6 @@ static void jb_apply_density(const t_juicy_bank_tilde *x, jb_voice_t *v){
         float r = (1.f - bias) * pivot_map[j] + bias * neigh_map[j];
         v->m[i].ratio_now = r;
     }
-}if(count==0) return;
-
-    // insertion sort by base_ratio
-    for(int k=1;k<count;k++){
-        int id=idxs[k], j=k;
-        while(j>0 && x->base[idxs[j-1]].base_ratio > x->base[id].base_ratio){ idxs[j]=idxs[j-1]; j--; }
-        idxs[j]=id;
-    }
-
-    if (x->density_mode == DENSITY_PIVOT){
-        int fid=-1; float best=1e9f;
-        for(int i=0;i<count;i++){
-            int id=idxs[i]; float d=fabsf(x->base[id].base_ratio-1.f); if(d<best){best=d; fid=id;}
-        }
-        float r_pivot = (fid>=0) ? x->base[fid].base_ratio : 1.f;
-        for(int i=0;i<count;i++){
-            int m=idxs[i];
-            if(m==fid) v->m[m].ratio_now = x->base[m].base_ratio;
-            else v->m[m].ratio_now = r_pivot + (x->base[m].base_ratio - r_pivot) * s;
-        }
-    } else {
-        for(int j=0;j<count;j++){
-            int i=idxs[j];
-            if(j==0) v->m[i].ratio_now=x->base[i].base_ratio;
-            else {
-                int prev=idxs[j-1];
-                float gap=(x->base[i].base_ratio-x->base[prev].base_ratio)*s;
-                v->m[i].ratio_now=v->m[prev].ratio_now+gap;
-            }
-        }
-    }
-}
 
 // ---------- behavior projection ----------
 static void jb_project_behavior_into_voice(t_juicy_bank_tilde *x, jb_voice_t *v){
@@ -370,7 +338,6 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
         float wR = 2.f * (float)M_PI * HzR / x->sr;
 
         // T60 & radius
-        float base_ms = x->base[i].base_decay_ms;
         float T60 = jb_clamp(base_ms, 0.f, 1e7f) * 0.001f;
         T60 *= (1.f - jb_clamp(x->damping, -1.f, 1.f));
         T60 *= v->decay_pitch_mul;
@@ -843,10 +810,6 @@ static void juicy_bank_tilde_note(t_juicy_bank_tilde *x, t_floatarg f0, t_floata
     if (f0<=0.f){ f0=1.f; }
     jb_note_on(x, f0, vel);
 }
-static void juicy_bank_tilde_note_midi(t_juicy_bank_tilde *x, t_floatarg midi, t_floatarg vel){
-    jb_note_on(x, jb_midi_to_hz(midi), vel);
-}
-static void juicy_bank_tilde_off(t_juicy_bank_tilde *x, t_floatarg f0){
     jb_note_off(x, (f0<=0.f)?1.f:f0);
 }
 static void juicy_bank_tilde_voices(t_juicy_bank_tilde *x, t_floatarg nf){
