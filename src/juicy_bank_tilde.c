@@ -109,7 +109,9 @@ typedef struct _juicy_bank_tilde {
     t_object  x_obj; t_float f_dummy; t_float sr;
 
     int n_modes;
-    int n_active; // number of active (audible) modes from low->high; brick-wall mutes highest first
+    int active_modes;              // number of currently active partials (0..n_modes)
+    t_inlet *in_partials;          // message inlet for 'partials' (float 0..n_modes)
+    t_outlet *out_index;           // float outlet reporting current selected partial (1-based)
     jb_mode_base_t base[JB_MAX_MODES];
 
     // BODY globals
@@ -151,12 +153,10 @@ typedef struct _juicy_bank_tilde {
     int exciter_mode; // 0 = use main L/R (legacy), 1 = use per-voice pairs
 
     t_outlet *outL, *outR;
-    t_outlet *out_index; // float outlet: current selected partial (1-based)
 
     // INLET pointers
     // Behavior (reduced)
     t_inlet *in_crossring;
-    t_inlet *in_partials; // brick-wall active partials 1..n_modes
     // Body (now includes spacing between dispersion & anisotropy)
     t_inlet *in_damping, *in_decay_tilt, *in_brightness, *in_position, *in_density, *in_dispersion, *in_spacing, *in_aniso, *in_contact;
     // Individual
@@ -360,8 +360,7 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
         {
             float t = jb_clamp(x->decay_tilt, -1.f, 1.f);
             if (t != 0.f){
-                int i_eff = (i < x->n_active)? i : ( (x->n_active>0)? (x->n_active-1) : 0 );
-        float k_norm = (N>1)? ((float)i_eff/(float)(N-1)) : 0.f;
+                float k_norm = (x->n_modes>1)? ((float)i/(float)(x->n_modes-1)) : 0.f;
                 float s = 2.f*k_norm - 1.f; // -1 low .. +1 high
                 const float range = 0.5f; // 50% swing at extremes
                 float mul = 1.f - range * t * s;
@@ -406,8 +405,6 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
 static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
     for(int i=0;i<x->n_modes;i++){
         if(!x->base[i].active){ v->m[i].gain_now=0.f; continue; }
-        // brick-wall high->low mute beyond n_active
-        if (i >= x->n_active){ v->m[i].gain_now = 0.f; continue; }
 
         float ratio = v->m[i].ratio_now + v->disp_offset[i];
         // spacing already applied upstream (coeffs), but ratio_rel here only for weighting functions:
@@ -436,9 +433,10 @@ static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
 
         
 float gn = g * w * wp;
+            if (x->active_modes < x->n_modes) { if (i >= x->active_modes) gn = 0.f; }
         // --- SINE AM mask (applied after gn is computed) ---
         {
-            int N = (x->n_active>0)? x->n_active : x->n_modes;
+            int N = x->n_modes;
             float pitch = jb_clamp(x->sine_pitch, 0.f, 1.f);
             float depth = jb_clamp(x->sine_depth, 0.f, 1.f);
             float phase = x->sine_phase;
@@ -752,6 +750,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 // ---------- base setters & messages ----------
 static void juicy_bank_tilde_modes(t_juicy_bank_tilde *x, t_floatarg nf){
     int n=(int)nf; if(n<1)n=1; if(n>JB_MAX_MODES)n=JB_MAX_MODES; x->n_modes=n;
+    x->active_modes = x->n_modes;
     if (x->edit_idx >= x->n_modes) x->edit_idx = x->n_modes-1;
     for(int i=0;i<x->n_modes;i++){
         if(x->base[i].base_ratio<=0.f) x->base[i].base_ratio=(float)(i+1);
@@ -763,8 +762,7 @@ static void juicy_bank_tilde_active(t_juicy_bank_tilde *x, t_floatarg idxf, t_fl
 
 // INDIVIDUAL (per-mode via index)
 static void juicy_bank_tilde_index(t_juicy_bank_tilde *x, t_floatarg f){
-    int idx=(int)f; if(idx<1) idx=1; if(idx>x->n_active) idx=x->n_active; x->edit_idx=idx-1;
-    outlet_float(x->out_index, (t_float)idx);
+    int idx=(int)f; if(idx<1) idx=1; if(idx>x->n_modes) idx=x->n_modes; x->edit_idx=idx-1;
 }
 static void juicy_bank_tilde_ratio_i(t_juicy_bank_tilde *x, t_floatarg r){
     int i=x->edit_idx; if(i<0||i>=x->n_modes) return;
@@ -929,25 +927,25 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
 
     inlet_free(x->in_damping); inlet_free(x->in_decay_tilt); inlet_free(x->in_brightness); inlet_free(x->in_position);
     inlet_free(x->in_density); inlet_free(x->in_dispersion); inlet_free(x->in_spacing);
-    inlet_free(x->in_aniso); inlet_free(x->in_contact); inlet_free(x->in_partials);
+    inlet_free(x->in_aniso); inlet_free(x->in_contact);
 
         inlet_free(x->in_sine_pitch);
     inlet_free(x->in_sine_depth);
     inlet_free(x->in_sine_phase);
+    inlet_free(x->in_partials); // free 'partials' inlet
 inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     inlet_free(x->in_attack); inlet_free(x->in_decya); inlet_free(x->in_curve); inlet_free(x->in_pan); inlet_free(x->in_keytrack);
 
     inlet_free(x->inR);
     for(int i=0;i<JB_MAX_VOICES;i++){ if(x->in_vL[i]) inlet_free(x->in_vL[i]); if(x->in_vR[i]) inlet_free(x->in_vR[i]); }
 
-    outlet_free(x->outL); outlet_free(x->outR); outlet_free(x->out_index);
+    outlet_free(x->outL); outlet_free(x->outR);
 }
 
 
 // ---------- defaults helper ----------
 static void jb_apply_default_saw(t_juicy_bank_tilde *x){
     x->n_modes = JB_MAX_MODES;
-    x->n_active = x->n_modes;
     x->edit_idx = 0;
     for(int i=0;i<JB_MAX_MODES;i++){
         x->base[i].active = 1;
@@ -1033,8 +1031,6 @@ static void *juicy_bank_tilde_new(void){
     x->in_spacing    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("spacing"));   // NEW
     x->in_aniso      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("anisotropy"));
     x->in_contact    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("contact"));
-    // brick-wall active partials control (float 0..n_modes)
-    x->in_partials  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("partials"));
 
     
     // SINE controls
@@ -1042,6 +1038,7 @@ static void *juicy_bank_tilde_new(void){
     x->in_sine_depth = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_depth"));
     x->in_sine_phase = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_phase"));
 // Individual
+    x->in_partials   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("partials"));
     x->in_index      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("index"));
     x->in_ratio      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("ratio"));
     x->in_gain       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("gain"));
@@ -1054,7 +1051,7 @@ static void *juicy_bank_tilde_new(void){
     // Outs
     x->outL = outlet_new(&x->x_obj, &s_signal);
     x->outR = outlet_new(&x->x_obj, &s_signal);
-    x->out_index = outlet_new(&x->x_obj, &s_float);
+    x->out_index   = outlet_new(&x->x_obj, &s_float); // 1-based index reporter
     return (void *)x;
 }
 
@@ -1069,6 +1066,32 @@ static void juicy_bank_tilde_INIT(t_juicy_bank_tilde *x){
 static void juicy_bank_tilde_init_alias(t_juicy_bank_tilde *x){ juicy_bank_tilde_INIT(x); }
 
 // ---------- setup ----------
+// === Partials / Index navigation helpers ===
+static void juicy_bank_tilde_partials(t_juicy_bank_tilde *x, t_floatarg f){
+    int K = (int)floorf(f + 0.5f);
+    if (K < 0) K = 0;
+    if (K > x->n_modes) K = x->n_modes;
+    x->active_modes = K;
+    // Clamp current edit index to active range (if any)
+    if (x->active_modes == 0) {
+        x->edit_idx = 0;
+    } else if (x->edit_idx >= x->active_modes) {
+        x->edit_idx = x->active_modes - 1;
+    }
+}
+
+static void juicy_bank_tilde_index_forward(t_juicy_bank_tilde *x){
+    int K = (x->active_modes > 0) ? x->active_modes : 1;
+    x->edit_idx = (x->edit_idx + 1) % K;
+    if (x->out_index) outlet_float(x->out_index, (t_float)(x->edit_idx + 1));
+}
+
+static void juicy_bank_tilde_index_backward(t_juicy_bank_tilde *x){
+    int K = (x->active_modes > 0) ? x->active_modes : 1;
+    x->edit_idx = (x->edit_idx - 1 + K) % K;
+    if (x->out_index) outlet_float(x->out_index, (t_float)(x->edit_idx + 1));
+}
+
 void juicy_bank_tilde_setup(void){
     juicy_bank_tilde_class = class_new(gensym("juicy_bank~"),
                            (t_newmethod)juicy_bank_tilde_new,
@@ -1153,29 +1176,7 @@ void juicy_bank_tilde_setup(void){
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_restart, gensym("restart"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_INIT, gensym("INIT"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_init_alias, gensym("init"), 0);
-
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_partials, gensym("partials"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index_forward, gensym("forward"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index_backward, gensym("backward"), 0);
 }
-// === Active partials (brick-wall) ===
-static void juicy_bank_tilde_partials(t_juicy_bank_tilde *x, t_floatarg f){
-    int n = (int)floorf(jb_clamp(f, 0.f, (float)x->n_modes) + 0.5f);
-    if (n < 1) n = 1;
-    if (n > x->n_modes) n = x->n_modes;
-    x->n_active = n;
-    if (x->edit_idx >= x->n_active) x->edit_idx = x->n_active - 1;
-}
-
-// === Index wrap navigation ===
-static void juicy_bank_tilde_index_forward(t_juicy_bank_tilde *x){
-    if (x->n_active <= 0) return;
-    x->edit_idx = (x->edit_idx + 1) % x->n_active;
-    outlet_float(x->out_index, (t_float)(x->edit_idx + 1));
-}
-static void juicy_bank_tilde_index_backward(t_juicy_bank_tilde *x){
-    if (x->n_active <= 0) return;
-    x->edit_idx = (x->edit_idx + x->n_active - 1) % x->n_active;
-    outlet_float(x->out_index, (t_float)(x->edit_idx + 1));
-}
-
