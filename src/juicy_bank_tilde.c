@@ -353,35 +353,26 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
         float base_ms = x->base[i].base_decay_ms;
         // T60 & radius
         float T60 = jb_clamp(base_ms, 0.f, 1e7f) * 0.001f;
-        T60 *= (1.f - jb_clamp(x->damping, -1.f, 1.f));
+        T60 *= (1.f - d_amt);
         T60 *= v->decay_pitch_mul;
         T60 *= v->decay_vel_mul;
-        // Localized damping shape (broadness/point)
-        {
-            int N = (x->n_modes>1)? (x->n_modes) : 1; // using full bank order
-            float k_norm = (N>1)? ((float)i/(float)(N-1)) : 0.f; // 0..1 along bank
-            float center = x->damp_point; // 0..1 (wraps)
-            // circular distance on [0,1)
-            float d = fabsf(k_norm - center);
-            if (d > 0.5f) d = 1.f - d;
-            float sigma = 0.5f * (1.f - 0.98f * jb_clamp(x->damp_broad, 0.f, 1.f)); // 0.5 (broad) .. ~0.01 (narrow)
-            float local = expf(-0.5f * (d*d) / (sigma*sigma + 1e-6f));
-            float ef = (1.f - x->damp_broad) + x->damp_broad * local; // blend global->local
-            float dam = jb_clamp(x->damping, -1.f, 1.f);
-            T60 *= (1.f - dam * ef);
-        }
-    
         T60 *= v->cr_decay_mul[i];
         {
-            float t = jb_clamp(x->/*removed_decay_tilt*/, -1.f, 1.f);
-            if (t != 0.f){
-                float k_norm = (x->n_modes>1)? ((float)i/(float)(x->n_modes-1)) : 0.f;
-                float s = 2.f*k_norm - 1.f; // -1 low .. +1 high
-                const float range = 0.5f; // 50% swing at extremes
-                float mul = 1.f - range * t * s;
-                if (mul < 0.1f) mul = 0.1f; // avoid zero/neg
-                T60 *= mul;
-            }
+            
+            /* Per-mode damping focus: weight along modes with wrap */
+            float b = jb_clamp(x->damp_broad, 0.f, 1.f);
+            float p = x->damp_point;
+            if (p < 0.f) p = 0.f; if (p > 1.f) p = 1.f;
+            float k_norm = (x->n_modes>1)? ((float)i/(float)(x->n_modes-1)) : 0.f;
+            float dx = fabsf(k_norm - p); if (dx > 0.5f) dx = 1.f - dx; /* circular distance */
+            float n = (float)((x->n_modes>0)?x->n_modes:1);
+            float sigma_min = 0.5f / n;            /* ~single-mode width */
+            float sigma_max = 0.5f;                /* whole bank */
+            float sigma = (1.f - b)*sigma_max + b*sigma_min;
+            float wloc = expf(-0.5f * (dx*dx) / (sigma*sigma)); /* 0..1 */
+            /* apply local weighting to global damping amount */
+            float d_amt = jb_clamp(x->damping, -1.f, 1.f) * wloc;
+
         }
         md->t60_s = T60;
 
@@ -820,15 +811,8 @@ static void juicy_bank_tilde_amps(t_juicy_bank_tilde *x, t_symbol *s, int argc, 
 }
 
 // BODY globals
-static void juicy_bank_tilde_damp_broad(t_juicy_bank_tilde *x, t_floatarg f){
-    x->damp_broad = jb_clamp(f, 0.f, 1.f);
-}
-static void juicy_bank_tilde_damp_point(t_juicy_bank_tilde *x, t_floatarg f){
-    // wrap to [0,1)
-    float p = f - floorf(f);
-    x->damp_point = p;
-}
-
+static void juicy_bank_tilde_damp_broad(t_juicy_bank_tilde *x, t_floatarg f){ x->damp_broad=jb_clamp(f,0.f,1.f); }
+static void juicy_bank_tilde_damp_point(t_juicy_bank_tilde *x, t_floatarg f){ x->damp_point=jb_wrap01(f); }
 static void juicy_bank_tilde_damping(t_juicy_bank_tilde *x, t_floatarg f){ x->damping=jb_clamp(f,-1.f,1.f); }
 static void juicy_bank_tilde_brightness(t_juicy_bank_tilde *x, t_floatarg f){ x->brightness=jb_clamp(f,0.f,1.f); }
 static void juicy_bank_tilde_position(t_juicy_bank_tilde *x, t_floatarg f){ x->position=(f<=0.f)?0.f:jb_clamp(f,0.f,1.f); }
@@ -984,7 +968,7 @@ static void jb_apply_default_saw(t_juicy_bank_tilde *x){
         x->base[i].micro_sig      = 0.f;
     }
     // sensible body defaults
-    x->damping = 0.f; x->brightness = 0.5f; x->position = 0.f; x->/*removed_decay_tilt*/=0.f;
+    x->damping = 0.f; x->brightness = 0.5f; x->position = 0.f; x->damp_broad=0.f; x->damp_point=0.f;
     x->density_amt = 0.f; x->density_mode = DENSITY_PIVOT;
     x->dispersion = 0.f; x->dispersion_last = -1.f;
     x->spacing = 0.f;
@@ -1046,8 +1030,8 @@ static void *juicy_bank_tilde_new(void){
 
     // Body (order: damping, brightness, position, density, dispersion, spacing, anisotropy, contact)
     x->in_damping    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("damping"));
-    x->in_damp_broad = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("damp_broad"));
-    x->in_damp_point = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("damp_point"));
+    x->in_damp_broad= inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("damp_broad"));
+    x->in_damp_point= inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("damp_point"));
     x->in_brightness = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("brightness"));
     x->in_position   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("position"));
     x->in_density    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("density"));
@@ -1138,7 +1122,7 @@ void juicy_bank_tilde_setup(void){
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_damping, gensym("damping"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_damp_broad, gensym("damp_broad"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_damp_point, gensym("damp_point"), A_DEFFLOAT, 0);
-        class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_brightness, gensym("brightness"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_brightness, gensym("brightness"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_position, gensym("position"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_density, gensym("density"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_density_pivot, gensym("density_pivot"), 0);
