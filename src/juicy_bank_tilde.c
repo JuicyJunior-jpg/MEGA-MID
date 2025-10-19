@@ -35,6 +35,11 @@
 
 // ---------- utils ----------
 static inline float jb_clamp(float x, float lo, float hi){ return (x<lo)?lo:((x>hi)?hi:x); }
+static inline float jb_wrap01(float x){
+    x = x - floorf(x);
+    if (x < 0.f) x += 1.f;
+    return x;
+}
 typedef struct { unsigned int s; } jb_rng_t;
 static inline void jb_rng_seed(jb_rng_t *r, unsigned int s){ if(!s) s=1; r->s = s; }
 static inline unsigned int jb_rng_u32(jb_rng_t *r){ unsigned int x = r->s; x ^= x << 13; x ^= x >> 17; x ^= x << 5; r->s = x; return x; }
@@ -353,7 +358,6 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
         float base_ms = x->base[i].base_decay_ms;
         // T60 & radius
         float T60 = jb_clamp(base_ms, 0.f, 1e7f) * 0.001f;
-        T60 *= (1.f - d_amt);
         T60 *= v->decay_pitch_mul;
         T60 *= v->decay_vel_mul;
         T60 *= v->cr_decay_mul[i];
@@ -372,6 +376,7 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
             float wloc = expf(-0.5f * (dx*dx) / (sigma*sigma)); /* 0..1 */
             /* apply local weighting to global damping amount */
             float d_amt = jb_clamp(x->damping, -1.f, 1.f) * wloc;
+            T60 *= (1.f - d_amt);
 
         }
         md->t60_s = T60;
