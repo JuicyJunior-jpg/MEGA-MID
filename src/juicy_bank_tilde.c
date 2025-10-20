@@ -176,7 +176,13 @@ typedef struct _juicy_bank_tilde {
     t_inlet *in_sine_pitch;
     t_inlet *in_sine_depth;
     t_inlet *in_sine_phase;
-} t_juicy_bank_tilde;
+} t_juicy_bank_tilde
+    // --- SNAPSHOT (bake) state ---
+    float _undo_base_gain[JB_MAX_MODES];
+    float _undo_base_decay_ms[JB_MAX_MODES];
+    int   _undo_valid; // 1 if undo is available
+
+};
 
 // ---------- helpers ----------
 static float jb_bright_gain(float ratio_rel, float b){
@@ -466,6 +472,43 @@ float gn = g * w * wp;
         v->m[i].gain_now = (gn<0.f)?0.f:gn;
     }
 }
+
+
+// === Snapshot helpers (compute live effects so we can bake them) ===
+static inline float jb_sine_mask_for_index(const t_juicy_bank_tilde *x, int i){
+    int N = x->n_modes;
+    if (N <= 1) return 1.f;
+    float pitch = jb_clamp(x->sine_pitch, 0.f, 1.f);
+    float depth = jb_clamp(x->sine_depth, 0.f, 1.f);
+    float phase = x->sine_phase;
+    float cycles_min = 0.25f;
+    float cycles_max = floorf((float)N * 0.5f);
+    if (cycles_max < cycles_min) cycles_max = cycles_min;
+    float cycles = cycles_min + pitch * (cycles_max - cycles_min);
+    float k_norm = (N>1) ? ((float)i / (float)(N-1)) : 0.f;
+    float theta = 2.f * (float)M_PI * (cycles * k_norm + phase);
+    float w01 = 0.5f * (1.f + cosf(theta));
+    float sharp = 1.0f + 8.0f * depth;
+    float w_sharp = powf(w01, sharp);
+    return (1.f - depth) + depth * w_sharp;
+}
+
+static inline float jb_damper_decay_mul_for_index(const t_juicy_bank_tilde *x, int i){
+    // returns multiplicative factor for T60 (1 - d_amt * wloc)
+    float b = jb_clamp(x->damp_broad, 0.f, 1.f);
+    float p = x->damp_point; if (p < 0.f) p = 0.f; if (p > 1.f) p = 1.f;
+    float k_norm = (x->n_modes>1)? ((float)i/(float)(x->n_modes-1)) : 0.f;
+    float dx = fabsf(k_norm - p); if (dx > 0.5f) dx = 1.f - dx; /* circular distance */
+    float n = (float)((x->n_modes>0)?x->n_modes:1);
+    float sigma_min = 0.5f / n;            /* ~single-mode width */
+    float sigma_max = 0.5f;                /* whole bank */
+    float sigma = (1.f - b)*sigma_max + b*sigma_min;
+    float wloc = expf(-0.5f * (dx*dx) / (sigma*sigma)); /* 0..1 */
+    float d_amt = jb_clamp(x->damping, -1.f, 1.f) * wloc;
+    return (1.f - d_amt); // multiply T60 (ms) by this
+}
+
+
 
 // ---------- allocator helpers ----------
 static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb_rng_t *rng){
@@ -1066,6 +1109,11 @@ static void *juicy_bank_tilde_new(void){
     x->outR = outlet_new(&x->x_obj, &s_signal);
     x->out_index   = outlet_new(&x->x_obj, &s_float); // 1-based index reporter
     return (void *)x;
+
+    // snapshot undo init
+    x->_undo_valid = 0;
+    for (int i=0;i<JB_MAX_MODES;i++){ x->_undo_base_gain[i]=0.f; x->_undo_base_decay_ms[i]=0.f; }
+
 }
 
 
@@ -1077,6 +1125,58 @@ static void juicy_bank_tilde_INIT(t_juicy_bank_tilde *x){
     post("juicy_bank~: INIT complete (64 modes, saw-like gains 1/n, decay=1s).");
 }
 static void juicy_bank_tilde_init_alias(t_juicy_bank_tilde *x){ juicy_bank_tilde_INIT(x); }
+
+
+// ---------- SNAPSHOT (bake current SINE+Damper into base, then neutralize live amounts) ----------
+static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
+    // save undo
+    for (int i=0;i<x->n_modes && i<JB_MAX_MODES;i++){
+        x->_undo_base_gain[i] = x->base[i].base_gain;
+        x->_undo_base_decay_ms[i] = x->base[i].base_decay_ms;
+    }
+    x->_undo_valid = 1;
+
+    // bake: multiply base gain by sine mask; base decay_ms by damper factor
+    for (int i=0;i<x->n_modes && i<JB_MAX_MODES;i++){
+        float mask = jb_sine_mask_for_index(x, i);
+        float dmul = jb_damper_decay_mul_for_index(x, i);
+        // gain
+        float g = x->base[i].base_gain * mask;
+        if (g < 0.f) g = 0.f;
+        // decay (ms): T60 scaled by dmul
+        float ms = x->base[i].base_decay_ms * dmul;
+        if (ms < 0.f) ms = 0.f;
+        x->base[i].base_gain = g;
+        x->base[i].base_decay_ms = ms;
+    }
+
+    // neutralize live shapers so user can sculpt on top
+    x->sine_depth = 0.f;         // neutral AM
+    x->damping    = 0.f;         // neutral damper (keeps broad/point scope)
+
+    // refresh gains for held voices to reflect new base immediately
+    for(int vix=0; vix<x->max_voices; ++vix){
+        if (x->v[vix].state != V_OFF){
+            jb_update_voice_gains(x, &x->v[vix]);
+        }
+    }
+}
+
+static void juicy_bank_tilde_snapshot_undo(t_juicy_bank_tilde *x){
+    if (!x->_undo_valid) return;
+    for (int i=0;i<x->n_modes && i<JB_MAX_MODES;i++){
+        x->base[i].base_gain = x->_undo_base_gain[i];
+        x->base[i].base_decay_ms = x->_undo_base_decay_ms[i];
+    }
+    x->_undo_valid = 0;
+
+    // refresh gains for held voices
+    for(int vix=0; vix<x->max_voices; ++vix){
+        if (x->v[vix].state != V_OFF){
+            jb_update_voice_gains(x, &x->v[vix]);
+        }
+    }
+}
 
 // ---------- setup ----------
 // === Partials / Index navigation helpers ===
@@ -1189,6 +1289,11 @@ void juicy_bank_tilde_setup(void){
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_exciter_mode, gensym("exciter_mode"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_restart, gensym("restart"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_INIT, gensym("INIT"), 0);
+
+    // snapshot (bake) controls
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_snapshot, gensym("snapshot"), 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_snapshot_undo, gensym("snapshot_undo"), 0);
+
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_init_alias, gensym("init"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_partials, gensym("partials"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index_forward, gensym("forward"), 0);
