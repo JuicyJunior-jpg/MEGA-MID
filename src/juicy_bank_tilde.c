@@ -40,6 +40,11 @@ static inline float jb_wrap01(float x){
     if (x < 0.f) x += 1.f;
     return x;
 }
+
+static inline float jb_gauss01(float u, float mu, float sigma){
+    if (sigma <= 1e-6f) return (u==mu)?1.f:0.f;
+    float d = u - mu; float z = d / sigma; return expf(-0.5f * z * z);
+}
 typedef struct { unsigned int s; } jb_rng_t;
 static inline void jb_rng_seed(jb_rng_t *r, unsigned int s){ if(!s) s=1; r->s = s; }
 static inline unsigned int jb_rng_u32(jb_rng_t *r){ unsigned int x = r->s; x ^= x << 13; x ^= x >> 17; x ^= x << 5; r->s = x; return x; }
@@ -176,7 +181,8 @@ typedef struct _juicy_bank_tilde {
     t_inlet *in_sine_pitch;
     t_inlet *in_sine_depth;
     t_inlet *in_sine_phase;
-    t_inlet *in_feedback; // NEW: feedback 0..1
+    t_inlet *in_feedback; // NEW: feedback control (0..1)
+    float feedback_amt;
 // --- SNAPSHOT (bake) undo buffer ---
 int _undo_valid;
 float _undo_base_gain[JB_MAX_MODES];
@@ -622,7 +628,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
             for(int i=0;i<n;i++){
                 // LEFT
-                float excL = use_gate * (srcL[i] + x->feedback_amt * md->y_pre_lastL) * md->gain_now;
+                float excL = use_gate * srcL[i] * md->gain_now;
                 float absL = fabsf(excL);
                 if(absL>1e-3f){
                     if(md->hit_coolL>0){ md->hit_coolL--; }
@@ -661,7 +667,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 }
 
                 // RIGHT
-                float excR = use_gate * (srcR[i] + x->feedback_amt * md->y_pre_lastR) * md->gain_now;
+                float excR = use_gate * srcR[i] * md->gain_now;
                 float absR = fabsf(excR);
                 if(absR>1e-3f){
                     if(md->hit_coolR>0){ md->hit_coolR--; }
@@ -888,8 +894,6 @@ static void juicy_bank_tilde_bite(t_juicy_bank_tilde *x, t_floatarg f){ x->bite_
 static void juicy_bank_tilde_bloom(t_juicy_bank_tilde *x, t_floatarg f){ x->bloom_amt=jb_clamp(f,0.f,1.f); }
 static void juicy_bank_tilde_crossring(t_juicy_bank_tilde *x, t_floatarg f){ x->crossring_amt=jb_clamp(f,0.f,1.f); }
 
-
-static void juicy_bank_tilde_feedback(t_juicy_bank_tilde *x, t_floatarg f){ x->feedback_amt = jb_clamp(f, 0.f, 1.f); }
 // Notes/poly (non-voice-addressed)
 static void juicy_bank_tilde_note(t_juicy_bank_tilde *x, t_floatarg f0, t_floatarg vel){
     if (f0<=0.f){ f0=1.f; }
@@ -952,7 +956,6 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
         inlet_free(x->in_sine_pitch);
     inlet_free(x->in_sine_depth);
     inlet_free(x->in_sine_phase);
-    inlet_free(x->in_feedback); // NEW
     inlet_free(x->in_partials); // free 'partials' inlet
 inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     inlet_free(x->in_attack); inlet_free(x->in_decya); inlet_free(x->in_curve); inlet_free(x->in_pan); inlet_free(x->in_keytrack);
@@ -1005,6 +1008,7 @@ static void *juicy_bank_tilde_new(void){
     x->spacing=0.f; // NEW
     x->aniso=0.f; x->aniso_eps=0.02f;
     x->contact_amt=0.f; x->contact_sym=0.f;
+    x->feedback_amt = 0.f;
 
     // realism defaults
     x->phase_rand=1.f; x->phase_debug=0;
@@ -1122,23 +1126,59 @@ static void juicy_bank_tilde_index_backward(t_juicy_bank_tilde *x){
 
 // ---------- SNAPSHOT: bake current SINE mask into base gains and DAMPER into base decays ----------
 static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
-    if(!x || x->n_modes<=0) return;
-
-    // Save UNDO (base gains and base decays) so we can revert if needed
-    for(int i=0;i<x->n_modes;i++){ x->_undo_base_gain[i] = x->base[i].base_gain; }
-    for(int i=0;i<x->n_modes;i++){ x->_undo_base_decay_ms[i] = x->base[i].base_decay_ms; }
+    // Save undo of base fields
+    for (int i=0;i<JB_MAX_MODES;i++){
+        x->_undo_base_gain[i] = x->base[i].base_gain;
+        x->_undo_base_decay_ms[i] = x->base[i].base_decay_ms;
+    }
     x->_undo_valid = 1;
 
-    // --- DAMPER (broadness/location/damping) → bake into base_decay_ms ---
+    // Precompute SINE AM mask per index (same math as in jb_update_voice_gains)
+    int N = x->n_modes;
+    float pitch = jb_clamp(x->sine_pitch, 0.f, 1.f);
+    float depth = jb_clamp(x->sine_depth, 0.f, 1.f);
+    float phase = x->sine_phase;
+    float cycles_min = 0.25f;
+    float cycles_max = floorf((float)((N>0)?N:1) * 0.5f);
+    if (cycles_max < cycles_min) cycles_max = cycles_min;
+    float cycles = cycles_min + pitch * (cycles_max - cycles_min);
+
+    // Damper weights per mode (same formula as in jb_update_voice_coeffs)
+    float b = jb_clamp(x->damp_broad, 0.f, 1.f);
+    float p = x->damp_point; if (p < 0.f) p = 0.f;
+            if (p > 1.f) p = 1.f;
+    float n = (float)((x->n_modes>0)?x->n_modes:1);
+    float sigma_min = 0.5f / n;      // ~single-mode width
+    float sigma_max = 0.5f;          // whole bank
+    float sigma = (1.f - b)*sigma_max + b*sigma_min;
+    float d_amt_global = jb_clamp(x->damping, -1.f, 1.f);
+
     for(int i=0;i<x->n_modes;i++){
-        float u = (x->n_modes>1) ? ((float)i/(float)(x->n_modes-1)) : 0.f;
-        float w = jb_gauss01(u, x->damp_point, x->damp_broad*0.5f+1e-4f);
-        float k = 1.f + x->damping * (2.f*w - 1.f);
-        float ms = x->base[i].base_decay_ms * jb_clamp(k, 0.05f, 20.f);
-        x->base[i].base_decay_ms = ms;
+        if (!x->base[i].active) continue;
+        // --- SINE mask ---
+        float k_norm = (N>1) ? ((float)i / (float)(N-1)) : 0.f;
+        float theta = 2.f * (float)M_PI * (cycles * k_norm + phase);
+        float w01 = 0.5f * (1.f + cosf(theta));
+        float sharp = 1.0f + 8.0f * depth;
+        float w_sharp = powf(w01, sharp);
+        float sine_mask = (1.f - depth) + depth * w_sharp; // 0..1
+
+        // Apply to base gain
+        x->base[i].base_gain *= jb_clamp(sine_mask, 0.f, 2.f);
+
+        // --- DAMPER bake into base_decay_ms ---
+        float k_mode = (x->n_modes>1)? ((float)i/(float)(x->n_modes-1)) : 0.f;
+        float dx = fabsf(k_mode - p); if (dx > 0.5f) dx = 1.f - dx; // circular distance
+        float wloc = expf(-0.5f * (dx*dx) / (sigma*sigma)); // 0..1
+        float local = d_amt_global * wloc;                   // -1..1 * 0..1
+        float mul = (1.f - local);                           // >0
+        if (mul < 1e-4f) mul = 1e-4f;
+        x->base[i].base_decay_ms *= mul;
+        if (x->base[i].base_decay_ms < 0.f) x->base[i].base_decay_ms = 0.f;
     }
 
-    // Keep SINE pattern controls intact; only neutralize the damper amount
+    // Neutralize the two controllers so you can re-apply on top of the baked shape
+    x->sine_depth = 0.f;
     x->damping = 0.f;
 }
 
