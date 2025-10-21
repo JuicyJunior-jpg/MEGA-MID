@@ -371,7 +371,8 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
             /* Per-mode damping focus: weight along modes with wrap */
             float b = jb_clamp(x->damp_broad, 0.f, 1.f);
             float p = x->damp_point;
-            if (p < 0.f) p = 0.f; if (p > 1.f) p = 1.f;
+            if (p < 0.f) p = 0.f;
+            if (p > 1.f) p = 1.f;
             float k_norm = (x->n_modes>1)? ((float)i/(float)(x->n_modes-1)) : 0.f;
             float dx = fabsf(k_norm - p); if (dx > 0.5f) dx = 1.f - dx; /* circular distance */
             float n = (float)((x->n_modes>0)?x->n_modes:1);
@@ -887,13 +888,13 @@ static void juicy_bank_tilde_bite(t_juicy_bank_tilde *x, t_floatarg f){ x->bite_
 static void juicy_bank_tilde_bloom(t_juicy_bank_tilde *x, t_floatarg f){ x->bloom_amt=jb_clamp(f,0.f,1.f); }
 static void juicy_bank_tilde_crossring(t_juicy_bank_tilde *x, t_floatarg f){ x->crossring_amt=jb_clamp(f,0.f,1.f); }
 
+
+static void juicy_bank_tilde_feedback(t_juicy_bank_tilde *x, t_floatarg f){ x->feedback_amt = jb_clamp(f, 0.f, 1.f); }
 // Notes/poly (non-voice-addressed)
 static void juicy_bank_tilde_note(t_juicy_bank_tilde *x, t_floatarg f0, t_floatarg vel){
     if (f0<=0.f){ f0=1.f; }
     jb_note_on(x, f0, vel);
 }
-static void juicy_bank_tilde_feedback(t_juicy_bank_tilde *x, t_floatarg f){ x->feedback_amt = jb_clamp(f, 0.f, 1.f); }
-
 static void juicy_bank_tilde_off(t_juicy_bank_tilde *x, t_floatarg f0){ jb_note_off(x, (f0<=0.f)?1.f:f0); }
 static void juicy_bank_tilde_voices(t_juicy_bank_tilde *x, t_floatarg nf){
     (void)nf; x->max_voices = JB_MAX_VOICES; // fixed 4
@@ -1074,7 +1075,6 @@ static void *juicy_bank_tilde_new(void){
     x->outL = outlet_new(&x->x_obj, &s_signal);
     x->outR = outlet_new(&x->x_obj, &s_signal);
 // snapshot undo init
-    x->feedback_amt = 0.f;
 x->_undo_valid = 0;
 for (int i=0;i<JB_MAX_MODES;i++){ x->_undo_base_gain[i]=0.f; x->_undo_base_decay_ms[i]=0.f; }
 
@@ -1124,12 +1124,12 @@ static void juicy_bank_tilde_index_backward(t_juicy_bank_tilde *x){
 static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
     if(!x || x->n_modes<=0) return;
 
-    // Save UNDO (base gains and base decays)
+    // Save UNDO (base gains and base decays) so we can revert if needed
     for(int i=0;i<x->n_modes;i++){ x->_undo_base_gain[i] = x->base[i].base_gain; }
     for(int i=0;i<x->n_modes;i++){ x->_undo_base_decay_ms[i] = x->base[i].base_decay_ms; }
     x->_undo_valid = 1;
 
-    // --- DAMPER -> base_decay_ms (uses damp_broad, damp_point, damping) ---
+    // --- DAMPER (broadness/location/damping) → bake into base_decay_ms ---
     for(int i=0;i<x->n_modes;i++){
         float u = (x->n_modes>1) ? ((float)i/(float)(x->n_modes-1)) : 0.f;
         float w = jb_gauss01(u, x->damp_point, x->damp_broad*0.5f+1e-4f);
@@ -1138,7 +1138,7 @@ static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
         x->base[i].base_decay_ms = ms;
     }
 
-    // Only neutralize damping; keep sine_* untouched
+    // Keep SINE pattern controls intact; only neutralize the damper amount
     x->damping = 0.f;
 }
 
@@ -1169,7 +1169,6 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_snapshot_undo
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bite, gensym("bite"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bloom, gensym("bloom"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_crossring, gensym("crossring"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_feedback, gensym("feedback"), A_DEFFLOAT, 0);
 
     // BODY
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_damping, gensym("damping"), A_DEFFLOAT, 0);
