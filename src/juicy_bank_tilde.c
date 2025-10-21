@@ -176,6 +176,7 @@ typedef struct _juicy_bank_tilde {
     t_inlet *in_sine_pitch;
     t_inlet *in_sine_depth;
     t_inlet *in_sine_phase;
+    t_inlet *in_feedback; // NEW: feedback 0..1
 // --- SNAPSHOT (bake) undo buffer ---
 int _undo_valid;
 float _undo_base_gain[JB_MAX_MODES];
@@ -950,6 +951,7 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
         inlet_free(x->in_sine_pitch);
     inlet_free(x->in_sine_depth);
     inlet_free(x->in_sine_phase);
+    inlet_free(x->in_feedback); // NEW
     inlet_free(x->in_partials); // free 'partials' inlet
 inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     inlet_free(x->in_attack); inlet_free(x->in_decya); inlet_free(x->in_curve); inlet_free(x->in_pan); inlet_free(x->in_keytrack);
