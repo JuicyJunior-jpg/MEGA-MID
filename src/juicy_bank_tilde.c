@@ -1,3 +1,8 @@
+    // Determine if any voice is actively held (to gate feedback)
+    int anyHeld = 0;
+    for(int vix_check=0; vix_check<x->max_voices; ++vix_check){
+        if(x->v[vix_check].state == V_HELD){ anyHeld = 1; break; }
+    }
 // juicy_ban x->fb_lastL = outL[i];k~ — modal resonator bank (V5.0)
 // 4-voice poly, true stereo banks, Behavior + Body + Individual inlets.
 // NEW (V5.0):
@@ -630,8 +635,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             float du = (md->t60_s > 1e-6f) ? (1.f / (md->t60_s * x->sr)) : 1.f;
 
             for(int i=0;i<n;i++){
-                float fbL = (0.8f * x->feedback_amt) * (tanhf(2.0f * x->fb_lastL) / tanhf(2.0f));
-                float fbR = (0.8f * x->feedback_amt) * (tanhf(2.0f * x->fb_lastR) / tanhf(2.0f));
+                float fbL = (anyHeld ? 1.f : 0.f) * (0.6f * x->feedback_amt) * (tanhf(2.0f * x->fb_lastL) / tanhf(2.0f));
+                float fbR = (anyHeld ? 1.f : 0.f) * (0.6f * x->feedback_amt) * (tanhf(2.0f * x->fb_lastR) / tanhf(2.0f));
                 // LEFT
                 float excL = use_gate * (srcL[i] + fbL) * md->gain_now;
                 float absL = fabsf(excL);
