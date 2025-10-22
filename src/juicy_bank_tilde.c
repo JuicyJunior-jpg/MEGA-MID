@@ -1,4 +1,4 @@
-// juicy_bank~ — modal resonator bank (V5.0)
+// juicy_ban x->fb_lastL = outL[i];k~ — modal resonator bank (V5.0)
 // 4-voice poly, true stereo banks, Behavior + Body + Individual inlets.
 // NEW (V5.0):
 //   • **Spacing** inlet (after dispersion, before anisotropy): nudges each mode toward the *next* harmonic
@@ -630,6 +630,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             float du = (md->t60_s > 1e-6f) ? (1.f / (md->t60_s * x->sr)) : 1.f;
 
             for(int i=0;i<n;i++){
+                float fbL = x->feedback_amt * x->fb_lastL;
+                float fbR = x->feedback_amt * x->fb_lastR;
                 // LEFT
                 float excL = use_gate * (srcL[i] + fbL) * md->gain_now;
                 float absL = fabsf(excL);
@@ -766,7 +768,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         float yr=a*(y1R + xr - x1R);
         if(fabsf(yl)<1e-20f){ yl=0.f; }
         if(fabsf(yr)<1e-20f){ yr=0.f; }
-        outL[i]=yl; outR[i]=yr; x1L=xl; y1L=yl; x1R=xr; y1R=yr;
+        outL[i]=yl; outR[i]=yr; x1L=xl; y1L=yl; x1R=xr; y1R=yr; x->fb_lastL = outL[i]; x->fb_lastR = outR[i];
     }
     x->hpL_x1=x1L; x->hpL_y1=y1L; x->hpR_x1=x1R; x->hpR_y1=y1R;
 
