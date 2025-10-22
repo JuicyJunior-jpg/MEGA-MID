@@ -620,19 +620,26 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
         
         // --- global release envelope per voice ---
+        // Map 0..1 to release times that are SHORT for most of the knob,
+        // and only near 1.0 allow essentially full natural ringing.
         float _rel_amt = (x->release_amt < 0.f) ? 0.f : ((x->release_amt > 1.f) ? 1.f : x->release_amt);
-        float _rel_r = 1.f;
-        if (_rel_amt < 0.999f){
-            // 0..1 -> 0..~4s; true hard-cut at 0.0
-            float _tau_ms = 0.f + 4000.f * _rel_amt;
-            float _a = (_tau_ms <= 0.f) ? 0.f : expf(-1.f / (0.001f * _tau_ms * x->sr));
-            _rel_r = _a;
-        }
         if (v->state == V_RELEASE){
-            if (_rel_amt <= 0.f) v->rel_env = 0.f;      // instant mute
-            else                 v->rel_env *= _rel_r;  // exponential fade
+            if (_rel_amt <= 0.f){
+                // Click-safe fast choke (~1 ms fade to zero to avoid clicks)
+                float _tau_ms = 1.0f;
+                float _a = expf(-1.f / (0.001f * _tau_ms * x->sr));
+                v->rel_env *= _a;
+                if (v->rel_env < 1e-5f) v->rel_env = 0.f;
+            } else {
+                // Highly curved mapping so mid values are still short.
+                // 0..1 -> ~[10 ms .. 6000 ms] using r^4 curve
+                float _r = _rel_amt*_rel_amt*_rel_amt*_rel_amt;
+                float _tau_ms = 10.f + 6000.f * _r;
+                float _a = expf(-1.f / (0.001f * _tau_ms * x->sr));
+                v->rel_env *= _a;
+            }
         } else {
-            v->rel_env = 1.f;                           // held -> fully open
+            v->rel_env = 1.f;   // while held, fully open
         }
 for(int m=0;m<x->n_modes;m++){
             if(!x->base[m].active || v->m[m].gain_now<=0.f) continue;
