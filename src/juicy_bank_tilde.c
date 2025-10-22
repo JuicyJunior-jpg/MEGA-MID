@@ -151,6 +151,9 @@ typedef struct _juicy_bank_tilde {
     // RNG
     jb_rng_t rng;
 
+        // feedback state (single-sample delay)
+    float fb_lastL, fb_lastR;
+
     // DC HP
     float hp_a, hpL_x1, hpL_y1, hpR_x1, hpR_y1;
 
@@ -628,7 +631,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
             for(int i=0;i<n;i++){
                 // LEFT
-                float excL = use_gate * srcL[i] * md->gain_now;
+                float excL = use_gate * (srcL[i] + fbL) * md->gain_now;
                 float absL = fabsf(excL);
                 if(absL>1e-3f){
                     if(md->hit_coolL>0){ md->hit_coolL--; }
@@ -667,7 +670,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 }
 
                 // RIGHT
-                float excR = use_gate * srcR[i] * md->gain_now;
+                float excR = use_gate * (srcR[i] + fbR) * md->gain_now;
                 float absR = fabsf(excR);
                 if(absR>1e-3f){
                     if(md->hit_coolR>0){ md->hit_coolR--; }
@@ -1013,6 +1016,7 @@ static void *juicy_bank_tilde_new(void){
     x->aniso=0.f; x->aniso_eps=0.02f;
     x->contact_amt=0.f; x->contact_sym=0.f;
     x->feedback_amt = 0.f;
+    x->fb_lastL = 0.f; x->fb_lastR = 0.f;
 
     // realism defaults
     x->phase_rand=1.f; x->phase_debug=0;
