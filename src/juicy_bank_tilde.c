@@ -623,11 +623,17 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         float _rel_amt = (x->release_amt < 0.f) ? 0.f : ((x->release_amt > 1.f) ? 1.f : x->release_amt);
         float _rel_r = 1.f;
         if (_rel_amt < 0.999f){
-            float _tau_ms = 2.f + 4000.f * _rel_amt; // 2ms (fast cut) .. ~4s (nearly full ring)
-            float _a = expf(-1.f / (0.001f * _tau_ms * x->sr));
+            // 0..1 -> 0..~4s; true hard-cut at 0.0
+            float _tau_ms = 0.f + 4000.f * _rel_amt;
+            float _a = (_tau_ms <= 0.f) ? 0.f : expf(-1.f / (0.001f * _tau_ms * x->sr));
             _rel_r = _a;
         }
-        if (v->state == V_RELEASE) { v->rel_env *= _rel_r; } else { v->rel_env = 1.f; }
+        if (v->state == V_RELEASE){
+            if (_rel_amt <= 0.f) v->rel_env = 0.f;      // instant mute
+            else                 v->rel_env *= _rel_r;  // exponential fade
+        } else {
+            v->rel_env = 1.f;                           // held -> fully open
+        }
 for(int m=0;m<x->n_modes;m++){
             if(!x->base[m].active || v->m[m].gain_now<=0.f) continue;
             jb_mode_rt_t *md=&v->m[m];
