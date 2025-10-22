@@ -630,8 +630,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             float du = (md->t60_s > 1e-6f) ? (1.f / (md->t60_s * x->sr)) : 1.f;
 
             for(int i=0;i<n;i++){
-                float fbL = x->feedback_amt * x->fb_lastL;
-                float fbR = x->feedback_amt * x->fb_lastR;
+                float fbL = (0.8f * x->feedback_amt) * (tanhf(2.0f * x->fb_lastL) / tanhf(2.0f));
+                float fbR = (0.8f * x->feedback_amt) * (tanhf(2.0f * x->fb_lastR) / tanhf(2.0f));
                 // LEFT
                 float excL = use_gate * (srcL[i] + fbL) * md->gain_now;
                 float absL = fabsf(excL);
