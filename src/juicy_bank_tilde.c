@@ -1111,7 +1111,7 @@ static void *juicy_bank_tilde_new(void){
 
     
     // new bank selector inlet (symbol): send 'modal A' or 'modal B'
-    x->in_bank_select = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_symbol, gensym("modal"));
+    x->in_bank_select = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_anything, gensym("modal_route"));
 // Outs
     x->outL = outlet_new(&x->x_obj, &s_signal);
     x->outR = outlet_new(&x->x_obj, &s_signal);
@@ -1240,6 +1240,30 @@ static void juicy_bank_tilde_singleA(t_juicy_bank_tilde *x){ x->topo_mode = 0; }
 static void juicy_bank_tilde_singleB(t_juicy_bank_tilde *x){ x->topo_mode = 1; }
 static void juicy_bank_tilde_parallel(t_juicy_bank_tilde *x){ x->topo_mode = 2; }
 static void juicy_bank_tilde_serial(t_juicy_bank_tilde *x){ x->topo_mode = 3; }
+
+
+// Robust router for the bank-select inlet: accepts "modal A/B" or plain "A"/"B"
+static void juicy_bank_tilde_modal_route(t_juicy_bank_tilde *x, t_symbol *sel, int argc, t_atom *argv){
+    // Case 1: user sent "modal A" or "modal B"
+    if (sel == gensym("modal")){
+        if (argc >= 1 && argv[0].a_type == A_SYMBOL){
+            t_symbol *arg = atom_getsymbol(argv);
+            if (arg == gensym("A") || arg == gensym("a")) { x->edit_bank = 0; return; }
+            if (arg == gensym("B") || arg == gensym("b")) { x->edit_bank = 1; return; }
+        }
+    }
+    // Case 2: user sent just "A" or "B"
+    if (sel == gensym("A") || sel == gensym("a")){ x->edit_bank = 0; return; }
+    if (sel == gensym("B") || sel == gensym("b")){ x->edit_bank = 1; return; }
+
+    // Fallback: try first atom if it's a symbol
+    if (argc >= 1 && argv[0].a_type == A_SYMBOL){
+        t_symbol *arg = atom_getsymbol(argv);
+        if (arg == gensym("A") || arg == gensym("a")) { x->edit_bank = 0; return; }
+        if (arg == gensym("B") || arg == gensym("b")) { x->edit_bank = 1; return; }
+    }
+    post("juicy_bank~: bank select expects 'modal A'/'modal B' or 'A'/'B'");
+}
 
 void juicy_bank_tilde_setup(void){
     juicy_bank_tilde_class = class_new(gensym("juicy_bank~"),
