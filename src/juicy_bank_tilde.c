@@ -1111,7 +1111,7 @@ static void *juicy_bank_tilde_new(void){
 
     
     // new bank selector inlet (symbol): send 'modal A' or 'modal B'
-    x->in_bank_select = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_anything, gensym("modal_route"));
+    x->in_bank_select = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_anything, gensym("modal"));
 // Outs
     x->outL = outlet_new(&x->x_obj, &s_signal);
     x->outR = outlet_new(&x->x_obj, &s_signal);
@@ -1228,10 +1228,24 @@ static void juicy_bank_tilde_snapshot_undo(t_juicy_bank_tilde *x){
 }
 
 // === Added: bank select + topology message handlers (non-invasive) ===
-static void juicy_bank_tilde_modal(t_juicy_bank_tilde *x, t_symbol *s){
-    // expects "A" or "B"
-    if (s == gensym("A") || s == gensym("a")) x->edit_bank = 0;
-    else if (s == gensym("B") || s == gensym("b")) x->edit_bank = 1;
+static void juicy_bank_tilde_modal(t_juicy_bank_tilde *x, t_symbol *sel, int argc, t_atom *argv){
+    // Accepts "modal A/B", "A", "B", or any variant routed to this method
+    if (sel == gensym("modal")){
+        if (argc >= 1 && argv[0].a_type == A_SYMBOL){
+            t_symbol *arg = atom_getsymbol(argv);
+            if (arg == gensym("A") || arg == gensym("a")) { x->edit_bank = 0; return; }
+            if (arg == gensym("B") || arg == gensym("b")) { x->edit_bank = 1; return; }
+        }
+    }
+    if (sel == gensym("A") || sel == gensym("a")){ x->edit_bank = 0; return; }
+    if (sel == gensym("B") || sel == gensym("b")){ x->edit_bank = 1; return; }
+    // Fallback: look at first atom
+    if (argc >= 1 && argv[0].a_type == A_SYMBOL){
+        t_symbol *arg = atom_getsymbol(argv);
+        if (arg == gensym("A") || arg == gensym("a")) { x->edit_bank = 0; return; }
+        if (arg == gensym("B") || arg == gensym("b")) { x->edit_bank = 1; return; }
+    }
+    post("juicy_bank~: bank select expects 'modal A'/'modal B' or 'A'/'B'");
 }
 static void juicy_bank_tilde_modal_A(t_juicy_bank_tilde *x){ x->edit_bank = 0; }
 static void juicy_bank_tilde_modal_B(t_juicy_bank_tilde *x){ x->edit_bank = 1; }
