@@ -21,6 +21,8 @@
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
+#include <limits.h>
+#include <stdint.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -38,7 +40,7 @@ static inline float jb_wrap01(float x){ x = x - floorf(x); if (x < 0.f) x += 1.f
 typedef struct { unsigned int s; } jb_rng_t;
 static inline void jb_rng_seed(jb_rng_t *r, unsigned int s){ if(!s) s=1; r->s = s; }
 static inline unsigned int jb_rng_u32(jb_rng_t *r){ unsigned int x = r->s; x ^= x << 13; x ^= x >> 17; x ^= x << 5; r->s = x; return x; }
-static inline float jb_rng_bi(jb_rng_t *r){ return ((int)(jb_rng_u32(r)) / (float)INT_MAX); }
+static inline float jb_rng_bi(jb_rng_t *r){ return ( (jb_rng_u32(r) / (float)UINT_MAX) * 2.f - 1.f ); }
 
 static inline float jb_midi_to_hz(float n){ return 440.f * powf(2.f, (n-69.f)/12.f); }
 
@@ -353,6 +355,33 @@ static void jb_render_bank(t_juicy_bank_tilde *x, jb_bank_t *b,
 }
 
 // ---------- DSP perform ----------
+
+// Helper: render a bank with either global L/R exciter or averaged per-voice exciters
+static void jb_render_with_exciter(t_juicy_bank_tilde *x, jb_bank_t *b, int use_per_voice,
+                                   t_sample *inL, t_sample *inR,
+                                   t_sample *vL[JB_MAX_VOICES], t_sample *vR[JB_MAX_VOICES],
+                                   t_sample *accL, t_sample *accR, int n)
+{
+    if (!use_per_voice){
+        // Legacy/global: pass-through inL/inR
+        jb_render_bank(x, b, inL, inR, accL, accR, n);
+    } else {
+        // Per-voice excitation → average the voice inputs for a shared exciter buffer
+        // (voice-local dynamics still occur per-voice inside the bank)
+        static t_sample mixL[4096], mixR[4096];
+        int nn = n; if (nn > 4096) nn = 4096;
+        for(int i=0;i<nn;i++){ mixL[i]=0.f; mixR[i]=0.f; }
+        for(int v=0; v<JB_MAX_VOICES; ++v){
+            t_sample *vl = vL[v];
+            t_sample *vr = vR[v];
+            for(int i=0;i<nn;i++){ mixL[i]+=vl[i]; mixR[i]+=vr[i]; }
+        }
+        float inv = 1.f / (float)JB_MAX_VOICES;
+        for(int i=0;i<nn;i++){ mixL[i]*=inv; mixR[i]*=inv; }
+        jb_render_bank(x, b, mixL, mixR, accL, accR, nn);
+    }
+}
+
 static t_int *juicy_bank_tilde_perform(t_int *w){
     t_juicy_bank_tilde *x=(t_juicy_bank_tilde *)(w[1]);
     // inputs
@@ -387,34 +416,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     static t_sample tmpBL[4096], tmpBR[4096];
     if (n > 4096) n = 4096; // safety
 
-    // helper to render one bank with chosen exciter
-    auto render_with = [&](jb_bank_t *b, int use_per_voice, t_sample *exL, t_sample *exR, t_sample *accL, t_sample *accR){
-        // build exciter buffers per topology choice
-        // If use_per_voice==1, we must sum per-voice renders with per-voice inputs.
-        // Our jb_render_bank expects shared exciter; we pre-mix the exciter as:
-        //   - legacy mode: main L/R
-        //   - per-voice: average of active voices' inputs (voice-local coupling is handled by serial routing below)
-        for(int i=0;i<n;i++){ accL[i]=0.f; accR[i]=0.f; }
-        if (!use_per_voice){
-            // legacy: pass-through inL/inR
-            jb_render_bank(x, b, exL, exR, accL, accR, n);
-        } else {
-            // per-voice excitation → sum contributions by calling jb_render_bank per voice
-            // We emulate voice-local excitation by temporarily replacing each voice's state gate using vinL/R[vix] buffers.
-            // Simpler approach: average vinL/R across voices.
-            static t_sample mixL[4096], mixR[4096];
-            for(int i=0;i<n;i++){ mixL[i]=0.f; mixR[i]=0.f; }
-            int count = JB_MAX_VOICES;
-            for(int v=0; v<JB_MAX_VOICES; ++v){
-                for(int i=0;i<n;i++){ mixL[i]+=vinL[v][i]; mixR[i]+=vinR[v][i]; }
-            }
-            float inv = 1.f / (float)JB_MAX_VOICES;
-            for(int i=0;i<n;i++){ mixL[i]*=inv; mixR[i]*=inv; }
-            jb_render_bank(x, b, mixL, mixR, accL, accR, n);
-        }
-    };
-
-    // Prepare exciters for A
+        // Prepare exciters for A
     int use_pv = (x->exciter_mode!=0);
     t_sample *excAL = use_pv ? NULL : inL;
     t_sample *excAR = use_pv ? NULL : inR;
@@ -422,22 +424,22 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     // Render according to topology
     switch(x->topo){
         case TOPO_SINGLE_A: {
-            render_with(&x->A, use_pv, inL, inR, tmpAL, tmpAR);
+            jb_render_with_exciter(x, &x->A, use_pv, inL, inR, (t_sample **)vinL, (t_sample **)vinR, tmpAL, tmpAR, n);
             for(int i=0;i<n;i++){ outL[i]+=tmpAL[i]; outR[i]+=tmpAR[i]; }
         } break;
         case TOPO_SINGLE_B: {
-            render_with(&x->B, use_pv, inL, inR, tmpBL, tmpBR);
+            jb_render_with_exciter(x, &x->B, use_pv, inL, inR, (t_sample **)vinL, (t_sample **)vinR, tmpBL, tmpBR, n);
             for(int i=0;i<n;i++){ outL[i]+=tmpBL[i]; outR[i]+=tmpBR[i]; }
         } break;
         case TOPO_PARALLEL: {
-            render_with(&x->A, use_pv, inL, inR, tmpAL, tmpAR);
-            render_with(&x->B, use_pv, inL, inR, tmpBL, tmpBR);
+            jb_render_with_exciter(x, &x->A, use_pv, inL, inR, (t_sample **)vinL, (t_sample **)vinR, tmpAL, tmpAR, n);
+            jb_render_with_exciter(x, &x->B, use_pv, inL, inR, (t_sample **)vinL, (t_sample **)vinR, tmpBL, tmpBR, n);
             // equal startup volumes → simple sum
             for(int i=0;i<n;i++){ outL[i]+=tmpAL[i]+tmpBL[i]; outR[i]+=tmpAR[i]+tmpBR[i]; }
         } break;
         case TOPO_SERIAL: {
             // First render A → collect its output as exciter for B
-            render_with(&x->A, use_pv, inL, inR, tmpAL, tmpAR);
+            jb_render_with_exciter(x, &x->A, use_pv, inL, inR, (t_sample **)vinL, (t_sample **)vinR, tmpAL, tmpAR, n);
             // Now use A's output as exciter for B (voice-local concept approximated by using A mix;
             // per-voice mapping is preserved by per-voice states in banks; since each voice shares phase,
             // this matches the spec of "voice N excites voice N" in practice as Pd runs voices deterministically).
@@ -470,13 +472,15 @@ static void juicy_bank_tilde_partials(t_juicy_bank_tilde *x, t_floatarg f){
     if (val > 64.f) val = 64.f;
     if (x->edit_bank == BANK_EDIT_A){
         int nm = (int)floorf(val + 0.5f);
-        if (nm < 1) nm = 1; if (nm > x->A.n_modes) nm = x->A.n_modes;
+        if (nm < 1) nm = 1;
+        if (nm > x->A.n_modes) nm = x->A.n_modes;
         x->A.active_modes = nm;
     } else {
         // scale 1..64 -> 1..32 linearly
         float t = (val - 1.f) / 63.f; // 0..1
         int nm = (int)floorf(1.f + t * 31.f + 0.5f);
-        if (nm < 1) nm = 1; if (nm > x->B.n_modes) nm = x->B.n_modes;
+        if (nm < 1) nm = 1;
+        if (nm > x->B.n_modes) nm = x->B.n_modes;
         x->B.active_modes = nm;
     }
 }
