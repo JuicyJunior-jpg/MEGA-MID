@@ -157,12 +157,7 @@ typedef struct _juicy_bank_tilde {
     // DC HP
     float hp_a, hpL_x1, hpL_y1, hpR_x1, hpR_y1;
 
-    
-    // --- Coupling controls (non-invasive step) ---
-    int topo_mode;   // 0=singleA,1=singleB,2=parallel,3=serial
-    int edit_bank;   // 0=A, 1=B (bank-select target for params)
-    t_inlet *in_bank_select; // accepts [modal A]/[modal B]
-// IO
+    // IO
     // main stereo exciter inputs
     t_inlet *inR;
     // per-voice exciter inputs (optional)
@@ -195,6 +190,10 @@ typedef struct _juicy_bank_tilde {
 int _undo_valid;
 float _undo_base_gain[JB_MAX_MODES];
 float _undo_base_decay_ms[JB_MAX_MODES];
+    t_inlet *in_bank_select; // new: bank select inlet (expects 'modal A' or 'modal B')
+    int edit_bank; // 0 = A, 1 = B (which bank current param edits target)
+    int topo_mode; // 0=singleA,1=singleB,2=parallel,3=serial
+
 } t_juicy_bank_tilde;
 
 // ---------- helpers ----------
@@ -1037,9 +1036,7 @@ static void *juicy_bank_tilde_new(void){
     // --- Startup spec (64 modes, real saw amplitude 1/n) ---
     jb_apply_default_saw(x);
 
-        x->topo_mode = 0; // singleA default
-    x->edit_bank = 0; // A default
-// body defaults
+    // body defaults
     x->damping=0.f; x->brightness=0.5f; x->position=0.f;
     x->density_amt=0.f; x->density_mode=DENSITY_PIVOT;
     x->dispersion=0.f; x->dispersion_last=-1.f;
@@ -1112,7 +1109,10 @@ static void *juicy_bank_tilde_new(void){
     x->in_pan        = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("pan"));
     x->in_keytrack   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("keytrack"));
 
-    // Outs
+    
+    // new bank selector inlet (symbol): send 'modal A' or 'modal B'
+    x->in_bank_select = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_symbol, gensym("modal"));
+// Outs
     x->outL = outlet_new(&x->x_obj, &s_signal);
     x->outR = outlet_new(&x->x_obj, &s_signal);
 // snapshot undo init
@@ -1227,44 +1227,19 @@ static void juicy_bank_tilde_snapshot_undo(t_juicy_bank_tilde *x){
     x->_undo_valid = 0;
 }
 
-// Partials adaptor: input 1..64; if editing bank B, scale to 1..32 logically (control only for now)
-static void juicy_bank_tilde_partials_adapt(t_juicy_bank_tilde *x, t_floatarg f){
-    // Existing engine uses x->active_modes for the single bank;
-    // For now, keep behavior identical but clamp/scaled value stored into active_modes.
-    float val = f;
-    if (val < 1.f) val = 1.f;
-    if (val > 64.f) val = 64.f;
-    if (x->edit_bank == 0){
-        int nm = (int)floorf(val + 0.5f);
-        if (nm < 1) nm = 1;
-        if (nm > x->n_modes) nm = x->n_modes;
-        x->active_modes = nm;
-    } else {
-        float t = (val - 1.f) / 63.f; // 0..1
-        int nm = (int)floorf(1.f + t * 31.f + 0.5f);
-        if (nm < 1) nm = 1;
-        if (nm > 32) nm = 32;
-        // For the single-bank engine, we still map this into active_modes
-        x->active_modes = nm; // DSP wiring for a second bank comes next
-    }
+// === Added: bank select + topology message handlers (non-invasive) ===
+static void juicy_bank_tilde_modal(t_juicy_bank_tilde *x, t_symbol *s){
+    // expects "A" or "B"
+    if (s == gensym("A") || s == gensym("a")) x->edit_bank = 0;
+    else if (s == gensym("B") || s == gensym("b")) x->edit_bank = 1;
 }
+static void juicy_bank_tilde_modal_A(t_juicy_bank_tilde *x){ x->edit_bank = 0; }
+static void juicy_bank_tilde_modal_B(t_juicy_bank_tilde *x){ x->edit_bank = 1; }
 
-// --- Coupling topology handlers (control only, DSP wiring in next pass) ---
 static void juicy_bank_tilde_singleA(t_juicy_bank_tilde *x){ x->topo_mode = 0; }
 static void juicy_bank_tilde_singleB(t_juicy_bank_tilde *x){ x->topo_mode = 1; }
 static void juicy_bank_tilde_parallel(t_juicy_bank_tilde *x){ x->topo_mode = 2; }
 static void juicy_bank_tilde_serial(t_juicy_bank_tilde *x){ x->topo_mode = 3; }
-
-// Bank-select: accepts "modal A" or "modal B"
-static void juicy_bank_tilde_modal(t_juicy_bank_tilde *x, t_symbol *s){
-    // s is expected to be "A" or "B"
-    if (s == gensym("A") || s == gensym("a")) x->edit_bank = 0;
-    else if (s == gensym("B") || s == gensym("b")) x->edit_bank = 1;
-}
-
-// Aliases (so you can also bang them via messages inlet)
-static void juicy_bank_tilde_modal_A(t_juicy_bank_tilde *x){ x->edit_bank = 0; }
-static void juicy_bank_tilde_modal_B(t_juicy_bank_tilde *x){ x->edit_bank = 1; }
 
 void juicy_bank_tilde_setup(void){
     juicy_bank_tilde_class = class_new(gensym("juicy_bank~"),
