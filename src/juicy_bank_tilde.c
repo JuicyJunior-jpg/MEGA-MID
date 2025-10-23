@@ -1229,11 +1229,29 @@ static void juicy_bank_tilde_snapshot_undo(t_juicy_bank_tilde *x){
 
 // === Added: bank select + topology message handlers (non-invasive) ===
 static void juicy_bank_tilde_modal(t_juicy_bank_tilde *x, t_symbol *sel, int argc, t_atom *argv){
-    // Accepts "modal A/B", "A", "B", or any variant routed to this method
+    // Accepts: "modal A", "modal B", plain "A"/"B", and single-symbol "modal_A"/"modal_B"
+    if (sel == gensym("modal_A")) { x->edit_bank = 0; return; }
+    if (sel == gensym("modal_B")) { x->edit_bank = 1; return; }
+
     if (sel == gensym("modal")){
         if (argc >= 1 && argv[0].a_type == A_SYMBOL){
             t_symbol *arg = atom_getsymbol(argv);
             if (arg == gensym("A") || arg == gensym("a")) { x->edit_bank = 0; return; }
+            if (arg == gensym("B") || arg == gensym("b")) { x->edit_bank = 1; return; }
+            if (arg == gensym("modal_A")) { x->edit_bank = 0; return; }
+            if (arg == gensym("modal_B")) { x->edit_bank = 1; return; }
+        }
+    }
+    if (sel == gensym("A") || sel == gensym("a")){ x->edit_bank = 0; return; }
+    if (sel == gensym("B") || sel == gensym("b")){ x->edit_bank = 1; return; }
+    // Fallback: look at first atom
+    if (argc >= 1 && argv[0].a_type == A_SYMBOL){
+        t_symbol *arg = atom_getsymbol(argv);
+        if (arg == gensym("A") || arg == gensym("a")) { x->edit_bank = 0; return; }
+        if (arg == gensym("B") || arg == gensym("b")) { x->edit_bank = 1; return; }
+    }
+    post("juicy_bank~: bank select expects 'modal_A'/'modal_B' or 'modal A'/'modal B' or 'A'/'B'");
+}
             if (arg == gensym("B") || arg == gensym("b")) { x->edit_bank = 1; return; }
         }
     }
