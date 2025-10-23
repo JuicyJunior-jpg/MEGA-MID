@@ -356,18 +356,15 @@ static void jb_render_bank(t_juicy_bank_tilde *x, jb_bank_t *b,
 
 // ---------- DSP perform ----------
 
-// Helper: render a bank with either global L/R exciter or averaged per-voice exciters
+// Helper: render a bank using either global L/R exciter (legacy) or averaged per-voice exciters
 static void jb_render_with_exciter(t_juicy_bank_tilde *x, jb_bank_t *b, int use_per_voice,
                                    t_sample *inL, t_sample *inR,
                                    t_sample *vL[JB_MAX_VOICES], t_sample *vR[JB_MAX_VOICES],
                                    t_sample *accL, t_sample *accR, int n)
 {
     if (!use_per_voice){
-        // Legacy/global: pass-through inL/inR
         jb_render_bank(x, b, inL, inR, accL, accR, n);
     } else {
-        // Per-voice excitation → average the voice inputs for a shared exciter buffer
-        // (voice-local dynamics still occur per-voice inside the bank)
         static t_sample mixL[4096], mixR[4096];
         int nn = n; if (nn > 4096) nn = 4096;
         for(int i=0;i<nn;i++){ mixL[i]=0.f; mixR[i]=0.f; }
@@ -424,22 +421,22 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     // Render according to topology
     switch(x->topo){
         case TOPO_SINGLE_A: {
-            jb_render_with_exciter(x, &x->A, use_pv, inL, inR, (t_sample **)vinL, (t_sample **)vinR, tmpAL, tmpAR, n);
+            jb_render_with_exciter(x, &x->A, use_pv, inL, inR, vinL, vinR, tmpAL, tmpAR, n);
             for(int i=0;i<n;i++){ outL[i]+=tmpAL[i]; outR[i]+=tmpAR[i]; }
         } break;
         case TOPO_SINGLE_B: {
-            jb_render_with_exciter(x, &x->B, use_pv, inL, inR, (t_sample **)vinL, (t_sample **)vinR, tmpBL, tmpBR, n);
+            jb_render_with_exciter(x, &x->B, use_pv, inL, inR, vinL, vinR, tmpBL, tmpBR, n);
             for(int i=0;i<n;i++){ outL[i]+=tmpBL[i]; outR[i]+=tmpBR[i]; }
         } break;
         case TOPO_PARALLEL: {
-            jb_render_with_exciter(x, &x->A, use_pv, inL, inR, (t_sample **)vinL, (t_sample **)vinR, tmpAL, tmpAR, n);
-            jb_render_with_exciter(x, &x->B, use_pv, inL, inR, (t_sample **)vinL, (t_sample **)vinR, tmpBL, tmpBR, n);
+            jb_render_with_exciter(x, &x->A, use_pv, inL, inR, vinL, vinR, tmpAL, tmpAR, n);
+            jb_render_with_exciter(x, &x->B, use_pv, inL, inR, vinL, vinR, tmpBL, tmpBR, n);
             // equal startup volumes → simple sum
             for(int i=0;i<n;i++){ outL[i]+=tmpAL[i]+tmpBL[i]; outR[i]+=tmpAR[i]+tmpBR[i]; }
         } break;
         case TOPO_SERIAL: {
             // First render A → collect its output as exciter for B
-            jb_render_with_exciter(x, &x->A, use_pv, inL, inR, (t_sample **)vinL, (t_sample **)vinR, tmpAL, tmpAR, n);
+            jb_render_with_exciter(x, &x->A, use_pv, inL, inR, vinL, vinR, tmpAL, tmpAR, n);
             // Now use A's output as exciter for B (voice-local concept approximated by using A mix;
             // per-voice mapping is preserved by per-voice states in banks; since each voice shares phase,
             // this matches the spec of "voice N excites voice N" in practice as Pd runs voices deterministically).
