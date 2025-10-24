@@ -1037,6 +1037,8 @@ static void *juicy_bank_tilde_new(void){
     jb_apply_default_saw(x);
 
     // body defaults
+    x->edit_bank = 0; // default: Bank A
+
     x->damping=0.f; x->brightness=0.5f; x->position=0.f;
     x->density_amt=0.f; x->density_mode=DENSITY_PIVOT;
     x->dispersion=0.f; x->dispersion_last=-1.f;
@@ -1111,7 +1113,7 @@ static void *juicy_bank_tilde_new(void){
 
     
     // new bank selector inlet (symbol): send 'modal A' or 'modal B'
-    x->in_bank_select = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_anything, gensym("anything"));
+    x->in_bank_select = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_anything, &s_anything);
 // Outs
     x->outL = outlet_new(&x->x_obj, &s_signal);
     x->outR = outlet_new(&x->x_obj, &s_signal);
@@ -1277,15 +1279,6 @@ static void juicy_bank_tilde_modal_route(t_juicy_bank_tilde *x, t_symbol *sel, i
         if (arg == gensym("B") || arg == gensym("b")) { x->edit_bank = 1; return; }
     }
     post("juicy_bank~: bank select expects 'modal A'/'modal B' or 'A'/'B'");
-}
-
-
-// Accept arbitrary messages at the bank-select inlet and switch on modal_A/modal_B only
-static void juicy_bank_tilde_any(t_juicy_bank_tilde *x, t_symbol *sel, int argc, t_atom *argv){
-    (void)argc; (void)argv;
-    if (sel == gensym("modal_A")) { x->edit_bank = 0; return; }
-    if (sel == gensym("modal_B")) { x->edit_bank = 1; return; }
-    // ignore everything else for now
 }
 
 void juicy_bank_tilde_setup(void){
