@@ -1111,7 +1111,7 @@ static void *juicy_bank_tilde_new(void){
 
     
     // new bank selector inlet (symbol): send 'modal A' or 'modal B'
-    x->in_bank_select = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_anything, gensym("modal"));
+    x->in_bank_select = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_anything, gensym("anything"));
 // Outs
     x->outL = outlet_new(&x->x_obj, &s_signal);
     x->outR = outlet_new(&x->x_obj, &s_signal);
@@ -1229,29 +1229,11 @@ static void juicy_bank_tilde_snapshot_undo(t_juicy_bank_tilde *x){
 
 // === Added: bank select + topology message handlers (non-invasive) ===
 static void juicy_bank_tilde_modal(t_juicy_bank_tilde *x, t_symbol *sel, int argc, t_atom *argv){
-    // Accepts: "modal A", "modal B", plain "A"/"B", and single-symbol "modal_A"/"modal_B"
-    if (sel == gensym("modal_A")) { x->edit_bank = 0; return; }
-    if (sel == gensym("modal_B")) { x->edit_bank = 1; return; }
-
+    // Accepts "modal A/B", "A", "B", or any variant routed to this method
     if (sel == gensym("modal")){
         if (argc >= 1 && argv[0].a_type == A_SYMBOL){
             t_symbol *arg = atom_getsymbol(argv);
             if (arg == gensym("A") || arg == gensym("a")) { x->edit_bank = 0; return; }
-            if (arg == gensym("B") || arg == gensym("b")) { x->edit_bank = 1; return; }
-            if (arg == gensym("modal_A")) { x->edit_bank = 0; return; }
-            if (arg == gensym("modal_B")) { x->edit_bank = 1; return; }
-        }
-    }
-    if (sel == gensym("A") || sel == gensym("a")){ x->edit_bank = 0; return; }
-    if (sel == gensym("B") || sel == gensym("b")){ x->edit_bank = 1; return; }
-    // Fallback: look at first atom
-    if (argc >= 1 && argv[0].a_type == A_SYMBOL){
-        t_symbol *arg = atom_getsymbol(argv);
-        if (arg == gensym("A") || arg == gensym("a")) { x->edit_bank = 0; return; }
-        if (arg == gensym("B") || arg == gensym("b")) { x->edit_bank = 1; return; }
-    }
-    post("juicy_bank~: bank select expects 'modal_A'/'modal_B' or 'modal A'/'modal B' or 'A'/'B'");
-}
             if (arg == gensym("B") || arg == gensym("b")) { x->edit_bank = 1; return; }
         }
     }
@@ -1295,6 +1277,15 @@ static void juicy_bank_tilde_modal_route(t_juicy_bank_tilde *x, t_symbol *sel, i
         if (arg == gensym("B") || arg == gensym("b")) { x->edit_bank = 1; return; }
     }
     post("juicy_bank~: bank select expects 'modal A'/'modal B' or 'A'/'B'");
+}
+
+
+// Accept arbitrary messages at the bank-select inlet and switch on modal_A/modal_B only
+static void juicy_bank_tilde_any(t_juicy_bank_tilde *x, t_symbol *sel, int argc, t_atom *argv){
+    (void)argc; (void)argv;
+    if (sel == gensym("modal_A")) { x->edit_bank = 0; return; }
+    if (sel == gensym("modal_B")) { x->edit_bank = 1; return; }
+    // ignore everything else for now
 }
 
 void juicy_bank_tilde_setup(void){
