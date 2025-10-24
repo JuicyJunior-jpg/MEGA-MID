@@ -1232,9 +1232,19 @@ static void juicy_bank_tilde_snapshot_undo(t_juicy_bank_tilde *x){
 
 // === Bank selector (float inlet) & topology message handlers ===
 // bank 0..1: 0 = A, 1 = B
-static void juicy_bank_tilde_bank(t_juicy_bank_tilde *x, t_floatarg f){
-    float v = (f < 0.f) ? 0.f : (f > 1.f ? 1.f : f);
-    x->edit_bank = (v >= 0.5f) ? 1 : 0; // 0..0.499 -> A, 0.5..1 -> B
+static void juicy_bank_tilde_bank(t_juicy_bank_tilde *x, t_symbol *sel, int argc, t_atom *argv){
+    // Accepts: direct float on inlet (sel == &s_float) or "bank <float>"
+    float v = 0.f;
+    if (sel == &s_float && argc >= 1 && argv[0].a_type == A_FLOAT){
+        v = atom_getfloat(argv);
+    } else if (argc >= 1 && argv[0].a_type == A_FLOAT){
+        v = atom_getfloat(argv);
+    } else {
+        // If nothing usable, keep previous value
+        return;
+    }
+    if (v < 0.f) v = 0.f; else if (v > 1.f) v = 1.f;
+    x->edit_bank = (v >= 0.5f) ? 1 : 0;
 }
 
 // topology: same messages inlet as exciter_mode/snapshot
