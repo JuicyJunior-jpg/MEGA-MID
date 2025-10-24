@@ -190,9 +190,9 @@ typedef struct _juicy_bank_tilde {
 int _undo_valid;
 float _undo_base_gain[JB_MAX_MODES];
 float _undo_base_decay_ms[JB_MAX_MODES];
-    t_inlet *in_bank_select; // new: bank select inlet (expects 'modal A' or 'modal B')
-    int edit_bank; // 0 = A, 1 = B (which bank current param edits target)
-    int topo_mode; // 0=singleA,1=singleB,2=parallel,3=serial
+    int edit_bank;   // 0=A, 1=B (bank selected for edits)
+    int topo_mode;   // 0=singleA,1=singleB,2=parallel,3=serial
+    t_inlet *in_bank_select; // float inlet (0..1) next to keytrack
 
 } t_juicy_bank_tilde;
 
@@ -1038,6 +1038,7 @@ static void *juicy_bank_tilde_new(void){
 
     // body defaults
     x->edit_bank = 0; // default: Bank A
+    x->topo_mode = 0; // default: singleA
 
     x->damping=0.f; x->brightness=0.5f; x->position=0.f;
     x->density_amt=0.f; x->density_mode=DENSITY_PIVOT;
@@ -1112,8 +1113,8 @@ static void *juicy_bank_tilde_new(void){
     x->in_keytrack   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("keytrack"));
 
     
-    // new bank selector inlet (symbol): send 'modal A' or 'modal B'
-    x->in_bank_select = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_anything, &s_anything);
+    // Modal bank selector inlet (float 0..1): 0=A, 1=B
+    x->in_bank_select = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("bank"));
 // Outs
     x->outL = outlet_new(&x->x_obj, &s_signal);
     x->outR = outlet_new(&x->x_obj, &s_signal);
@@ -1229,57 +1230,19 @@ static void juicy_bank_tilde_snapshot_undo(t_juicy_bank_tilde *x){
     x->_undo_valid = 0;
 }
 
-// === Added: bank select + topology message handlers (non-invasive) ===
-static void juicy_bank_tilde_modal(t_juicy_bank_tilde *x, t_symbol *sel, int argc, t_atom *argv){
-    // Accepts "modal A/B", "A", "B", or any variant routed to this method
-    if (sel == gensym("modal")){
-        if (argc >= 1 && argv[0].a_type == A_SYMBOL){
-            t_symbol *arg = atom_getsymbol(argv);
-            if (arg == gensym("A") || arg == gensym("a")) { x->edit_bank = 0; return; }
-            if (arg == gensym("B") || arg == gensym("b")) { x->edit_bank = 1; return; }
-        }
-    }
-    if (sel == gensym("A") || sel == gensym("a")){ x->edit_bank = 0; return; }
-    if (sel == gensym("B") || sel == gensym("b")){ x->edit_bank = 1; return; }
-    // Fallback: look at first atom
-    if (argc >= 1 && argv[0].a_type == A_SYMBOL){
-        t_symbol *arg = atom_getsymbol(argv);
-        if (arg == gensym("A") || arg == gensym("a")) { x->edit_bank = 0; return; }
-        if (arg == gensym("B") || arg == gensym("b")) { x->edit_bank = 1; return; }
-    }
-    post("juicy_bank~: bank select expects 'modal A'/'modal B' or 'A'/'B'");
+// === Bank selector (float inlet) & topology message handlers ===
+// bank 0..1: 0 = A, 1 = B
+static void juicy_bank_tilde_bank(t_juicy_bank_tilde *x, t_floatarg f){
+    float v = (f < 0.f) ? 0.f : (f > 1.f ? 1.f : f);
+    x->edit_bank = (v >= 0.5f) ? 1 : 0; // 0..0.499 -> A, 0.5..1 -> B
 }
-static void juicy_bank_tilde_modal_A(t_juicy_bank_tilde *x){ x->edit_bank = 0; }
-static void juicy_bank_tilde_modal_B(t_juicy_bank_tilde *x){ x->edit_bank = 1; }
 
+// topology: same messages inlet as exciter_mode/snapshot
 static void juicy_bank_tilde_singleA(t_juicy_bank_tilde *x){ x->topo_mode = 0; }
 static void juicy_bank_tilde_singleB(t_juicy_bank_tilde *x){ x->topo_mode = 1; }
 static void juicy_bank_tilde_parallel(t_juicy_bank_tilde *x){ x->topo_mode = 2; }
 static void juicy_bank_tilde_serial(t_juicy_bank_tilde *x){ x->topo_mode = 3; }
-
-
-// Robust router for the bank-select inlet: accepts "modal A/B" or plain "A"/"B"
-static void juicy_bank_tilde_modal_route(t_juicy_bank_tilde *x, t_symbol *sel, int argc, t_atom *argv){
-    // Case 1: user sent "modal A" or "modal B"
-    if (sel == gensym("modal")){
-        if (argc >= 1 && argv[0].a_type == A_SYMBOL){
-            t_symbol *arg = atom_getsymbol(argv);
-            if (arg == gensym("A") || arg == gensym("a")) { x->edit_bank = 0; return; }
-            if (arg == gensym("B") || arg == gensym("b")) { x->edit_bank = 1; return; }
-        }
-    }
-    // Case 2: user sent just "A" or "B"
-    if (sel == gensym("A") || sel == gensym("a")){ x->edit_bank = 0; return; }
-    if (sel == gensym("B") || sel == gensym("b")){ x->edit_bank = 1; return; }
-
-    // Fallback: try first atom if it's a symbol
-    if (argc >= 1 && argv[0].a_type == A_SYMBOL){
-        t_symbol *arg = atom_getsymbol(argv);
-        if (arg == gensym("A") || arg == gensym("a")) { x->edit_bank = 0; return; }
-        if (arg == gensym("B") || arg == gensym("b")) { x->edit_bank = 1; return; }
-    }
-    post("juicy_bank~: bank select expects 'modal A'/'modal B' or 'A'/'B'");
-}
+static void juicy_bank_tilde_single(t_juicy_bank_tilde *x){ x->topo_mode = 0; } // alias to singleA
 
 void juicy_bank_tilde_setup(void){
     juicy_bank_tilde_class = class_new(gensym("juicy_bank~"),
