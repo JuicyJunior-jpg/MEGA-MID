@@ -1,3 +1,4 @@
+}
 // juicy_bank~ — modal resonator bank (V5.0)
 // 4-voice poly, true stereo banks, Behavior + Body + Individual inlets.
 // NEW (V5.0):
@@ -602,7 +603,7 @@ static void jb_render_bank(t_juicy_bank_tilde *x,
     // inputs
     // outputs
 
-    for(int i=0;i<n;i++){ outL[i]=0; outR[i]=0; }
+    for(int i=0;i<n;i++){ SUM_L[i]=0; SUM_R[i]=0; }
 
     // block updates
     
@@ -812,38 +813,78 @@ for(int m=0;m<NMODES;m++){
 
 
 
-static t_int *juicy_bank_tilde_perform(t_int *w){
 
+static t_int *juicy_bank_tilde_perform(t_int *w){
+    t_juicy_bank_tilde *x = (t_juicy_bank_tilde *)(w[1]);
+    t_sample *inL  = (t_sample *)(w[2]);
+    t_sample *inR  = (t_sample *)(w[3]);
+    t_sample *v1L  = (t_sample *)(w[4]);
+    t_sample *v1R  = (t_sample *)(w[5]);
+    t_sample *v2L  = (t_sample *)(w[6]);
+    t_sample *v2R  = (t_sample *)(w[7]);
+    t_sample *v3L  = (t_sample *)(w[8]);
+    t_sample *v3R  = (t_sample *)(w[9]);
+    t_sample *v4L  = (t_sample *)(w[10]);
+    t_sample *v4R  = (t_sample *)(w[11]);
+    t_sample *outL = (t_sample *)(w[12]);
+    t_sample *outR = (t_sample *)(w[13]);
+    int n = (int)(w[14]);
+
+    // clear outputs
     for(int i=0;i<n;i++){ outL[i]=0; outR[i]=0; }
 
+    // temp mix buffers for topologies
     t_sample tmpA_L[n], tmpA_R[n], tmpB_L[n], tmpB_R[n];
     for(int i=0;i<n;i++) tmpA_L[i]=tmpA_R[i]=tmpB_L[i]=tmpB_R[i]=0;
 
     switch (x->topo){
         case 0: // singleA
-            jb_render_bank(x, x->base, x->n_modes, x->active_modes, x->v, inL,inR, v1L,v1R,v2L,v2R,v3L,v3R,v4L,v4R, outL,outR, n);
+            jb_render_bank(x, x->base, x->n_modes, x->active_modes, x->v,
+                           inL,inR, v1L,v1R,v2L,v2R,v3L,v3R,v4L,v4R,
+                           outL,outR, n);
             break;
         case 1: // singleB
-            jb_render_bank(x, x->bankB_base, x->bankB_n_modes, x->bankB_active_modes, x->bankB_v, inL,inR, v1L,v1R,v2L,v2R,v3L,v3R,v4L,v4R, outL,outR, n);
+            jb_render_bank(x, x->bankB_base, x->bankB_n_modes, x->bankB_active_modes, x->bankB_v,
+                           inL,inR, v1L,v1R,v2L,v2R,v3L,v3R,v4L,v4R,
+                           outL,outR, n);
             break;
         case 2: // parallel
-            jb_render_bank(x, x->base, x->n_modes, x->active_modes, x->v, inL,inR, v1L,v1R,v2L,v2R,v3L,v3R,v4L,v4R, tmpA_L,tmpA_R, n);
-            jb_render_bank(x, x->bankB_base, x->bankB_n_modes, x->bankB_active_modes, x->bankB_v, inL,inR, v1L,v1R,v2L,v2R,v3L,v3R,v4L,v4R, tmpB_L,tmpB_R, n);
+            jb_render_bank(x, x->base, x->n_modes, x->active_modes, x->v,
+                           inL,inR, v1L,v1R,v2L,v2R,v3L,v3R,v4L,v4R,
+                           tmpA_L,tmpA_R, n);
+            jb_render_bank(x, x->bankB_base, x->bankB_n_modes, x->bankB_active_modes, x->bankB_v,
+                           inL,inR, v1L,v1R,v2L,v2R,v3L,v3R,v4L,v4R,
+                           tmpB_L,tmpB_R, n);
             for(int i=0;i<n;i++){ outL[i]=0.5f*(tmpA_L[i]+tmpB_L[i]); outR[i]=0.5f*(tmpA_R[i]+tmpB_R[i]); }
             break;
-        default: // serial
-            jb_render_bank(x, x->base, x->n_modes, x->active_modes, x->v, inL,inR, v1L,v1R,v2L,v2R,v3L,v3R,v4L,v4R, tmpA_L,tmpA_R, n);
-            jb_render_bank(x, x->bankB_base, x->bankB_n_modes, x->bankB_active_modes, x->bankB_v, tmpA_L,tmpA_R, v1L,v1R,v2L,v2R,v3L,v3R,v4L,v4R, tmpB_L,tmpB_R, n);
-            for(int i=0;i<n;i++){ outL[i]=0.5f*(tmpA_L[i]+tmpB_L[i]); outR[i]=0.5f*(tmpA_R[i]+tmpB_R[i]); }
+        case 3: // serial: A excites B, also mix B out
+        default:
+            jb_render_bank(x, x->base, x->n_modes, x->active_modes, x->v,
+                           inL,inR, v1L,v1R,v2L,v2R,v3L,v3R,v4L,v4R,
+                           tmpA_L,tmpA_R, n);
+            // use A's output as input to B (equal sum with original input)
+            for(int i=0;i<n;i++){ tmpB_L[i]=0.5f*(inL[i]+tmpA_L[i]); tmpB_R[i]=0.5f*(inR[i]+tmpA_R[i]); }
+            jb_render_bank(x, x->bankB_base, x->bankB_n_modes, x->bankB_active_modes, x->bankB_v,
+                           tmpB_L,tmpB_R, v1L,v1R,v2L,v2R,v3L,v3R,v4L,v4R,
+                           outL,outR, n);
+            // also add a touch of A to output for definition (equal sum with B)
+            for(int i=0;i<n;i++){ outL[i]=0.5f*(outL[i]+tmpA_L[i]); outR[i]=0.5f*(outR[i]+tmpA_R[i]); }
             break;
     }
 
     // DC high-pass once on final mix
     float a=x->hp_a; float x1L=x->hpL_x1, y1L=x->hpL_y1, x1R=x->hpR_x1, y1R=x->hpR_y1;
-    for(int i=0;i<n;i++){ float xl=outL[i], xr=outR[i]; float yl=a*(y1L + xl - x1L); float yr=a*(y1R + xr - x1R); outL[i]=yl; outR[i]=yr; y1L=yl; y1R=yr; x1L=xl; x1R=xr; }
+    for(int i=0;i<n;i++){
+        float xl=outL[i], xr=outR[i];
+        float yl = a*(y1L + xl - x1L);
+        float yr = a*(y1R + xr - x1R);
+        outL[i]=yl; outR[i]=yr; y1L=yl; y1R=yr; x1L=xl; x1R=xr;
+    }
     x->hpL_y1=y1L; x->hpR_y1=y1R; x->hpL_x1=x1L; x->hpR_x1=x1R;
-    // (no return here in helper)
+
+    return (w + 15);
 }
+
 
 
 // ---------- base setters & messages ----------
