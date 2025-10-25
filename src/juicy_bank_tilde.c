@@ -1166,11 +1166,8 @@ static void jb_copy_A_to_B_defaults(t_juicy_bank_tilde *x){
         x->bankB_base[i].pan            = x->base[i].pan;
         x->bankB_base[i].keytrack       = x->base[i].keytrack;
         x->bankB_base[i].disp_signature = x->base[i].disp_signature;
-        x->bankB_base[i].disp_order     = x->base[i].disp_order;
     }
     x->bankB_active_modes = x->bankB_n_modes;
-}
-x->bankB_active_modes = x->bankB_n_modes;
 }
 static void jb_apply_default_saw(t_juicy_bank_tilde *x){
     x->n_modes = JB_MAX_MODES;
