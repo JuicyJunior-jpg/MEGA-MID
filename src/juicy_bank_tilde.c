@@ -276,6 +276,8 @@ static void jb_apply_density(const t_juicy_bank_tilde *x, jb_voice_t *v){
 
 }
 // ---------- behavior projection ----------
+}
+
 static void jb_project_behavior_into_voice(t_juicy_bank_tilde *x, jb_voice_t *v){
     float xfac = (x->basef0_ref>0.f)? (v->f0 / x->basef0_ref) : 1.f;
     if (xfac < 1e-6f) xfac = 1e-6f;
@@ -1220,9 +1222,6 @@ static void juicy_bank_tilde_partials(t_juicy_bank_tilde *x, t_floatarg f){
     int active = (x->edit_bank==1)? x->bankB_active_modes : x->active_modes;
     if (active == 0) { x->edit_idx = 0; }
     else if (x->edit_idx >= active) { x->edit_idx = active - 1; }
-} else if (x->edit_idx >= x->active_modes) {
-        x->edit_idx = x->active_modes - 1;
-    }
 }
 
 static void juicy_bank_tilde_index_forward(t_juicy_bank_tilde *x){
