@@ -25,6 +25,8 @@
 #include <string.h>
 #include <stdlib.h>
 
+#define JB_SET_BY_BANK(field, value) do { if ((x)->edit_bank==0) { (x)->A.field = (value); } else { (x)->B.field = (value); } } while(0)
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -629,7 +631,7 @@ for(int vix=0; vix<x->max_voices; ++vix){
         jb_voice_t *v = &V[vix];
         if (v->state==V_IDLE) continue;
         jb_update_crossring(x, vix);
-        jb_update_voice_coeffs(x, v);
+        jb_update_voice_coeffs(x, bp, v);
         jb_update_voice_gains(x, v);
     }
 
@@ -988,21 +990,21 @@ static void juicy_bank_tilde_amps(t_juicy_bank_tilde *x, t_symbol *s, int argc, 
 }
 
 // BODY globals
-static void juicy_bank_tilde_damp_broad(t_juicy_bank_tilde *x, t_floatarg f){ (x->edit_bank==0? x->A.damp_broad : x->B.damp_broad) =jb_clamp(f,0.f,1.f); }
-static void juicy_bank_tilde_damp_point(t_juicy_bank_tilde *x, t_floatarg f){ (x->edit_bank==0? x->A.damp_point : x->B.damp_point) =jb_wrap01(f); }
-static void juicy_bank_tilde_damping(t_juicy_bank_tilde *x, t_floatarg f){ (x->edit_bank==0? x->A.damping : x->B.damping) =jb_clamp(f,-1.f,1.f); }
-static void juicy_bank_tilde_brightness(t_juicy_bank_tilde *x, t_floatarg f){ (x->edit_bank==0? x->A.brightness : x->B.brightness) =jb_clamp(f,0.f,1.f); }
-static void juicy_bank_tilde_position(t_juicy_bank_tilde *x, t_floatarg f){ (x->edit_bank==0? x->A.position : x->B.position) =(f<=0.f)?0.f:jb_clamp(f,0.f,1.f); }
-static void juicy_bank_tilde_density(t_juicy_bank_tilde *x, t_floatarg f){ (x->edit_bank==0? x->A.density_amt : x->B.density_amt) =jb_clamp(f,-1.f,1.f); }
+static void juicy_bank_tilde_damp_broad(t_juicy_bank_tilde *x, t_floatarg f){ JB_SET_BY_BANK(damp_broad, jb_clamp(f,0.f,1.f)); }
+static void juicy_bank_tilde_damp_point(t_juicy_bank_tilde *x, t_floatarg f){ JB_SET_BY_BANK(damp_point, jb_wrap01(f)); }
+static void juicy_bank_tilde_damping(t_juicy_bank_tilde *x, t_floatarg f){ JB_SET_BY_BANK(damping, jb_clamp(f,-1.f,1.f)); }
+static void juicy_bank_tilde_brightness(t_juicy_bank_tilde *x, t_floatarg f){ JB_SET_BY_BANK(brightness, jb_clamp(f,0.f,1.f)); }
+static void juicy_bank_tilde_position(t_juicy_bank_tilde *x, t_floatarg f){ JB_SET_BY_BANK(position, (f<=0.f)?0.f:jb_clamp(f,0.f,1.f)); }
+static void juicy_bank_tilde_density(t_juicy_bank_tilde *x, t_floatarg f){ JB_SET_BY_BANK(density_amt, jb_clamp(f,-1.f,1.f)); }
 static void juicy_bank_tilde_density_pivot(t_juicy_bank_tilde *x){ x->density_mode=DENSITY_PIVOT; }
 static void juicy_bank_tilde_density_individual(t_juicy_bank_tilde *x){ x->density_mode=DENSITY_INDIV; }
 static void juicy_bank_tilde_spacing(t_juicy_bank_tilde *x, t_floatarg f){ x->spacing=jb_clamp(f,0.f,1.f); } // NEW
-static void juicy_bank_tilde_anisotropy(t_juicy_bank_tilde *x, t_floatarg f){ (x->edit_bank==0? x->A.aniso : x->B.aniso) =jb_clamp(f,-1.f,1.f); }
-static void juicy_bank_tilde_aniso_eps(t_juicy_bank_tilde *x, t_floatarg f){ (x->edit_bank==0? x->A.aniso_eps : x->B.aniso_eps) =jb_clamp(f,0.f,0.25f); }
-static void juicy_bank_tilde_contact(t_juicy_bank_tilde *x, t_floatarg f){ (x->edit_bank==0? x->A.contact_amt : x->B.contact_amt) =jb_clamp(f,0.f,1.f); }
+static void juicy_bank_tilde_anisotropy(t_juicy_bank_tilde *x, t_floatarg f){ JB_SET_BY_BANK(aniso, jb_clamp(f,-1.f,1.f)); }
+static void juicy_bank_tilde_aniso_eps(t_juicy_bank_tilde *x, t_floatarg f){ JB_SET_BY_BANK(aniso_eps, jb_clamp(f,0.f,0.25f)); }
+static void juicy_bank_tilde_contact(t_juicy_bank_tilde *x, t_floatarg f){ JB_SET_BY_BANK(contact_amt, jb_clamp(f,0.f,1.f)); }
 
-static void juicy_bank_tilde_release(t_juicy_bank_tilde *x, t_floatarg f){ (x->edit_bank==0? x->A.release_amt : x->B.release_amt) = jb_clamp(f, 0.f, 1.f); }
-static void juicy_bank_tilde_contact_sym(t_juicy_bank_tilde *x, t_floatarg f){ (x->edit_bank==0? x->A.contact_sym : x->B.contact_sym) =jb_clamp(f,-1.f,1.f); }
+static void juicy_bank_tilde_release(t_juicy_bank_tilde *x, t_floatarg f){ JB_SET_BY_BANK(release_amt, jb_clamp(f, 0.f, 1.f)); }
+static void juicy_bank_tilde_contact_sym(t_juicy_bank_tilde *x, t_floatarg f){ JB_SET_BY_BANK(contact_sym, jb_clamp(f,-1.f,1.f)); }
 
 // realism & misc
 static void juicy_bank_tilde_phase_random(t_juicy_bank_tilde *x, t_floatarg f){ x->phase_rand=jb_clamp(f,0.f,1.f); }
@@ -1011,35 +1013,36 @@ static void juicy_bank_tilde_bandwidth(t_juicy_bank_tilde *x, t_floatarg f){ x->
 static void juicy_bank_tilde_micro_detune(t_juicy_bank_tilde *x, t_floatarg f){ x->micro_detune=jb_clamp(f,0.f,1.f); }
 // --- SINE param setters ---
 static void juicy_bank_tilde_sine_pitch(t_juicy_bank_tilde *x, t_floatarg f){
-    (x->edit_bank==0? x->A.sine_pitch : x->B.sine_pitch) = jb_clamp(f, 0.f, 1.f);
+    JB_SET_BY_BANK(sine_pitch, jb_clamp(f, 0.f, 1.f));
 }
 static void juicy_bank_tilde_sine_depth(t_juicy_bank_tilde *x, t_floatarg f){
-    (x->edit_bank==0? x->A.sine_depth : x->B.sine_depth) = jb_clamp(f, 0.f, 1.f);
+    JB_SET_BY_BANK(sine_depth, jb_clamp(f, 0.f, 1.f));
 }
 static void juicy_bank_tilde_sine_phase(t_juicy_bank_tilde *x, t_floatarg f){
     float p = f - floorf(f);
     if (p < 0.f) p += 1.f;
-    (x->edit_bank==0? x->A.sine_phase : x->B.sine_phase) = p;
+    JB_SET_BY_BANK(sine_phase, p);
 }
 
 
 // dispersion & seeds
-static void juicy_bank_tilde_dispersion(t_juicy_bank_tilde *x, t_floatarg f){
-    // write into selected bank
-    if (x->edit_bank==0){
-        x->A.dispersion = jb_clamp(f,0.f,1.f);
-        // re-roll signatures for BASE A
-        jb_rng_t rng = x->disp_rng;
-        for (int i=0;i<x->n_modes;i++){
-            x->base[i].disp_signature = jb_frand(&rng);
+static void juicy_bank_tilde_dispersion(t_juicy_bank_tilde *x, t_floatarg f)
+{
+    // write to the selected bank's dispersion and reroll only that bank's base signatures
+    float val = jb_clamp(f, 0.f, 1.f);
+    if (x->edit_bank == 0) x->A.dispersion = val; else x->B.dispersion = val;
+
+    // simple reroll using rand(); ensures independence without needing jb_rng_t/jb_frand
+    if (x->edit_bank == 0) {
+        for (int i = 0; i < x->n_modes; ++i) {
+            x->base[i].disp_signature = (float)rand() / (float)RAND_MAX;
         }
     } else {
-        x->B.dispersion = jb_clamp(f,0.f,1.f);
-        jb_rng_t rng = x->disp_rng;
-        for (int i=0;i<x->bankB_n_modes;i++){
-            x->bankB_base[i].disp_signature = jb_frand(&rng);
+        for (int i = 0; i < x->bankB_n_modes; ++i) {
+            x->bankB_base[i].disp_signature = (float)rand() / (float)RAND_MAX;
         }
-    }}
+    }
+}
 static void juicy_bank_tilde_seed(t_juicy_bank_tilde *x, t_floatarg f){
     jb_rng_seed(&x->rng, (unsigned int)((int)f*2654435761u));
     for(int i=0;i<x->n_modes;i++){
@@ -1266,7 +1269,7 @@ static void juicy_bank_tilde_INIT(t_juicy_bank_tilde *x){
     x->A.damping = x->damping; x->A.damp_broad = x->damp_broad; x->A.damp_point = x->damp_point;
     x->A.brightness = x->brightness; x->A.position = x->position;
     x->A.density_amt = x->density_amt; x->A.spacing = x->spacing;
-    x->A.aniso = x->anisotropy; x->A.aniso_eps = x->aniso_eps;
+    x->A.aniso = x->aniso; x->A.aniso_eps = x->aniso_eps;
     x->A.contact_amt = x->contact_amt; x->A.contact_sym = x->contact_sym;
     x->A.bandwidth = x->bandwidth; x->A.micro_detune = x->micro_detune;
     x->A.sine_pitch = x->sine_pitch; x->A.sine_depth = x->sine_depth; x->A.sine_phase = x->sine_phase;
