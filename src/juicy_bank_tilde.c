@@ -533,21 +533,11 @@ static int jb_find_voice_to_steal(t_juicy_bank_tilde *x){
 
 static void jb_note_on(t_juicy_bank_tilde *x, float f0, float vel){
     int idx = jb_find_voice_to_steal(x);
-    // Bank A
     jb_voice_t *v = &x->v[idx];
     v->state = V_HELD; v->f0 = (f0<=0.f)?1.f:f0; v->vel = jb_clamp(vel,0.f,1.f);
     jb_voice_reset_states(x, v, &x->rng);
     jb_project_behavior_into_voice(x, v);
-    // Bank B mirrors activation so topologies like singleB/parallel/serial have active voices
-    if (idx >= 0 && idx < JB_MAX_VOICES) {
-        jb_voice_t *vb = &x->bankB_v[idx];
-        vb->state = V_HELD; vb->f0 = (f0<=0.f)?1.f:f0; vb->vel = jb_clamp(vel,0.f,1.f);
-        jb_voice_reset_states(x, vb, &x->rng);
-        jb_project_behavior_into_voice(x, vb);
-    }
-
 }
-
 
 static void jb_note_off(t_juicy_bank_tilde *x, float f0){
     int match=-1; float best=1e9f; float tol=0.5f;
@@ -558,11 +548,7 @@ static void jb_note_off(t_juicy_bank_tilde *x, float f0){
             if (x->v[i].energy<best){ best=x->v[i].energy; match=i; }
         }
     }
-    if (match>=0){
-        x->v[match].state = V_RELEASE;
-        if (match < JB_MAX_VOICES) x->bankB_v[match].state = V_RELEASE;
-    }
-
+    if (match>=0) x->v[match].state = V_RELEASE;
 }
 
 // ===== Explicit voice-addressed control (for Pd [poly]) =====
@@ -573,31 +559,18 @@ static void jb_note_on_voice(t_juicy_bank_tilde *x, int vix1, float f0, float ve
     if (f0 <= 0.f) f0 = 1.f;
     if (vel < 0.f) vel = 0.f;
     if (vel > 1.f) vel = 1.f;
-    // Bank A
     jb_voice_t *v = &x->v[idx];
     v->state = V_HELD; v->f0 = f0; v->vel = vel;
     jb_voice_reset_states(x, v, &x->rng);
     jb_project_behavior_into_voice(x, v);
-    // Bank B
-    if (idx >= 0 && idx < JB_MAX_VOICES){
-        jb_voice_t *vb = &x->bankB_v[idx];
-        vb->state = V_HELD; vb->f0 = f0; vb->vel = vel;
-        jb_voice_reset_states(x, vb, &x->rng);
-        jb_project_behavior_into_voice(x, vb);
-    }
-
 }
-
 
 static void jb_note_off_voice(t_juicy_bank_tilde *x, int vix1){
     if (vix1 < 1) vix1 = 1;
     if (vix1 > x->max_voices) vix1 = x->max_voices;
     int idx = vix1 - 1;
     if (x->v[idx].state != V_IDLE) x->v[idx].state = V_RELEASE;
-    if (idx >= 0 && idx < JB_MAX_VOICES && x->bankB_v[idx].state != V_IDLE) x->bankB_v[idx].state = V_RELEASE;
-
 }
-
 
 // Message handlers (voice-addressed)
 static void juicy_bank_tilde_note_poly(t_juicy_bank_tilde *x, t_floatarg vix, t_floatarg f0, t_floatarg vel){
@@ -1094,22 +1067,14 @@ static void juicy_bank_tilde_exciter_mode(t_juicy_bank_tilde *x, t_floatarg on){
 // reset/restart
 static void juicy_bank_tilde_reset(t_juicy_bank_tilde *x){
     for(int v=0; v<JB_MAX_VOICES; ++v){
-        // Bank A
+        // reset Bank A voices
         x->v[v].state = V_IDLE; x->v[v].f0 = x->basef0_ref; x->v[v].vel = 0.f; x->v[v].energy=0.f; x->v[v].rel_env = 1.f;
         for(int i=0;i<JB_MAX_MODES;i++){
             x->v[v].disp_offset[i]=x->v[v].disp_target[i]=0.f;
             x->v[v].cr_gain_mul[i]=x->v[v].cr_decay_mul[i]=1.f;
         }
-        // Bank B
-        x->bankB_v[v].state = V_IDLE; x->bankB_v[v].f0 = x->basef0_ref; x->bankB_v[v].vel = 0.f; x->bankB_v[v].energy=0.f; x->bankB_v[v].rel_env = 1.f;
-        for(int i=0;i<JB_MAX_MODES;i++){
-            x->bankB_v[v].disp_offset[i]=x->bankB_v[v].disp_target[i]=0.f;
-            x->bankB_v[v].cr_gain_mul[i]=x->bankB_v[v].cr_decay_mul[i]=1.f;
-        }
     }
-
 }
-
 static void juicy_bank_tilde_restart(t_juicy_bank_tilde *x){ juicy_bank_tilde_reset(x); }
 
 // ---------- dsp setup/free ----------
@@ -1149,26 +1114,6 @@ inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
 
 
 // ---------- defaults helper ----------
-
-// Copy first 32 default modes from Bank A base to Bank B base (one-time init/reset mirror)
-
-static void jb_copy_A_to_B_defaults(t_juicy_bank_tilde *x){
-    // Copy A's current default (base) setup into B as the starting point
-    int N = (32 < x->n_modes) ? 32 : x->n_modes;
-    x->bankB_n_modes = N;
-    for(int i=0;i<N;i++){
-        x->bankB_base[i].active         = x->base[i].active;
-        x->bankB_base[i].base_ratio     = x->base[i].base_ratio;
-        x->bankB_base[i].base_decay_ms  = x->base[i].base_decay_ms;
-        x->bankB_base[i].base_gain      = x->base[i].base_gain;
-        x->bankB_base[i].attack_ms      = x->base[i].attack_ms;
-        x->bankB_base[i].curve_amt      = x->base[i].curve_amt;
-        x->bankB_base[i].pan            = x->base[i].pan;
-        x->bankB_base[i].keytrack       = x->base[i].keytrack;
-        x->bankB_base[i].disp_signature = x->base[i].disp_signature;
-    }
-    x->bankB_active_modes = x->bankB_n_modes;
-}
 static void jb_apply_default_saw(t_juicy_bank_tilde *x){
     x->n_modes = JB_MAX_MODES;
     x->edit_idx = 0;
@@ -1202,7 +1147,6 @@ static void *juicy_bank_tilde_new(void){
 
     // --- Startup spec (64 modes, real saw amplitude 1/n) ---
     jb_apply_default_saw(x);
-    jb_copy_A_to_B_defaults(x);
 
     // body defaults
     x->damping=0.f; x->brightness=0.5f; x->position=0.f;
@@ -1294,7 +1238,6 @@ for (int i=0;i<JB_MAX_MODES;i++){ x->_undo_base_gain[i]=0.f; x->_undo_base_decay
 static void juicy_bank_tilde_INIT(t_juicy_bank_tilde *x){
     // Apply 64-mode saw defaults (1/n amplitude), then reset states
     jb_apply_default_saw(x);
-    jb_copy_A_to_B_defaults(x);
     juicy_bank_tilde_restart(x);
     post("juicy_bank~: INIT complete (64 modes, saw-like gains 1/n, decay=1s).");
 }
@@ -1308,18 +1251,22 @@ static void juicy_bank_tilde_serial(t_juicy_bank_tilde *x){ x->topo=3; }
 // ---------- setup ----------
 // === Partials / Index navigation helpers ===
 static void juicy_bank_tilde_partials(t_juicy_bank_tilde *x, t_floatarg f){
-    int K = (int)floorf(f + 0.5f); if (K<0) K=0;
-    if (x->edit_bank==1){
-        if (K>64) K=64;
-        if (K>0){ K = (int)ceilf((K*32.0f)/64.0f); if (K<1) K=1; if (K>32) K=32; }
-        x->bankB_active_modes = K;
+    int p = (int)f;
+    if (p < 1) p = 1;
+    if (p > 64) p = 64;
+    const int editing_B = (x->bank_sel >= 0.5f);
+
+    if (!editing_B){
+        int maxA = x->n_modes;
+        if (p > maxA) p = maxA;
+        x->active_modes = p;
     } else {
-        if (K > x->n_modes) K = x->n_modes;
-        x->active_modes = K;
+        int maxB = x->bankB_n_modes;
+        int mapped = (p * maxB + 63) / 64; // map 1..64 -> 1..maxB (e.g., 32) with rounding up
+        if (mapped < 1) mapped = 1;
+        if (mapped > maxB) mapped = maxB;
+        x->bankB_active_modes = mapped;
     }
-    int active = (x->edit_bank==1)? x->bankB_active_modes : x->active_modes;
-    if (active == 0) { x->edit_idx = 0; }
-    else if (x->edit_idx >= active) { x->edit_idx = active - 1; }
 }
 
 static void juicy_bank_tilde_index_forward(t_juicy_bank_tilde *x){
