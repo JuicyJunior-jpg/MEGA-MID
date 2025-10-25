@@ -565,12 +565,6 @@ static void jb_note_off(t_juicy_bank_tilde *x, float f0){
 
 }
 
-            if (x->v[i].energy<best){ best=x->v[i].energy; match=i; }
-        }
-    }
-    if (match>=0) x->v[match].state = V_RELEASE;
-}
-
 // ===== Explicit voice-addressed control (for Pd [poly]) =====
 static void jb_note_on_voice(t_juicy_bank_tilde *x, int vix1, float f0, float vel){
     if (vix1 < 1) vix1 = 1;
@@ -1116,8 +1110,6 @@ static void juicy_bank_tilde_reset(t_juicy_bank_tilde *x){
 
 }
 
-    }
-}
 static void juicy_bank_tilde_restart(t_juicy_bank_tilde *x){ juicy_bank_tilde_reset(x); }
 
 // ---------- dsp setup/free ----------
