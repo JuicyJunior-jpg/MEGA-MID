@@ -84,6 +84,7 @@ typedef struct {
     // drive/hit
     float driveL, driveR;
     int   hit_gateL, hit_coolL, hit_gateR, hit_coolR;
+    int   nyq_kill;
 } jb_mode_rt_t;
 
 typedef enum { V_IDLE=0, V_HELD=1, V_RELEASE=2 } jb_vstate;
@@ -402,7 +403,8 @@ float md_amt = jb_clamp(x->micro_detune,0.f,1.f);
             /* Per-mode damping focus: weight along modes with wrap */
             float b = jb_clamp(x->damp_broad, 0.f, 1.f);
             float p = x->damp_point;
-            if (p < 0.f) p = 0.f; if (p > 1.f) p = 1.f;
+            if (p < 0.f) p = 0.f;
+            if (p > 1.f) p = 1.f;
             float k_norm = (x->n_modes>1)? ((float)i/(float)(x->n_modes-1)) : 0.f;
             float dx = fabsf(k_norm - p); if (dx > 0.5f) dx = 1.f - dx; /* circular distance */
             float n = (float)((x->n_modes>0)?x->n_modes:1);
@@ -1206,7 +1208,8 @@ static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
 
     // Damper weights per mode (same formula as in jb_update_voice_coeffs)
     float b = jb_clamp(x->damp_broad, 0.f, 1.f);
-    float p = x->damp_point; if (p < 0.f) p = 0.f; if (p > 1.f) p = 1.f;
+    float p = x->damp_point; if (p < 0.f) p = 0.f;
+            if (p > 1.f) p = 1.f;
     float n = (float)((x->n_modes>0)?x->n_modes:1);
     float sigma_min = 0.5f / n;      // ~single-mode width
     float sigma_max = 0.5f;          // whole bank
