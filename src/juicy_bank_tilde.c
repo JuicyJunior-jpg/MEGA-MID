@@ -1149,6 +1149,21 @@ inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
 
 
 // ---------- defaults helper ----------
+
+// Copy first 32 default modes from Bank A base to Bank B base (one-time init/reset mirror)
+static void jb_copy_A_to_B_defaults(t_juicy_bank_tilde *x){
+    int N = (JB_MAX_MODES_B < x->n_modes) ? JB_MAX_MODES_B : x->n_modes;
+    for(int i=0;i<N;i++){
+        x->bankB_base[i].ratio    = x->base[i].ratio;
+        x->bankB_base[i].gain     = x->base[i].gain;
+        x->bankB_base[i].attack   = x->base[i].attack;
+        x->bankB_base[i].decay    = x->base[i].decay;
+        x->bankB_base[i].curve    = x->base[i].curve;
+        x->bankB_base[i].pan      = x->base[i].pan;
+        x->bankB_base[i].keytrack = x->base[i].keytrack;
+    }
+    x->bankB_active_modes = x->bankB_n_modes;
+}
 static void jb_apply_default_saw(t_juicy_bank_tilde *x){
     x->n_modes = JB_MAX_MODES;
     x->edit_idx = 0;
@@ -1182,6 +1197,7 @@ static void *juicy_bank_tilde_new(void){
 
     // --- Startup spec (64 modes, real saw amplitude 1/n) ---
     jb_apply_default_saw(x);
+    jb_copy_A_to_B_defaults(x);
 
     // body defaults
     x->damping=0.f; x->brightness=0.5f; x->position=0.f;
@@ -1273,6 +1289,7 @@ for (int i=0;i<JB_MAX_MODES;i++){ x->_undo_base_gain[i]=0.f; x->_undo_base_decay
 static void juicy_bank_tilde_INIT(t_juicy_bank_tilde *x){
     // Apply 64-mode saw defaults (1/n amplitude), then reset states
     jb_apply_default_saw(x);
+    jb_copy_A_to_B_defaults(x);
     juicy_bank_tilde_restart(x);
     post("juicy_bank~: INIT complete (64 modes, saw-like gains 1/n, decay=1s).");
 }
