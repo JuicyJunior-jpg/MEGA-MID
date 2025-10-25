@@ -1151,18 +1151,26 @@ inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
 // ---------- defaults helper ----------
 
 // Copy first 32 default modes from Bank A base to Bank B base (one-time init/reset mirror)
+
 static void jb_copy_A_to_B_defaults(t_juicy_bank_tilde *x){
-    int N = (JB_MAX_MODES_B < x->n_modes) ? JB_MAX_MODES_B : x->n_modes;
+    // Copy A's current default (base) setup into B as the starting point
+    int N = (32 < x->n_modes) ? 32 : x->n_modes;
+    x->bankB_n_modes = N;
     for(int i=0;i<N;i++){
-        x->bankB_base[i].ratio    = x->base[i].ratio;
-        x->bankB_base[i].gain     = x->base[i].gain;
-        x->bankB_base[i].attack   = x->base[i].attack;
-        x->bankB_base[i].decay    = x->base[i].decay;
-        x->bankB_base[i].curve    = x->base[i].curve;
-        x->bankB_base[i].pan      = x->base[i].pan;
-        x->bankB_base[i].keytrack = x->base[i].keytrack;
+        x->bankB_base[i].active         = x->base[i].active;
+        x->bankB_base[i].base_ratio     = x->base[i].base_ratio;
+        x->bankB_base[i].base_decay_ms  = x->base[i].base_decay_ms;
+        x->bankB_base[i].base_gain      = x->base[i].base_gain;
+        x->bankB_base[i].attack_ms      = x->base[i].attack_ms;
+        x->bankB_base[i].curve_amt      = x->base[i].curve_amt;
+        x->bankB_base[i].pan            = x->base[i].pan;
+        x->bankB_base[i].keytrack       = x->base[i].keytrack;
+        x->bankB_base[i].disp_signature = x->base[i].disp_signature;
+        x->bankB_base[i].disp_order     = x->base[i].disp_order;
     }
     x->bankB_active_modes = x->bankB_n_modes;
+}
+x->bankB_active_modes = x->bankB_n_modes;
 }
 static void jb_apply_default_saw(t_juicy_bank_tilde *x){
     x->n_modes = JB_MAX_MODES;
