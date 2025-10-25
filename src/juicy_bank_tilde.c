@@ -1,4 +1,3 @@
-}
 // juicy_bank~ — modal resonator bank (V5.0)
 // 4-voice poly, true stereo banks, Behavior + Body + Individual inlets.
 // NEW (V5.0):
@@ -396,7 +395,8 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
             /* Per-mode damping focus: weight along modes with wrap */
             float b = jb_clamp(x->damp_broad, 0.f, 1.f);
             float p = x->damp_point;
-            if (p < 0.f) p = 0.f; if (p > 1.f) p = 1.f;
+            if (p < 0.f) { p = 0.f; }
+            if (p > 1.f) { p = 1.f; }
             float k_norm = (x->n_modes>1)? ((float)i/(float)(x->n_modes-1)) : 0.f;
             float dx = fabsf(k_norm - p); if (dx > 0.5f) dx = 1.f - dx; /* circular distance */
             float n = (float)((x->n_modes>0)?x->n_modes:1);
@@ -1299,7 +1299,8 @@ static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
 
     // Damper weights per mode (same formula as in jb_update_voice_coeffs)
     float b = jb_clamp(x->damp_broad, 0.f, 1.f);
-    float p = x->damp_point; if (p < 0.f) p = 0.f; if (p > 1.f) p = 1.f;
+    float p = x->damp_point; if (p < 0.f) { p = 0.f; }
+            if (p > 1.f) { p = 1.f; }
     float n = (float)((x->n_modes>0)?x->n_modes:1);
     float sigma_min = 0.5f / n;      // ~single-mode width
     float sigma_max = 0.5f;          // whole bank
