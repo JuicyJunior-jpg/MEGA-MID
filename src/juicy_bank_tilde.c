@@ -249,7 +249,8 @@ static void jb_apply_density(const t_juicy_bank_tilde *x, jb_voice_t *v){
     float neigh_map[JB_MAX_MODES];
 
     int fid=-1; float best=1e9f;
-    for(int i=0;i<count;i++){ int id=idxs[i]; float d=fabsf(x->base[id].base_ratio-1.f); if(d<best){best=d; fid=id;} }
+    for(int i=0;i<count;i++){ int id=idxs[i]; float d=fabsf(x->base[id].base_ratio-1.f); if(d<best){best=d; fid=id;}
+
     float r_pivot = (fid>=0) ? x->base[fid].base_ratio : 1.f;
     for(int i=0;i<count;i++){
         int m=idxs[i];
@@ -596,22 +597,8 @@ static void jb_render_bank(t_juicy_bank_tilde *x,
 {
     // pre-block updates copied from original
 
-    t_juicy_bank_tilde *x=(t_juicy_bank_tilde *)(w[1]);
     // inputs
-    t_sample *inL=(t_sample *)(w[2]);
-    t_sample *inR=(t_sample *)(w[3]);
-    t_sample *v1L=(t_sample *)(w[4]);
-    t_sample *v1R=(t_sample *)(w[5]);
-    t_sample *v2L=(t_sample *)(w[6]);
-    t_sample *v2R=(t_sample *)(w[7]);
-    t_sample *v3L=(t_sample *)(w[8]);
-    t_sample *v3R=(t_sample *)(w[9]);
-    t_sample *v4L=(t_sample *)(w[10]);
-    t_sample *v4R=(t_sample *)(w[11]);
     // outputs
-    t_sample *outL=(t_sample *)(w[12]);
-    t_sample *outR=(t_sample *)(w[13]);
-    int n=(int)(w[14]);
 
     for(int i=0;i<n;i++){ outL[i]=0; outR[i]=0; }
 
@@ -818,25 +805,12 @@ for(int m=0;m<NMODES;m++){
     }
     x->hpL_x1=x1L; x->hpL_y1=y1L; x->hpR_x1=x1R; x->hpR_y1=y1R;
 
-    return (w + 15);
+    // (no return here in helper)
 }
 
 
+
 static t_int *juicy_bank_tilde_perform(t_int *w){
-    t_juicy_bank_tilde *x=(t_juicy_bank_tilde *)(w[1]);
-    t_sample *inL=(t_sample *)(w[2]);
-    t_sample *inR=(t_sample *)(w[3]);
-    t_sample *v1L=(t_sample *)(w[4]);
-    t_sample *v1R=(t_sample *)(w[5]);
-    t_sample *v2L=(t_sample *)(w[6]);
-    t_sample *v2R=(t_sample *)(w[7]);
-    t_sample *v3L=(t_sample *)(w[8]);
-    t_sample *v3R=(t_sample *)(w[9]);
-    t_sample *v4L=(t_sample *)(w[10]);
-    t_sample *v4R=(t_sample *)(w[11]);
-    t_sample *outL=(t_sample *)(w[12]);
-    t_sample *outR=(t_sample *)(w[13]);
-    int n=(int)(w[14]);
 
     for(int i=0;i<n;i++){ outL[i]=0; outR[i]=0; }
 
@@ -866,7 +840,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     float a=x->hp_a; float x1L=x->hpL_x1, y1L=x->hpL_y1, x1R=x->hpR_x1, y1R=x->hpR_y1;
     for(int i=0;i<n;i++){ float xl=outL[i], xr=outR[i]; float yl=a*(y1L + xl - x1L); float yr=a*(y1R + xr - x1R); outL[i]=yl; outR[i]=yr; y1L=yl; y1R=yr; x1L=xl; x1R=xr; }
     x->hpL_y1=y1L; x->hpR_y1=y1R; x->hpL_x1=x1L; x->hpR_x1=x1R;
-    return (w + 15);
+    // (no return here in helper)
 }
 
 
@@ -928,22 +902,28 @@ static void juicy_bank_tilde_freq(t_juicy_bank_tilde *x, t_symbol *s, int argc, 
     (void)s;
     int limit = (x->edit_bank? 32 : JB_MAX_MODES);
     jb_mode_base_t *BASE = (x->edit_bank? x->bankB_base : x->base);
-    for(int i=0;i<argc && i<limit;i++){ if(argv[i].a_type==A_FLOAT){ float val=atom_getfloat(argv+i); if(val<=0.f) val=0.01f; BASE[i].base_ratio=val; } }
-} }
+    for(int i=0;i<argc && i<limit;i++){ if(argv[i].a_type==A_FLOAT){ float val=atom_getfloat(argv+i); if(val<=0.f) val=0.01f; BASE[i].base_ratio=val; }
+
+}
+
 }
 static void juicy_bank_tilde_decays(t_juicy_bank_tilde *x, t_symbol *s, int argc, t_atom *argv){
     (void)s;
     int limit = (x->edit_bank? 32 : JB_MAX_MODES);
     jb_mode_base_t *BASE = (x->edit_bank? x->bankB_base : x->base);
-    for(int i=0;i<argc && i<limit;i++){ if(argv[i].a_type==A_FLOAT){ float val=atom_getfloat(argv+i); if(val<0.f) val=0.f; BASE[i].base_decay_ms=val; } }
-} }
+    for(int i=0;i<argc && i<limit;i++){ if(argv[i].a_type==A_FLOAT){ float val=atom_getfloat(argv+i); if(val<0.f) val=0.f; BASE[i].base_decay_ms=val; }
+
+}
+
 }
 static void juicy_bank_tilde_amps(t_juicy_bank_tilde *x, t_symbol *s, int argc, t_atom *argv){
     (void)s;
     int limit = (x->edit_bank? 32 : JB_MAX_MODES);
     jb_mode_base_t *BASE = (x->edit_bank? x->bankB_base : x->base);
-    for(int i=0;i<argc && i<limit;i++){ if(argv[i].a_type==A_FLOAT){ float val=atom_getfloat(argv+i); val = jb_clamp(val,0.f,1.f); BASE[i].base_gain=val; } }
-} }
+    for(int i=0;i<argc && i<limit;i++){ if(argv[i].a_type==A_FLOAT){ float val=atom_getfloat(argv+i); val = jb_clamp(val,0.f,1.f); BASE[i].base_gain=val; }
+
+}
+
 }
 
 // BODY globals
