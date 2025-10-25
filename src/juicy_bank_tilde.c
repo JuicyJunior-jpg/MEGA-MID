@@ -533,11 +533,21 @@ static int jb_find_voice_to_steal(t_juicy_bank_tilde *x){
 
 static void jb_note_on(t_juicy_bank_tilde *x, float f0, float vel){
     int idx = jb_find_voice_to_steal(x);
+    // Bank A
     jb_voice_t *v = &x->v[idx];
     v->state = V_HELD; v->f0 = (f0<=0.f)?1.f:f0; v->vel = jb_clamp(vel,0.f,1.f);
     jb_voice_reset_states(x, v, &x->rng);
     jb_project_behavior_into_voice(x, v);
+    // Bank B mirrors activation so topologies like singleB/parallel/serial have active voices
+    if (idx >= 0 && idx < JB_MAX_VOICES) {
+        jb_voice_t *vb = &x->bankB_v[idx];
+        vb->state = V_HELD; vb->f0 = (f0<=0.f)?1.f:f0; vb->vel = jb_clamp(vel,0.f,1.f);
+        jb_voice_reset_states(x, vb, &x->rng);
+        jb_project_behavior_into_voice(x, vb);
+    }
+
 }
+
 
 static void jb_note_off(t_juicy_bank_tilde *x, float f0){
     int match=-1; float best=1e9f; float tol=0.5f;
@@ -545,6 +555,16 @@ static void jb_note_off(t_juicy_bank_tilde *x, float f0){
         if (x->v[i].state==V_HELD){
             float d=fabsf(x->v[i].f0 - f0);
             if (d<tol){ match=i; break; }
+            if (x->v[i].energy<best){ best=x->v[i].energy; match=i; }
+        }
+    }
+    if (match>=0){
+        x->v[match].state = V_RELEASE;
+        if (match < JB_MAX_VOICES) x->bankB_v[match].state = V_RELEASE;
+    }
+
+}
+
             if (x->v[i].energy<best){ best=x->v[i].energy; match=i; }
         }
     }
@@ -559,18 +579,31 @@ static void jb_note_on_voice(t_juicy_bank_tilde *x, int vix1, float f0, float ve
     if (f0 <= 0.f) f0 = 1.f;
     if (vel < 0.f) vel = 0.f;
     if (vel > 1.f) vel = 1.f;
+    // Bank A
     jb_voice_t *v = &x->v[idx];
     v->state = V_HELD; v->f0 = f0; v->vel = vel;
     jb_voice_reset_states(x, v, &x->rng);
     jb_project_behavior_into_voice(x, v);
+    // Bank B
+    if (idx >= 0 && idx < JB_MAX_VOICES){
+        jb_voice_t *vb = &x->bankB_v[idx];
+        vb->state = V_HELD; vb->f0 = f0; vb->vel = vel;
+        jb_voice_reset_states(x, vb, &x->rng);
+        jb_project_behavior_into_voice(x, vb);
+    }
+
 }
+
 
 static void jb_note_off_voice(t_juicy_bank_tilde *x, int vix1){
     if (vix1 < 1) vix1 = 1;
     if (vix1 > x->max_voices) vix1 = x->max_voices;
     int idx = vix1 - 1;
     if (x->v[idx].state != V_IDLE) x->v[idx].state = V_RELEASE;
+    if (idx >= 0 && idx < JB_MAX_VOICES && x->bankB_v[idx].state != V_IDLE) x->bankB_v[idx].state = V_RELEASE;
+
 }
+
 
 // Message handlers (voice-addressed)
 static void juicy_bank_tilde_note_poly(t_juicy_bank_tilde *x, t_floatarg vix, t_floatarg f0, t_floatarg vel){
@@ -1067,12 +1100,22 @@ static void juicy_bank_tilde_exciter_mode(t_juicy_bank_tilde *x, t_floatarg on){
 // reset/restart
 static void juicy_bank_tilde_reset(t_juicy_bank_tilde *x){
     for(int v=0; v<JB_MAX_VOICES; ++v){
-        // reset Bank A voices
+        // Bank A
         x->v[v].state = V_IDLE; x->v[v].f0 = x->basef0_ref; x->v[v].vel = 0.f; x->v[v].energy=0.f; x->v[v].rel_env = 1.f;
         for(int i=0;i<JB_MAX_MODES;i++){
             x->v[v].disp_offset[i]=x->v[v].disp_target[i]=0.f;
             x->v[v].cr_gain_mul[i]=x->v[v].cr_decay_mul[i]=1.f;
         }
+        // Bank B
+        x->bankB_v[v].state = V_IDLE; x->bankB_v[v].f0 = x->basef0_ref; x->bankB_v[v].vel = 0.f; x->bankB_v[v].energy=0.f; x->bankB_v[v].rel_env = 1.f;
+        for(int i=0;i<JB_MAX_MODES;i++){
+            x->bankB_v[v].disp_offset[i]=x->bankB_v[v].disp_target[i]=0.f;
+            x->bankB_v[v].cr_gain_mul[i]=x->bankB_v[v].cr_decay_mul[i]=1.f;
+        }
+    }
+
+}
+
     }
 }
 static void juicy_bank_tilde_restart(t_juicy_bank_tilde *x){ juicy_bank_tilde_reset(x); }
