@@ -30,6 +30,8 @@
 #endif
 
 // ---------- limits ----------
+#define JB_MAX_DECAY_S 5.0f  /* global opposite-damping ceiling in seconds */
+
 #define JB_MAX_MODES    64
 #define JB_MAX_VOICES    4
 
@@ -79,9 +81,6 @@ typedef struct {
     // RIGHT states
     float a1R,a2R, y1R,y2R, a1bR,a2bR, y1bR,y2bR, envR, y_pre_lastR, normR;
 
-    // nyquist kill flag
-    int   nyq_kill;
-
     // drive/hit
     float driveL, driveR;
     int   hit_gateL, hit_coolL, hit_gateR, hit_coolR;
@@ -128,19 +127,8 @@ typedef struct _juicy_bank_tilde {
     t_outlet *out_index;           // float outlet reporting current selected partial (1-based)
     jb_mode_base_t base[JB_MAX_MODES];
 
-    
-static void juicy_bank_tilde_max_decay_s(t_juicy_bank_tilde *x, t_floatarg f){
-    if (f < 0.005f) f = 0.005f;
-    if (f > 30.0f) f = 30.0f;
-    x->max_decay_s = f;
-}
-// BODY globals
+    // BODY globals
     float release_amt;
-
-    // New params
-    float max_decay_s;   // global ceiling for opposite damping (seconds)
-    float 0.f /*stretch disabled*/;   // -1..+1 stiffness-style inharmonicity
-
 
     float damping, brightness, position; float damp_broad, damp_point;
     float density_amt; jb_density_mode density_mode;
@@ -187,7 +175,7 @@ static void juicy_bank_tilde_max_decay_s(t_juicy_bank_tilde *x, t_floatarg f){
     
         t_inlet *in_release;
 // Body (now includes spacing between dispersion & anisotropy)
-    t_inlet *in_damping, *in_damp_broad, *in_damp_point, *in_brightness, *in_position, *in_density, *in_dispersion, *in_spacing, *in_aniso, *in_contact, *in_maxdecay;
+    t_inlet *in_damping, *in_damp_broad, *in_damp_point, *in_brightness, *in_position, *in_density, *in_dispersion, *in_spacing, *in_aniso, *in_contact;
     // Individual
     t_inlet *in_index, *in_ratio, *in_gain, *in_attack, *in_decya, *in_curve, *in_pan, *in_keytrack;
 
@@ -276,6 +264,14 @@ static void jb_apply_density(const t_juicy_bank_tilde *x, jb_voice_t *v){
     }
 
 }
+
+
+// --- Fundamental lock: keep mode 0 at exact x1 if keytracked ---
+static void jb_lock_fundamental_after_density(const t_juicy_bank_tilde *x, jb_voice_t *v){
+    if (x->n_modes > 0 && x->base[0].keytrack){
+        v->m[0].ratio_now = 1.f;
+    }
+}
 // ---------- behavior projection ----------
 static void jb_project_behavior_into_voice(t_juicy_bank_tilde *x, jb_voice_t *v){
     float xfac = (x->basef0_ref>0.f)? (v->f0 / x->basef0_ref) : 1.f;
@@ -351,7 +347,8 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
 
     jb_apply_density(x, v);
 
-    float md_amt = jb_clamp(x->micro_detune,0.f,1.f);
+    jb_lock_fundamental_after_density(x, v);
+float md_amt = jb_clamp(x->micro_detune,0.f,1.f);
     float bw_amt = jb_clamp(v->bandwidth_v, 0.f, 1.f);
 
     for(int i=0;i<x->n_modes;i++){
@@ -378,27 +375,30 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
 
         float HzL = x->base[i].keytrack ? (v->f0 * ratioL) : ratioL;
         float HzR = x->base[i].keytrack ? (v->f0 * ratioR) : ratioR;
-        /* Nyquist hard kill: if either channel >= 0.5*sr, mark mode killed this block */
         md->nyq_kill = 0;
         if (HzL >= 0.5f * x->sr || HzR >= 0.5f * x->sr){
             md->nyq_kill = 1;
-            HzL = HzR = 0.0f;
+            HzL = HzR = 0.f;
+        } else {
+            if (HzL < 0.f) HzL = 0.f;
+            if (HzR < 0.f) HzR = 0.f;
         }
         float wL = 2.f * (float)M_PI * HzL / x->sr;
         float wR = 2.f * (float)M_PI * HzR / x->sr;
 
+        
         if (md->nyq_kill){
             md->a1L=md->a2L=md->a1bL=md->a2bL=0.f;
             md->a1R=md->a2R=md->a1bR=md->a2bR=0.f;
             md->normL = md->normR = 1.f;
-        } else {
-            float base_ms = x->base[i].base_decay_ms;
-            // T60 & radius
-            float T60 = jb_clamp(base_ms, 0.f, 1e7f) * 0.001f;
-            T60 *= v->decay_pitch_mul;
-            T60 *= v->decay_vel_mul;
-            T60 *= v->cr_decay_mul[i];
-            {
+        }float base_ms = x->base[i].base_decay_ms;
+        // T60 & radius
+        float T60 = jb_clamp(base_ms, 0.f, 1e7f) * 0.001f;
+        T60 *= v->decay_pitch_mul;
+        T60 *= v->decay_vel_mul;
+        T60 *= v->cr_decay_mul[i];
+        {
+            
             /* Per-mode damping focus: weight along modes with wrap */
             float b = jb_clamp(x->damp_broad, 0.f, 1.f);
             float p = x->damp_point;
@@ -410,55 +410,33 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
             float sigma_max = 0.5f;                /* whole bank */
             float sigma = (1.f - b)*sigma_max + b*sigma_min;
             float wloc = expf(-0.5f * (dx*dx) / (sigma*sigma)); /* 0..1 */
-
-            /* Apply local-weighted damping with global ceiling for negative values */
+            /*/* apply local weighting to global damping amount */
             float d_amt = jb_clamp(x->damping, -1.f, 1.f) * wloc;
-            float T_pre = T60; /* pre-damper */
             if (d_amt >= 0.f){
-                /* normal damping: percent reduction */
-                T60 = T_pre * (1.f - d_amt);
+                T60 *= (1.f - d_amt);
             } else {
-                /* opposite damping: additive push toward global ceiling */
                 float Dneg = -d_amt;
-                float ceiling = (x->max_decay_s > 0.005f) ? x->max_decay_s : 0.005f;
-                T60 = T_pre + Dneg * (ceiling - T_pre);
+                float ceiling = JB_MAX_DECAY_S;
+                T60 = T60 + Dneg * (ceiling - T60);
+                if (T60 > ceiling) T60 = ceiling;
             }
-            /* clamp to [1ms .. ceiling] */
-            if (T60 < 0.001f) T60 = 0.001f;
-            if (T60 > x->max_decay_s) T60 = x->max_decay_s;
 
-            }
-            md->t60_s = T60;
-
-            float r = (T60 <= 0.f) ? 0.f : powf(10.f, -3.f / (T60 * x->sr));
-            float cL=cosf(wL), cR=cosf(wR);
-
-            md->a1L=2.f*r*cL; md->a2L=-r*r;
-            md->a1R=2.f*r*cR; md->a2R=-r*r;
-
-            // --- NEW: frequency-normalized resonance drive factors ---
-            float denomL = (1.f - 2.f*r*cL + r*r);
-            float denomR = (1.f - 2.f*r*cR + r*r);
-            if (denomL < 1e-6f) denomL = 1e-6f;
-            if (denomR < 1e-6f) denomR = 1e-6f;
-            md->normL = denomL;
-            md->normR = denomR;
-
-            if (bw_amt > 0.f){
-                float mode_scale = (x->n_modes>1)? ((float)i/(float)(x->n_modes-1)) : 0.f;
-                float max_det = 0.0005f + 0.0015f * mode_scale;
-                float detL = jb_clamp(md->bw_hit_ratioL, -max_det, max_det) * bw_amt;
-                float detR = jb_clamp(md->bw_hit_ratioR, -max_det, max_det) * bw_amt;
-                float w2L = wL * (1.f + detL);
-                float w2R = wR * (1.f + detR);
-                float c2L = cosf(w2L);
-                float c2R = cosf(w2R);
-                md->a1bL = 2.f*r*c2L; md->a2bL = -r*r;
-                md->a1bR = 2.f*r*c2R; md->a2bR = -r*r;
-            } else {
-                md->a1bL=md->a2bL=0.f; md->a1bR=md->a2bR=0.f;
-            }
         }
+        md->t60_s = T60;
+
+        float r = (T60 <= 0.f) ? 0.f : powf(10.f, -3.f / (T60 * x->sr));
+        float cL=cosf(wL), cR=cosf(wR);
+
+        md->a1L=2.f*r*cL; md->a2L=-r*r;
+        md->a1R=2.f*r*cR; md->a2R=-r*r;
+
+        // --- NEW: frequency-normalized resonance drive factors ---
+        float denomL = (1.f - 2.f*r*cL + r*r);
+        float denomR = (1.f - 2.f*r*cR + r*r);
+        if (denomL < 1e-6f) denomL = 1e-6f;
+        if (denomR < 1e-6f) denomR = 1e-6f;
+        md->normL = denomL;
+        md->normR = denomR;
 
         if (bw_amt > 0.f){
             float mode_scale = (x->n_modes>1)? ((float)i/(float)(x->n_modes-1)) : 0.f;
@@ -488,14 +466,13 @@ static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
 
         float g = x->base[i].base_gain * jb_bright_gain(ratio_rel, v->brightness_v);
 
-        /* New anisotropy: nearest harmonic parity bias with fixed width; fundamental immune */
         float w = 1.f;
         if (i != 0 && x->aniso != 0.f){
             float r = ratio_rel;
             float kf = nearbyintf(r);
             int   k  = (int)kf; if (k < 1) k = 1;
             float d  = fabsf(r - kf);
-            float w0 = 0.25f; /* fixed internal width */
+            float w0 = 0.25f;              /* fixed internal width */
             float prox = expf(- (d/w0)*(d/w0)); /* 0..1 */
             int parity = (k % 2 == 0) ? +1 : -1; /* +1 even, -1 odd */
             float bias = x->aniso * parity * prox;
@@ -508,7 +485,8 @@ static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
 
         g *= v->cr_gain_mul[i];
 
-        float gn = g * w * wp;
+        
+float gn = g * w * wp;
         if (v->m[i].nyq_kill) gn = 0.f;
             if (x->active_modes < x->n_modes) { if (i >= x->active_modes) gn = 0.f; }
         // --- SINE AM mask (applied after gn is computed) ---
@@ -550,8 +528,8 @@ v->energy = 0.f;
         md->hit_gateL=md->hit_gateR=0; md->hit_coolL=md->hit_coolR=0;
         md->md_hit_offsetL = 0.f; md->md_hit_offsetR = 0.f;
         md->bw_hit_ratioL = 0.f;  md->bw_hit_ratioR = 0.f;
-        md->nyq_kill = 0;
         md->normL = md->normR = 1.f;
+        md->nyq_kill = 0;
         v->disp_offset[i]=0.f; v->disp_target[i]=0.f;
         v->cr_gain_mul[i]=1.f; v->cr_decay_mul[i]=1.f;
         (void)rng;
@@ -1035,8 +1013,8 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
     inlet_free(x->in_damping); inlet_free(x->in_damp_broad); inlet_free(x->in_damp_point); inlet_free(x->in_brightness); inlet_free(x->in_position);
     inlet_free(x->in_density); inlet_free(x->in_dispersion); inlet_free(x->in_spacing);
     inlet_free(x->in_aniso); inlet_free(x->in_contact);
-    inlet_free(x->in_maxdecay);
-inlet_free(x->in_sine_pitch);
+
+        inlet_free(x->in_sine_pitch);
     inlet_free(x->in_sine_depth);
     inlet_free(x->in_sine_phase);
     inlet_free(x->in_partials); // free 'partials' inlet
@@ -1074,10 +1052,7 @@ static void jb_apply_default_saw(t_juicy_bank_tilde *x){
     x->spacing = 0.f;
     x->aniso = 0.f; x->aniso_eps = 0.02f;
     x->contact_amt=0.f; x->contact_sym=0.f;
-
-    // New param defaults
-    x->max_decay_s = 5.0f;   // 5 seconds ceiling per user's spec
-x->release_amt = 1.f;
+    x->release_amt = 1.f;
 }
 
 // ---------- new() ----------
@@ -1144,8 +1119,9 @@ static void *juicy_bank_tilde_new(void){
     x->in_spacing    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("spacing"));   // NEW
     x->in_aniso      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("anisotropy"));
     x->in_contact    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("contact"));
-    x->in_maxdecay  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("max_decay_s"));
-// SINE controls
+
+    
+    // SINE controls
     x->in_sine_pitch = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_pitch"));
     x->in_sine_depth = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_depth"));
     x->in_sine_phase = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_phase"));
