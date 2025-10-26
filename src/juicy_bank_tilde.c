@@ -180,8 +180,7 @@ float damping, brightness, position; float damp_broad, damp_point;
     
         t_inlet *in_release;
 // Body (now includes spacing between dispersion & anisotropy)
-    t_inlet *in_damping, *in_damp_broad, *in_damp_point, *in_brightness, *in_position, *in_density, *in_dispersion, *in_spacing, *in_aniso, *in_contact;
-    t_inlet *in_stretch;
+    t_inlet *in_damping, *in_damp_broad, *in_damp_point, *in_brightness, *in_position, *in_density, *in_stretch, \*in_dispersion, *in_spacing, *in_aniso, *in_contact;t_inlet *in_stretch;
     // Individual
     t_inlet *in_index, *in_ratio, *in_gain, *in_attack, *in_decya, *in_curve, *in_pan, *in_keytrack;
 
@@ -1149,14 +1148,12 @@ static void *juicy_bank_tilde_new(void){
     x->in_brightness = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("brightness"));
     x->in_position   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("position"));
     x->in_density    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("density"));
-    x->in_dispersion = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("dispersion"));
+        x->in_stretch    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("stretch"));
+x->in_dispersion = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("dispersion"));
     x->in_spacing    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("spacing"));   // NEW
     x->in_aniso      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("anisotropy"));
     x->in_contact    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("contact"));
-    x->in_stretch    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("stretch"));
-
-    
-    // SINE controls
+// SINE controls
     x->in_sine_pitch = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_pitch"));
     x->in_sine_depth = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_depth"));
     x->in_sine_phase = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_phase"));
