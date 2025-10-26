@@ -47,8 +47,7 @@ static inline void jb_rng_seed(jb_rng_t *r, unsigned int s){ if(!s) s=1; r->s = 
 static inline unsigned int jb_rng_u32(jb_rng_t *r){ unsigned int x = r->s; x ^= x << 13; x ^= x >> 17; x ^= x << 5; r->s = x; return x; }
 static inline float jb_rng_uni(jb_rng_t *r){ return (jb_rng_u32(r) >> 8) * (1.0f/16777216.0f); }
 static inline float jb_rng_bi(jb_rng_t *r){ return 2.f * jb_rng_uni(r) - 1.f; }
-static void juicy_bank_tilde_stretch(t_juicy_bank_tilde *x, t_floatarg f);
-static void jb_apply_stretch(const t_juicy_bank_tilde *x, jb_voice_t *v);
+
 static int jb_is_near_integer(float x, float eps){ float n=roundf(x); return fabsf(x-n)<=eps; }
 static inline float jb_midi_to_hz(float n){ return 440.f * powf(2.f, (n-69.f)/12.f); }
 
@@ -280,7 +279,6 @@ static void jb_lock_fundamental_after_density(const t_juicy_bank_tilde *x, jb_vo
 
 }
 
-}
 // ---------- behavior projection ----------
 static void jb_project_behavior_into_voice(t_juicy_bank_tilde *x, jb_voice_t *v){
     float xfac = (x->basef0_ref>0.f)? (v->f0 / x->basef0_ref) : 1.f;
@@ -1325,7 +1323,7 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_snapshot_undo
     
     
     
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_stretch, gensym(\"stretch\"), A_FLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_stretch, gensym("stretch"), A_FLOAT, 0);
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gensym("release"), A_DEFFLOAT, 0);
 // SINE methods
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_sine_pitch, gensym("sine_pitch"), A_DEFFLOAT, 0);
