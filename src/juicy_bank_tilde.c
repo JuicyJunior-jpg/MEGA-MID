@@ -1043,7 +1043,8 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
     inlet_free(x->in_density); inlet_free(x->in_dispersion); inlet_free(x->in_spacing);
     inlet_free(x->in_aniso); inlet_free(x->in_contact);
 
-        inlet_free(x->in_sine_pitch);
+            inlet_free(x->in_stretch);
+inlet_free(x->in_sine_pitch);
     inlet_free(x->in_sine_depth);
     inlet_free(x->in_sine_phase);
     inlet_free(x->in_partials); // free 'partials' inlet
