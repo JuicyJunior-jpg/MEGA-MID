@@ -941,8 +941,7 @@ static void juicy_bank_tilde_sine_pitch(t_juicy_bank_tilde *x, t_floatarg f){
     x->sine_pitch = jb_clamp(f, 0.f, 1.f);
 }
 static void juicy_bank_tilde_sine_depth(t_juicy_bank_tilde *x, t_floatarg f){
-    x->sine_depth = jb_clamp(f, 0.f, 1.f);
-}
+    x->sine_depth = jb_clamp(f, -1.f, 1.f); }
 static void juicy_bank_tilde_sine_phase(t_juicy_bank_tilde *x, t_floatarg f){
     float p = f - floorf(f);
     if (p < 0.f) p += 1.f;
@@ -1252,12 +1251,21 @@ static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
         float k_norm = (N>1) ? ((float)i / (float)(N-1)) : 0.f;
         float theta = 2.f * (float)M_PI * (cycles * k_norm + phase);
         float w01 = 0.5f * (1.f + cosf(theta));
-        float sharp = 1.0f + 8.0f * depth;
-        float w_sharp = powf(w01, sharp);
-        float sine_mask = (1.f - depth) + depth * w_sharp; // 0..1
-
-        // Apply to base gain
-        x->base[i].base_gain *= jb_clamp(sine_mask, 0.f, 2.f);
+        float sharp = 1.0f + 8.0f * fabsf(depth);   // use |depth| for window sharpness
+        float w_sharp = powf(w01, sharp);           // 0..1 emphasis window
+        
+        if (depth >= 0.f){
+            // Attenuate: same as before
+            float sine_mask = (1.f - depth) + depth * w_sharp; // 0..1
+            x->base[i].base_gain *= jb_clamp(sine_mask, 0.f, 1.f);
+        } else {
+            // Boost: inverse emphasis, capped at 0 dB (gain<=1.0)
+            float amt = -depth;                                // 0..1
+            float boost = 1.f + amt * (1.f - w_sharp);         // 1..2
+            x->base[i].base_gain *= boost;
+            if (x->base[i].base_gain > 1.f) x->base[i].base_gain = 1.f;
+            if (x->base[i].base_gain < 0.f) x->base[i].base_gain = 0.f;
+        }
 
         // --- DAMPER bake into base_decay_ms ---
         float k_mode = (x->n_modes>1)? ((float)i/(float)(x->n_modes-1)) : 0.f;
