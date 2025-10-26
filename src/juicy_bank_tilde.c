@@ -131,7 +131,10 @@ typedef struct _juicy_bank_tilde {
     // BODY globals
     float release_amt;
 
-    float damping, brightness, position; float damp_broad, damp_point;
+    
+    // --- STRETCH (message-only, -1..1; internal musical scaling) ---
+    float stretch;
+float damping, brightness, position; float damp_broad, damp_point;
     float density_amt; jb_density_mode density_mode;
     float dispersion, dispersion_last;
     float spacing; // NEW — 0..1
@@ -272,6 +275,30 @@ static void jb_lock_fundamental_after_density(const t_juicy_bank_tilde *x, jb_vo
     if (x->n_modes > 0 && x->base[0].keytrack){
         v->m[0].ratio_now = 1.f;
     }
+
+// ---------- stretch (message only) ----------
+// Public range: -1..+1 (0 = neutral). We scale internally to keep things musical.
+// Mapping: r_out = pow(max(r_in, 0.01), 1 + k), where k = 0.35 * stretch.
+static void juicy_bank_tilde_stretch(t_juicy_bank_tilde *x, t_floatarg f){
+    if (f < -1.f) f = -1.f;
+    if (f >  1.f) f =  1.f;
+    x->stretch = f;
+}
+
+// Apply stretch AFTER density (so it warps that layout) and BEFORE dispersion is added.
+static void jb_apply_stretch(const t_juicy_bank_tilde *x, jb_voice_t *v){
+    float k = 0.35f * jb_clamp(x->stretch, -1.f, 1.f); // internal musical scaling
+    if (k == 0.f) return;
+    for (int i=0; i<x->n_modes; ++i){
+        if (i == 0) continue; // fundamental stays exactly x1
+        if (!x->base[i].keytrack) continue; // only ratios
+        float r = v->m[i].ratio_now;
+        if (r < 0.01f) r = 0.01f;
+        float expo = 1.f + k;
+        v->m[i].ratio_now = powf(r, expo);
+    }
+}
+
 }
 // ---------- behavior projection ----------
 static void jb_project_behavior_into_voice(t_juicy_bank_tilde *x, jb_voice_t *v){
@@ -349,6 +376,7 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
     jb_apply_density(x, v);
 
     jb_lock_fundamental_after_density(x, v);
+jb_apply_stretch(x, v);
 float md_amt = jb_clamp(x->micro_detune,0.f,1.f);
     float bw_amt = jb_clamp(v->bandwidth_v, 0.f, 1.f);
 
@@ -1073,6 +1101,9 @@ static void *juicy_bank_tilde_new(void){
     x->aniso=0.f; x->aniso_eps=0.02f;
     x->contact_amt=0.f; x->contact_sym=0.f;
 
+    // Stretch default
+    x->stretch = 0.f;
+
     // realism defaults
     x->phase_rand=1.f; x->phase_debug=0;
     x->bandwidth=0.1f; x->micro_detune=0.1f;
@@ -1346,4 +1377,7 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_snapshot_undo
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_partials, gensym("partials"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index_forward, gensym("forward"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index_backward, gensym("backward"), 0);
+
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_stretch, gensym("stretch"), A_FLOAT, 0);
 }
+
