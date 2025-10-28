@@ -522,7 +522,7 @@ float gn = g * w * wp;
         {
             int N = x->n_modes;
             float pitch = jb_clamp(x->sine_pitch, 0.f, 1.f);
-            float depth = jb_clamp(x->sine_depth, 0.f, 1.f);
+            float depth = jb_clamp(x->sine_depth, -1.f, 1.f);
             float phase = x->sine_phase;
             float cycles_min = 0.25f;
             float cycles_max = floorf((float)N * 0.5f);
@@ -1228,7 +1228,7 @@ static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
     // Precompute SINE AM mask per index (same math as in jb_update_voice_gains)
     int N = x->n_modes;
     float pitch = jb_clamp(x->sine_pitch, 0.f, 1.f);
-    float depth = jb_clamp(x->sine_depth, 0.f, 1.f);
+    float depth = jb_clamp(x->sine_depth, -1.f, 1.f);
     float phase = x->sine_phase;
     float cycles_min = 0.25f;
     float cycles_max = floorf((float)((N>0)?N:1) * 0.5f);
@@ -1252,14 +1252,12 @@ static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
         float theta = 2.f * (float)M_PI * (cycles * k_norm + phase);
         float w01 = 0.5f * (1.f + cosf(theta));
         float sharp = 1.0f + 8.0f * fabsf(depth);   // use |depth| for window sharpness
-        float w_sharp = powf(w01, sharp);           // 0..1 emphasis window
+        float w_sharp = powf(w01, sharp);
         
         if (depth >= 0.f){
-            // Attenuate: same as before
             float sine_mask = (1.f - depth) + depth * w_sharp; // 0..1
             x->base[i].base_gain *= jb_clamp(sine_mask, 0.f, 1.f);
         } else {
-            // Boost: inverse emphasis, capped at 0 dB (gain<=1.0)
             float amt = -depth;                                // 0..1
             float boost = 1.f + amt * (1.f - w_sharp);         // 1..2
             x->base[i].base_gain *= boost;
