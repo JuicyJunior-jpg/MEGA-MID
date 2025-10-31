@@ -542,7 +542,7 @@ static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
 float gn = g * w * wp;
         if (v->m[i].nyq_kill) gn = 0.f;
             if (x->active_modes < x->n_modes) { if (i >= x->active_modes) gn = 0.f; }
-        // --- SINE AM mask (applied after gn is computed) ---
+                // --- SINE AM mask (bipolar; applied after gn is computed) ---
         {
             int N = x->n_modes;
             float pitch = jb_clamp(x->sine_pitch, 0.f, 1.f);
@@ -557,18 +557,19 @@ float gn = g * w * wp;
             float k_norm = (N>1) ? ((float)i / (float)(N-1)) : 0.f;
             float theta = 2.f * (float)M_PI * (cycles * k_norm + phase);
 
-            float w01 = 0.5f * (1.f + cosf(theta));
-
-            float sharp = 1.0f + 8.0f * fabsf(depth);
-            float w_sharp = powf(jb_clamp(w01, 0.f, 1.f), sharp);
+            float w01 = 0.5f * (1.f + cosf(theta));        // 0..1
+            float sharp = 1.0f + 8.0f * fabsf(depth);       // symmetric sharpness
+            float w_sharp = powf(jb_clamp(w01,0.f,1.f), sharp);
 
             if (depth >= 0.f){
-                float att = 1.0f - depth * w_sharp;
+                // attenuation at peaks (same feel as original design)
+                float att = 1.0f - depth * w_sharp;         // 1..(1-depth)
                 if (att < 0.f) att = 0.f;
                 gn *= att;
             } else {
-                float boost = (-depth) * w_sharp; // 0..1
-                const float ceiling = 1.0f; // 0 dB cap
+                // additive lift towards +1 gain (0 dB ceiling), revives silent modes
+                float boost = (-depth) * w_sharp;           // 0..1
+                const float ceiling = 1.0f;
                 gn = gn + boost * (ceiling - gn);
             }
         }
@@ -1286,20 +1287,22 @@ static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
 
     for(int i=0;i<x->n_modes;i++){
         if (!x->base[i].active) continue;
-        // --- SINE mask ---
+                // --- SINE mask ---
         float k_norm = (N>1) ? ((float)i / (float)(N-1)) : 0.f;
         float theta = 2.f * (float)M_PI * (cycles * k_norm + phase);
         float w01 = 0.5f * (1.f + cosf(theta));
-        float sharp = 1.0f + 8.0f * fabsf(depth);   // use |depth| for window sharpness
-        float w_sharp = powf(w01, sharp);
-        
+        float sharp = 1.0f + 8.0f * fabsf(depth);
+        float w_sharp = powf(jb_clamp(w01,0.f,1.f), sharp);
+
         if (depth >= 0.f){
-            float sine_mask = (1.f - depth) + depth * w_sharp; // 0..1
-            x->base[i].base_gain *= jb_clamp(sine_mask, 0.f, 1.f);
+            // multiplicative attenuation
+            float att = 1.0f - depth * w_sharp;
+            if (att < 0.f) att = 0.f;
+            x->base[i].base_gain *= att;
         } else {
-            float amt = -depth;                                // 0..1
-            float boost = 1.f + amt * (1.f - w_sharp);         // 1..2
-            x->base[i].base_gain *= boost;
+            // additive lift up to +1 gain before clamp
+            float lift = (-depth) * w_sharp;        // 0..1
+            x->base[i].base_gain += lift;
             if (x->base[i].base_gain > 1.f) x->base[i].base_gain = 1.f;
             if (x->base[i].base_gain < 0.f) x->base[i].base_gain = 0.f;
         }
