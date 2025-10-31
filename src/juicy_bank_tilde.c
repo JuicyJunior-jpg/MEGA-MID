@@ -546,7 +546,8 @@ float gn = g * w * wp;
         {
             int N = x->n_modes;
             float pitch = jb_clamp(x->sine_pitch, 0.f, 1.f);
-            float depth = jb_clamp(x->sine_depth, -1.f, 1.f);
+
+            float depth = x->sine_depth; // 0..2 (0=no change, 1=mute, 2=invert)
             float phase = x->sine_phase;
             float cycles_min = 0.25f;
             float cycles_max = floorf((float)N * 0.5f);
@@ -555,12 +556,26 @@ float gn = g * w * wp;
             float k_norm = (N>1) ? ((float)i / (float)(N-1)) : 0.f;
             float theta = 2.f * (float)M_PI * (cycles * k_norm + phase);
             float w01 = 0.5f * (1.f + cosf(theta));
-            float sharp = 1.0f + 8.0f * depth;
-            float w_sharp = powf(w01, sharp);
-            float mask = (1.f - depth) + depth * w_sharp;
+            float sharp = 3.0f; // fixed sharpening
+            float w_sharp = powf(jb_clamp(w01,0.f,1.f), sharp);
+            float mask;
+            if (depth <= 1.f) {
+                float a = depth; // 0..1
+                mask = (1.f - a) + a * w_sharp;    // 1 -> w_sharp
+            } else {
+                float b = depth - 1.f;             // 0..1
+                float mid = w_sharp;
+                float tgt = -w_sharp;
+                mask = (1.f - b) * mid + b * tgt;  // w_sharp -> -w_sharp
+            }
+            gn *= mask;
+            if (gn > 1.f) gn = 1.f;
+            if (gn < -1.f) gn = -1.f;
+        }
+mask = (1.f - depth) + depth * w_sharp;
             gn *= mask;
         }
-        v->m[i].gain_now = (gn<0.f)?0.f:gn;
+        v->m[i].gain_now = gn;
     }
 }
 
@@ -726,7 +741,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             v->rel_env = 1.f;   // while held, fully open
         }
 for(int m=0;m<x->n_modes;m++){
-            if(!x->base[m].active || v->m[m].gain_now<=0.f) continue;
+            if(!x->base[m].active) continue;
             jb_mode_rt_t *md=&v->m[m];
 
             float y1L=md->y1L, y2L=md->y2L, y1bL=md->y1bL, y2bL=md->y2bL, driveL=md->driveL, envL=md->envL;
@@ -965,6 +980,12 @@ static void juicy_bank_tilde_sine_pitch(t_juicy_bank_tilde *x, t_floatarg f){
     x->sine_pitch = jb_clamp(f, 0.f, 1.f);
 }
 static void juicy_bank_tilde_sine_depth(t_juicy_bank_tilde *x, t_floatarg f){
+    // Bipolar domain 0..2 (0=no change, 1=mute pattern, 2=inverted pattern)
+    if (f < 0.f) f = 0.f;
+    if (f > 2.f) f = 2.f;
+    x->sine_depth = f;
+}
+static void 
     x->sine_depth = jb_clamp(f, -1.f, 1.f); }
 static void juicy_bank_tilde_sine_phase(t_juicy_bank_tilde *x, t_floatarg f){
     float p = f - floorf(f);
