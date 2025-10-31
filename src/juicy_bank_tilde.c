@@ -548,17 +548,29 @@ float gn = g * w * wp;
             float pitch = jb_clamp(x->sine_pitch, 0.f, 1.f);
             float depth = jb_clamp(x->sine_depth, -1.f, 1.f);
             float phase = x->sine_phase;
+
             float cycles_min = 0.25f;
             float cycles_max = floorf((float)N * 0.5f);
             if (cycles_max < cycles_min) cycles_max = cycles_min;
             float cycles = cycles_min + pitch * (cycles_max - cycles_min);
+
             float k_norm = (N>1) ? ((float)i / (float)(N-1)) : 0.f;
             float theta = 2.f * (float)M_PI * (cycles * k_norm + phase);
+
             float w01 = 0.5f * (1.f + cosf(theta));
-            float sharp = 1.0f + 8.0f * depth;
-            float w_sharp = powf(w01, sharp);
-            float mask = (1.f - depth) + depth * w_sharp;
-            gn *= mask;
+
+            float sharp = 1.0f + 8.0f * fabsf(depth);
+            float w_sharp = powf(jb_clamp(w01, 0.f, 1.f), sharp);
+
+            if (depth >= 0.f){
+                float att = 1.0f - depth * w_sharp;
+                if (att < 0.f) att = 0.f;
+                gn *= att;
+            } else {
+                float boost = (-depth) * w_sharp; // 0..1
+                const float ceiling = 1.0f; // 0 dB cap
+                gn = gn + boost * (ceiling - gn);
+            }
         }
         v->m[i].gain_now = (gn<0.f)?0.f:gn;
     }
