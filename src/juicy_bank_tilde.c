@@ -546,35 +546,42 @@ float gn = g * w * wp;
         {
             int N = x->n_modes;
             float pitch = jb_clamp(x->sine_pitch, 0.f, 1.f);
-
             float depth = x->sine_depth; // 0..2 (0=no change, 1=mute, 2=invert)
             float phase = x->sine_phase;
+
+            // cycles across bank
             float cycles_min = 0.25f;
             float cycles_max = floorf((float)N * 0.5f);
             if (cycles_max < cycles_min) cycles_max = cycles_min;
             float cycles = cycles_min + pitch * (cycles_max - cycles_min);
+
+            // mode position 0..1
             float k_norm = (N>1) ? ((float)i / (float)(N-1)) : 0.f;
             float theta = 2.f * (float)M_PI * (cycles * k_norm + phase);
+
+            // window 0..1, sharpened
             float w01 = 0.5f * (1.f + cosf(theta));
-            float sharp = 3.0f; // fixed sharpening
+            float sharp = 3.0f;
             float w_sharp = powf(jb_clamp(w01,0.f,1.f), sharp);
+
             float mask;
-            if (depth <= 1.f) {
+            if (depth <= 1.f){
                 float a = depth; // 0..1
-                mask = (1.f - a) + a * w_sharp;    // 1 -> w_sharp
+                mask = (1.f - a) + a * w_sharp;   // 1 -> w_sharp
             } else {
-                float b = depth - 1.f;             // 0..1
-                float mid = w_sharp;
-                float tgt = -w_sharp;
-                mask = (1.f - b) * mid + b * tgt;  // w_sharp -> -w_sharp
+                float b = depth - 1.f;            // 0..1
+                float mid = w_sharp;              // at depth=1
+                float tgt = -w_sharp;             // at depth=2
+                mask = (1.f - b) * mid + b * tgt; // w_sharp -> -w_sharp
             }
+
             gn *= mask;
-            if (gn > 1.f) gn = 1.f;
+
+            // per-mode mathematical ceiling
+            if (gn >  1.f) gn =  1.f;
             if (gn < -1.f) gn = -1.f;
         }
-mask = (1.f - depth) + depth * w_sharp;
-            gn *= mask;
-        }
+
         v->m[i].gain_now = gn;
     }
 }
@@ -985,8 +992,7 @@ static void juicy_bank_tilde_sine_depth(t_juicy_bank_tilde *x, t_floatarg f){
     if (f > 2.f) f = 2.f;
     x->sine_depth = f;
 }
-static void 
-    x->sine_depth = jb_clamp(f, -1.f, 1.f); }
+
 static void juicy_bank_tilde_sine_phase(t_juicy_bank_tilde *x, t_floatarg f){
     float p = f - floorf(f);
     if (p < 0.f) p += 1.f;
