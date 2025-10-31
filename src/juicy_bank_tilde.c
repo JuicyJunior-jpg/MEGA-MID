@@ -135,6 +135,8 @@ typedef struct _juicy_bank_tilde {
     
     // --- STRETCH (message-only, -1..1; internal musical scaling) ---
     float stretch;
+
+    float warp; // -1..+1 bias for stretch distribution
 float damping, brightness, position; float damp_broad, damp_point;
     float density_amt; jb_density_mode density_mode;
     float dispersion, dispersion_last;
@@ -180,7 +182,7 @@ float damping, brightness, position; float damp_broad, damp_point;
     
         t_inlet *in_release;
 // Body (now includes spacing between dispersion & anisotropy)
-    t_inlet *in_damping, *in_damp_broad, *in_damp_point, *in_brightness, *in_position, *in_density, *in_stretch, *in_dispersion, *in_spacing, *in_aniso, *in_contact;
+    t_inlet *in_damping, *in_damp_broad, *in_damp_point, *in_brightness, *in_position, *in_density, *in_stretch, *in_warp, *in_dispersion, *in_spacing, *in_aniso, *in_contact;
     // Individual
     t_inlet *in_index, *in_ratio, *in_gain, *in_attack, *in_decay, *in_curve, *in_pan, *in_keytrack;
 
@@ -356,17 +358,39 @@ static void juicy_bank_tilde_stretch(t_juicy_bank_tilde *x, t_floatarg f){
     if (f >  1.f) f =  1.f;
     x->stretch = f;
 }
+
+static void juicy_bank_tilde_warp(t_juicy_bank_tilde *x, t_floatarg f){
+    if (f < -1.f) f = -1.f;
+    if (f >  1.f) f =  1.f;
+    x->warp = f;
+}
 static void jb_apply_stretch(const t_juicy_bank_tilde *x, jb_voice_t *v){
     float k = 0.35f * jb_clamp(x->stretch, -1.f, 1.f);
-    if (k == 0.f) return;
-    for (int i=0; i<x->n_modes; ++i){
-        if (i == 0) continue;
-        if (!x->base[i].keytrack) continue;
+    if (k == 0.f) { return; }
+    float w = jb_clamp(x->warp, -1.f, 1.f);
+    const float alpha = 4.0f; // curvature strength
+    int denom = (x->n_modes - 1) > 0 ? (x->n_modes - 1) : 1;
+    for (int i = 0; i < x->n_modes; ++i){
+        if (i == 0) continue;                // keep fundamental ratio = 1x
+        if (!x->base[i].keytrack) continue;  // absolute-Hz modes unaffected
+
         float r = v->m[i].ratio_now;
         if (r < 0.01f) r = 0.01f;
-        float expo = 1.f + k;
+
+        float t = (float)i / (float)denom; // 0..1
+        float bias;
+        if (w >= 0.f){
+            bias = powf(t, 1.f + alpha * w);
+        } else {
+            bias = 1.f - powf(1.f - t, 1.f + alpha * (-w));
+        }
+
+        float expo = 1.f + k * bias;
+        if (expo < 0.1f) expo = 0.1f;
+        if (expo > 3.0f) expo = 3.0f;
         v->m[i].ratio_now = powf(r, expo);
     }
+
 }
 
 static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
@@ -487,7 +511,7 @@ float md_amt = jb_clamp(x->micro_detune,0.f,1.f);
 // ---------- update voice gains ----------
 static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
     for(int i=0;i<x->n_modes;i++){
-        if(!x->base[i].active){ if (x->sine_depth >= 0.f) { v->m[i].gain_now=0.f; continue; } /* allow revive when depth<0 */ }
+        if(!x->base[i].active){ v->m[i].gain_now=0.f; continue; }
 
         float ratio = v->m[i].ratio_now + v->disp_offset[i];
         // spacing already applied upstream (coeffs), but ratio_rel here only for weighting functions:
@@ -518,7 +542,7 @@ static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
 float gn = g * w * wp;
         if (v->m[i].nyq_kill) gn = 0.f;
             if (x->active_modes < x->n_modes) { if (i >= x->active_modes) gn = 0.f; }
-        // --- SINE AM mask (bipolar; after gn is computed) ---
+        // --- SINE AM mask (applied after gn is computed) ---
         {
             int N = x->n_modes;
             float pitch = jb_clamp(x->sine_pitch, 0.f, 1.f);
@@ -530,28 +554,13 @@ float gn = g * w * wp;
             float cycles = cycles_min + pitch * (cycles_max - cycles_min);
             float k_norm = (N>1) ? ((float)i / (float)(N-1)) : 0.f;
             float theta = 2.f * (float)M_PI * (cycles * k_norm + phase);
-            float w01 = 0.5f * (1.f + cosf(theta));        // 0..1 lobe
-            float sharp = 1.0f + 8.0f * fabsf(depth);      // shape intensity uses |depth|
-            float w_sharp = powf(w01, sharp);              // 0..1
-
-            if (depth >= 0.f){
-                // Original behavior: multiplicative attenuation with positive depth
-                float mask = (1.f - depth) + depth * w_sharp; // in [1-depth, 1]
-                gn *= mask;
-            } else {
-                // New behavior: additive lift toward ceiling for negative depth
-                // Allow reviving silent/inactive modes (except Nyquist-killed)
-                if (!v->m[i].nyq_kill){
-                    float ceiling = 1.0f;                  // 0 dB cap (per design)
-                    float lift = (-depth) * w_sharp;       // 0..1
-                    float target = ceiling;
-                    gn = gn + lift * (target - gn);        // move gn toward ceiling
-                    if (gn > ceiling) gn = ceiling;
-                    if (gn < 0.f) gn = 0.f;
-                }
-            }
+            float w01 = 0.5f * (1.f + cosf(theta));
+            float sharp = 1.0f + 8.0f * depth;
+            float w_sharp = powf(w01, sharp);
+            float mask = (1.f - depth) + depth * w_sharp;
+            gn *= mask;
         }
-v->m[i].gain_now = (gn<0.f)?0.f:gn;
+        v->m[i].gain_now = (gn<0.f)?0.f:gn;
     }
 }
 
@@ -1054,7 +1063,8 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
     inlet_free(x->in_release);
 
     inlet_free(x->in_damping); inlet_free(x->in_damp_broad); inlet_free(x->in_damp_point); inlet_free(x->in_brightness); inlet_free(x->in_position);
-    inlet_free(x->in_density); inlet_free(x->in_dispersion); inlet_free(x->in_spacing);
+    inlet_free(x->in_density);
+    inlet_free(x->in_warp); inlet_free(x->in_dispersion); inlet_free(x->in_spacing);
     inlet_free(x->in_aniso); inlet_free(x->in_contact);
 
             inlet_free(x->in_stretch);
@@ -1118,7 +1128,8 @@ static void *juicy_bank_tilde_new(void){
     // Stretch default
     x->stretch = 0.f;
 
-    // realism defaults
+        x->warp = 0.f;
+// realism defaults
     x->phase_rand=1.f; x->phase_debug=0;
     x->bandwidth=0.1f; x->micro_detune=0.1f;
     x->sine_pitch=0.f; x->sine_depth=0.f; x->sine_phase=0.f;
@@ -1163,6 +1174,7 @@ static void *juicy_bank_tilde_new(void){
     x->in_position   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("position"));
     x->in_density    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("density"));
         x->in_stretch    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("stretch"));
+    x->in_warp       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("warp"));
 x->in_dispersion = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("dispersion"));
     x->in_spacing    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("spacing"));   // NEW
     x->in_aniso      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("anisotropy"));
@@ -1345,6 +1357,7 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_snapshot_undo
     
     
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_stretch, gensym("stretch"), A_FLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_warp, gensym("warp"), A_FLOAT, 0);
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gensym("release"), A_DEFFLOAT, 0);
 // SINE methods
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_sine_pitch, gensym("sine_pitch"), A_DEFFLOAT, 0);
