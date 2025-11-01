@@ -783,35 +783,59 @@ for(int m=0;m<x->n_modes;m++){
                 
                 float voice_accL = 0.f, voice_accR = 0.f;
                 // feedback from previous per-voice output sample
-                float fb_inL = v->fb_prevL;
-                float fb_inR = v->fb_prevR;
-                // bandpass biquad
-                float z1L = v->fb_bz1L, z2L = v->fb_bz2L, z1R = v->fb_bz1R, z2R = v->fb_bz2R;
-                float ybL = v->fb_b0*fb_inL + z1L; z1L = v->fb_b1*fb_inL + v->fb_a1*ybL + z2L; z2L = v->fb_b2*fb_inL + v->fb_a2*ybL;
-                float ybR = v->fb_b0*fb_inR + z1R; z1R = v->fb_b1*fb_inR + v->fb_a1*ybR + z2R; z2R = v->fb_b2*fb_inR + v->fb_a2*ybR;
-                v->fb_bz1L = z1L; v->fb_bz2L = z2L; v->fb_bz1R = z1R; v->fb_bz2R = z2R;
-                // allpass
-                float ap = v->fb_ap_a;
-                float apl = -ap*ybL + v->fb_ap_zL; v->fb_ap_zL = ybL + ap*apl;
-                float apr = -ap*ybR + v->fb_ap_zR; v->fb_ap_zR = ybR + ap*apr;
-                // low-pass loss
-                float k_lp = v->fb_lp_k;
-                v->fb_lp_yL = (1.f - k_lp) * apl + k_lp * v->fb_lp_yL;
-                v->fb_lp_yR = (1.f - k_lp) * apr + k_lp * v->fb_lp_yR;
-                float fb_shapedL = v->fb_lp_yL;
-                float fb_shapedR = v->fb_lp_yR;
-                // amount scaling & brake
+
+                // feedback from previous per-voice output sample
+                float fbL = 0.f, fbR = 0.f;
                 float amount = jb_clamp(x->fb_amount, -1.f, 1.f);
-                float base_scale = 0.9f * (1.f - r_max);
-                float amt_eff = amount * base_scale;
-                float e = 0.99f*v->fb_rms + 0.01f*(fabsf(fb_shapedL) + fabsf(fb_shapedR))*0.5f;
-                v->fb_rms = e;
-                float k_rms = 6.f;
-                amt_eff = amt_eff / (1.f + k_rms * e * e);
-                // slew
-                float slew = 0.005f;
-                v->fb_amt_s += slew * (amt_eff - v->fb_amt_s);
-                float fbL = v->fb_amt_s * fb_shapedL;
+                if (amount != 0.f){
+                    float fb_inL = v->fb_prevL;
+                    float fb_inR = v->fb_prevR;
+
+                    // bandpass biquad (RBJ constant skirt gain), Transposed Direct Form II (stable)
+                    float z1L = v->fb_bz1L, z2L = v->fb_bz2L;
+                    float z1R = v->fb_bz1R, z2R = v->fb_bz2R;
+                    float ybL = v->fb_b0*fb_inL + z1L;
+                    float ybR = v->fb_b0*fb_inR + z1R;
+                    z1L = v->fb_b1*fb_inL - v->fb_a1*ybL + z2L;
+                    z1R = v->fb_b1*fb_inR - v->fb_a1*ybR + z2R;
+                    z2L = v->fb_b2*fb_inL - v->fb_a2*ybL;
+                    z2R = v->fb_b2*fb_inR - v->fb_a2*ybR;
+                    if(fabsf(z1L)<1e-20f) z1L=0.f; if(fabsf(z2L)<1e-20f) z2L=0.f;
+                    if(fabsf(z1R)<1e-20f) z1R=0.f; if(fabsf(z2R)<1e-20f) z2R=0.f;
+                    v->fb_bz1L = z1L; v->fb_bz2L = z2L;
+                    v->fb_bz1R = z1R; v->fb_bz2R = z2R;
+
+                    // allpass for phase (first-order)
+                    float ap = v->fb_ap_a;
+                    float apl = -ap*ybL + v->fb_ap_zL; v->fb_ap_zL = ybL + ap*apl;
+                    float apr = -ap*ybR + v->fb_ap_zR; v->fb_ap_zR = ybR + ap*apr;
+
+                    // low-pass loss inside loop
+                    float k_lp = v->fb_lp_k;
+                    v->fb_lp_yL = (1.f - k_lp) * apl + k_lp * v->fb_lp_yL;
+                    v->fb_lp_yR = (1.f - k_lp) * apr + k_lp * v->fb_lp_yR;
+                    float fb_shapedL = v->fb_lp_yL;
+                    float fb_shapedR = v->fb_lp_yR;
+
+                    // amount scaling & brake
+                    // r_max computed per voice at block start
+                    float base_scale = 0.9f * (1.f - r_max);
+                    float amt_eff = amount * base_scale;
+
+                    float e = 0.99f*v->fb_rms + 0.01f*(fabsf(fb_shapedL) + fabsf(fb_shapedR))*0.5f;
+                    v->fb_rms = e;
+                    float k_rms = 6.f;
+                    amt_eff = amt_eff / (1.f + k_rms * e * e);
+
+                    // slew
+                    float slew = 0.005f;
+                    v->fb_amt_s += slew * (amt_eff - v->fb_amt_s);
+
+                    fbL = v->fb_amt_s * fb_shapedL;
+                    fbR = v->fb_amt_s * fb_shapedR;
+                    if(fabsf(fbL)<1e-20f) fbL=0.f; if(fabsf(fbR)<1e-20f) fbR=0.f;
+                }
+
                 float fbR = v->fb_amt_s * fb_shapedR;
 // LEFT
                 float baseL = srcL[i] + fbL;
