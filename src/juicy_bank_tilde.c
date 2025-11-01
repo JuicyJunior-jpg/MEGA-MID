@@ -511,7 +511,11 @@ float md_amt = jb_clamp(x->micro_detune,0.f,1.f);
 // ---------- update voice gains ----------
 static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
     for(int i=0;i<x->n_modes;i++){
-        if(!x->base[i].active){ v->m[i].gain_now=0.f; continue; }
+        if(!x->base[i].active){
+            /* Allow SINE layer to revive modes even if base says inactive. */
+            if (x->sine_depth <= 0.f) { v->m[i].gain_now=0.f; continue; }
+            /* else: proceed with gn starting from 0 and only SINE can contribute */
+        }
 
         float ratio = v->m[i].ratio_now + v->disp_offset[i];
         // spacing already applied upstream (coeffs), but ratio_rel here only for weighting functions:
@@ -545,37 +549,37 @@ float gn = g * w * wp;
         // --- SINE AM mask (applied after gn is computed) ---
         {
             int N = x->n_modes;
-            float pitch = jb_clamp(x->sine_pitch, 0.f, 1.f);
-            float depth = x->sine_depth; // 0..2 (0=no change, 1=mute, 2=invert)
-            float phase = x->sine_phase;
+            
+float pitch = jb_clamp(x->sine_pitch, 0.f, 1.f);
+float depth = x->sine_depth; // 0..2 (0=no change, 1=mute, 2=invert)
+float phase = x->sine_phase;
 
-            // cycles across bank
-            float cycles_min = 0.25f;
-            float cycles_max = floorf((float)N * 0.5f);
-            if (cycles_max < cycles_min) cycles_max = cycles_min;
-            float cycles = cycles_min + pitch * (cycles_max - cycles_min);
+// cycles across bank
+float cycles_min = 0.25f;
+float cycles_max = floorf((float)N * 0.5f);
+if (cycles_max < cycles_min) cycles_max = cycles_min;
+float cycles = cycles_min + pitch * (cycles_max - cycles_min);
 
-            // mode position 0..1
-            float k_norm = (N>1) ? ((float)i / (float)(N-1)) : 0.f;
-            float theta = 2.f * (float)M_PI * (cycles * k_norm + phase);
+// mode position 0..1
+float k_norm = (N>1) ? ((float)i / (float)(N-1)) : 0.f;
+float theta = 2.f * (float)M_PI * (cycles * k_norm + phase);
 
-            // window 0..1, sharpened
-            float w01 = 0.5f * (1.f + cosf(theta));
-            float sharp = 3.0f;
-            float w_sharp = powf(jb_clamp(w01,0.f,1.f), sharp);
+// window 0..1, sharpened
+float w01 = 0.5f * (1.f + cosf(theta));
+float sharp = 3.0f;
+float w_sharp = powf(jb_clamp(w01,0.f,1.f), sharp);
 
-            float mask;
-            if (depth <= 1.f){
-                float a = depth; // 0..1
-                mask = (1.f - a) + a * w_sharp;   // 1 -> w_sharp
-            } else {
-                float b = depth - 1.f;            // 0..1
-                float mid = w_sharp;              // at depth=1
-                float tgt = -w_sharp;             // at depth=2
-                mask = (1.f - b) * mid + b * tgt; // w_sharp -> -w_sharp
-            }
+if (depth <= 1.f){
+    float a = depth; // 0..1
+    float mask = (1.f - a) + a * w_sharp;   // 1 -> w_sharp
+    gn *= mask;
+} else {
+    float b = depth - 1.f;                  // 0..1
+    float mid = gn * w_sharp;               // value at depth=1 for this mode
+    float tgt = -w_sharp;                   // invert fully, independent of gn
+    gn = (1.f - b) * mid + b * tgt;         // crossfade mid -> negative target
+}
 
-            gn *= mask;
 
             // per-mode mathematical ceiling
             if (gn >  1.f) gn =  1.f;
