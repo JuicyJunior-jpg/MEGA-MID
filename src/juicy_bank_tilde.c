@@ -115,15 +115,7 @@ typedef struct {
     float rel_env;
     // runtime per-mode
     jb_mode_rt_t m[JB_MAX_MODES];
-    // --- feedback loop states (per voice) ---
-    float fb_prevL, fb_prevR;
-    float fb_b0, fb_b1, fb_b2, fb_a1, fb_a2;
-    float fb_bz1L, fb_bz2L, fb_bz1R, fb_bz2R;
-    float fb_ap_a, fb_ap_zL, fb_ap_zR;
-    float fb_lp_yL, fb_lp_yR, fb_lp_k;
-    float fb_rms, fb_amt_s;
-}
- jb_voice_t;
+} jb_voice_t;
 
 // ---------- the object ----------
 static t_class *juicy_bank_tilde_class;
@@ -198,16 +190,6 @@ float damping, brightness, position; float damp_broad, damp_point;
     float sine_pitch;   // 0..1
     float sine_depth;   // 0..1
     float sine_phase;   // 0..1 (wraps)
-
-    // --- FEEDBACK loop (parameters only; processing added later) ---
-    float fb_amount;       // -1..+1 (bipolar)
-    float fb_delay_cycles; // 0..2 (fractional delay in periods of f0)
-    float fb_loss_hz;      // 500..0.45*sr Hz low-pass in the feedback path
-
-    // inlets for FEEDBACK
-    t_inlet *in_fb_amount;
-    t_inlet *in_fb_cycles;
-    t_inlet *in_fb_loss;
 
     // inlets for SINE
     t_inlet *in_sine_pitch;
@@ -691,59 +673,34 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     t_sample *outL=(t_sample *)(w[12]);
     t_sample *outR=(t_sample *)(w[13]);
     int n=(int)(w[14]);
-// choose buffer arrays for per-voice mode
+
+    for(int i=0;i<n;i++){ outL[i]=0; outR[i]=0; }
+
+    // block updates
+    for(int vix=0; vix<x->max_voices; ++vix){
+        jb_voice_t *v = &x->v[vix];
+        if (v->state==V_IDLE) continue;
+        jb_update_crossring(x, vix);
+        jb_update_voice_coeffs(x, v);
+        jb_update_voice_gains(x, v);
+    }
+
+    float camt=jb_clamp(x->contact_amt,0.f,1.f);
+    float csym=jb_clamp(x->contact_sym,-1.f,1.f);
+
+    // choose buffer arrays for per-voice mode
     t_sample *vinL[JB_MAX_VOICES] = { v1L, v2L, v3L, v4L };
     t_sample *vinR[JB_MAX_VOICES] = { v1R, v2R, v3R, v4R };
 
     for(int vix=0; vix<x->max_voices; ++vix){
         jb_voice_t *v = &x->v[vix];
         if (v->state==V_IDLE) continue;
-        // --- feedback coeffs per voice (once per block) ---
-        float r_max = 0.f;
-        for(int mi=0; mi<x->n_modes; ++mi){
-            float t60 = v->m[mi].t60_s;
-            if (t60 > 1e-6f){
-                float tau = t60 / 6.9078f;
-                float r = expf(-1.f / (x->sr * tau));
-                if (r > r_max) r_max = r;
-            }
-        }
-        v->fb_rms *= 0.99f;
-        float f0 = fmaxf(v->f0, 20.f);
-        float Q = 5.f;
-        float w0 = 2.f*3.14159265358979f * f0 / x->sr;
-        float cw = cosf(w0), sw = sinf(w0);
-        float alpha = sw/(2.f*Q);
-        float b0 =   alpha;
-        float b1 =   0.f;
-        float b2 =  -alpha;
-        float a0 =   1.f + alpha;
-        float a1 =  -2.f * cw;
-        float a2 =   1.f - alpha;
-        v->fb_b0 = b0/a0; v->fb_b1 = b1/a0; v->fb_b2 = b2/a0; v->fb_a1 = a1/a0; v->fb_a2 = a2/a0;
-
-        float cycles = fmaxf(0.f, fminf(2.f, x->fb_delay_cycles));
-        float phi = 6.283185307179586f * cycles;
-        float t = tanf(0.5f * phi);
-        float ap_a = (isfinite(t)) ? ( (1.f - t) / (1.f + t) ) : 0.f;
-        if (ap_a < -0.999f) ap_a = -0.999f;
-        if (ap_a > 0.999f) ap_a = 0.999f;
-        v->fb_ap_a = ap_a;
-
-        float fc = fmaxf(500.f, fminf(x->fb_loss_hz, 0.45f * x->sr));
-        v->fb_lp_k = expf(-2.f*3.14159265358979f * fc / x->sr);
-
 
         float bw_amt = jb_clamp(v->bandwidth_v, 0.f, 1.f);
         // excitation gating:
         const float use_gate = (x->exciter_mode==0) ? ((v->state==V_HELD)?1.f:0.f) : 1.f;
         t_sample *srcL = (x->exciter_mode==0) ? inL : vinL[vix];
         t_sample *srcR = (x->exciter_mode==0) ? inR : vinR[vix];
-
-        // contact params snapshot (so we don't branch every sample)
-        float camt = jb_clamp(x->contact_amt, 0.f, 1.f);
-        float csym = jb_clamp(x->contact_sym, -1.f, 1.f);
-
 
         
         // --- global release envelope per voice ---
@@ -780,68 +737,8 @@ for(int m=0;m<x->n_modes;m++){
             float du = (md->t60_s > 1e-6f) ? (1.f / (md->t60_s * x->sr)) : 1.f;
 
             for(int i=0;i<n;i++){
-                
-                float voice_accL = 0.f, voice_accR = 0.f;
-                // feedback from previous per-voice output sample
-
-                // feedback from previous per-voice output sample
-                float fbL = 0.f, fbR = 0.f;
-                float amount = jb_clamp(x->fb_amount, -1.f, 1.f);
-                if (amount != 0.f){
-                    float fb_inL = v->fb_prevL;
-                    float fb_inR = v->fb_prevR;
-
-                    // bandpass biquad (RBJ constant skirt gain), Transposed Direct Form II (stable)
-                    float z1L = v->fb_bz1L, z2L = v->fb_bz2L;
-                    float z1R = v->fb_bz1R, z2R = v->fb_bz2R;
-                    float ybL = v->fb_b0*fb_inL + z1L;
-                    float ybR = v->fb_b0*fb_inR + z1R;
-                    z1L = v->fb_b1*fb_inL - v->fb_a1*ybL + z2L;
-                    z1R = v->fb_b1*fb_inR - v->fb_a1*ybR + z2R;
-                    z2L = v->fb_b2*fb_inL - v->fb_a2*ybL;
-                    z2R = v->fb_b2*fb_inR - v->fb_a2*ybR;
-                    if(fabsf(z1L)<1e-20f) z1L=0.f;
-                    if(fabsf(z2L)<1e-20f) z2L=0.f;
-                    if(fabsf(z1R)<1e-20f) z1R=0.f;
-                    if(fabsf(z2R)<1e-20f) z2R=0.f;
-                    v->fb_bz1L = z1L; v->fb_bz2L = z2L;
-                    v->fb_bz1R = z1R; v->fb_bz2R = z2R;
-
-                    // allpass for phase (first-order)
-                    float ap = v->fb_ap_a;
-                    float apl = -ap*ybL + v->fb_ap_zL; v->fb_ap_zL = ybL + ap*apl;
-                    float apr = -ap*ybR + v->fb_ap_zR; v->fb_ap_zR = ybR + ap*apr;
-
-                    // low-pass loss inside loop
-                    float k_lp = v->fb_lp_k;
-                    v->fb_lp_yL = (1.f - k_lp) * apl + k_lp * v->fb_lp_yL;
-                    v->fb_lp_yR = (1.f - k_lp) * apr + k_lp * v->fb_lp_yR;
-                    float fb_shapedL = v->fb_lp_yL;
-                    float fb_shapedR = v->fb_lp_yR;
-
-                    // amount scaling & brake
-                    // r_max computed per voice at block start
-                    float base_scale = 0.9f * (1.f - r_max);
-                    float amt_eff = amount * base_scale;
-
-                    float e = 0.99f*v->fb_rms + 0.01f*(fabsf(fb_shapedL) + fabsf(fb_shapedR))*0.5f;
-                    v->fb_rms = e;
-                    float k_rms = 6.f;
-                    amt_eff = amt_eff / (1.f + k_rms * e * e);
-
-                    // slew
-                    float slew = 0.005f;
-                    v->fb_amt_s += slew * (amt_eff - v->fb_amt_s);
-
-                    fbL = v->fb_amt_s * fb_shapedL;
-                    fbR = v->fb_amt_s * fb_shapedR;
-                    if(fabsf(fbL)<1e-20f) fbL=0.f;
-                    if(fabsf(fbR)<1e-20f) fbR=0.f;
-                }
-
-// LEFT
-                float baseL = srcL[i] + fbL;
-                float excL = use_gate * baseL * md->gain_now;
+                // LEFT
+                float excL = use_gate * srcL[i] * md->gain_now;
                 float absL = fabsf(excL);
                 if(absL>1e-3f){
                     if(md->hit_coolL>0){ md->hit_coolL--; }
@@ -880,8 +777,7 @@ for(int m=0;m<x->n_modes;m++){
                 }
 
                 // RIGHT
-                float baseR = srcR[i] + fbR;
-                float excR = use_gate * baseR * md->gain_now;
+                float excR = use_gate * srcR[i] * md->gain_now;
                 float absR = fabsf(excR);
                 if(absR>1e-3f){
                     if(md->hit_coolR>0){ md->hit_coolR--; }
@@ -951,19 +847,14 @@ for(int m=0;m<x->n_modes;m++){
                     float wR = sqrtf(0.5f*(1.f + p));
                     y_totalL *= v->rel_env; y_totalR *= v->rel_env;
                     outL[i] += y_totalL * wL;
-                    voice_accL += y_totalL * wL;
                     outR[i] += y_totalR * wR;
-                    voice_accR += y_totalR * wR;
                 }
 
                 // update envelopes (rough energy tracker)
                 float ayL=fabsf(y_totalL); envL = envL + 0.0015f*(ayL - envL); md->y_pre_lastL = y_totalL;
                 float ayR=fabsf(y_totalR); envR = envR + 0.0015f*(ayR - envR); md->y_pre_lastR = y_totalR;
-            v->fb_prevL = voice_accL;
-            v->fb_prevR = voice_accR;
             }
 
-            
             md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
             md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;
             md->decay_u=u;
@@ -1081,25 +972,6 @@ static void juicy_bank_tilde_sine_phase(t_juicy_bank_tilde *x, t_floatarg f){
     x->sine_phase = p;
 }
 
-// --- FEEDBACK param setters ---
-static void juicy_bank_tilde_fb_amount(t_juicy_bank_tilde *x, t_floatarg f){
-    // bipolar -1..+1 with clamp and slight slew would be ideal at control-rate; clamp here
-    if (f < -1.f) f = -1.f;
-    if (f > 1.f) f = 1.f;
-    x->fb_amount = f;
-}
-static void juicy_bank_tilde_fb_cycles(t_juicy_bank_tilde *x, t_floatarg f){
-    // allow 0..2, UI will expose 0..1.5 then wrap in usage
-    if (f < 0.f) f = 0.f;
-    if (f > 2.f) f = 2.f;
-    x->fb_delay_cycles = f;
-}
-static void juicy_bank_tilde_fb_loss(t_juicy_bank_tilde *x, t_floatarg f){
-    // clamp to safe range; also cap to ~0.45*sr at use time
-    if (f < 500.f) f = 500.f;
-    x->fb_loss_hz = f;
-}
-
 
 // dispersion & seeds
 static void juicy_bank_tilde_dispersion(t_juicy_bank_tilde *x, t_floatarg f){
@@ -1199,11 +1071,7 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
 inlet_free(x->in_sine_pitch);
     inlet_free(x->in_sine_depth);
     inlet_free(x->in_sine_phase);
-    
-    inlet_free(x->in_fb_amount);
-    inlet_free(x->in_fb_cycles);
-    inlet_free(x->in_fb_loss);
-inlet_free(x->in_partials); // free 'partials' inlet
+    inlet_free(x->in_partials); // free 'partials' inlet
 inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     inlet_free(x->in_attack); inlet_free(x->in_decay); inlet_free(x->in_curve); inlet_free(x->in_pan); inlet_free(x->in_keytrack);
 
@@ -1265,11 +1133,6 @@ static void *juicy_bank_tilde_new(void){
     x->phase_rand=1.f; x->phase_debug=0;
     x->bandwidth=0.1f; x->micro_detune=0.1f;
     x->sine_pitch=0.f; x->sine_depth=0.f; x->sine_phase=0.f;
-    // Feedback defaults
-    x->fb_amount = 0.f;
-    x->fb_delay_cycles = 0.80f;
-    x->fb_loss_hz = 10000.f;
-
 
 
     x->basef0_ref=261.626f; // C4
@@ -1320,11 +1183,6 @@ x->in_dispersion = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("dispe
     x->in_sine_pitch = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_pitch"));
     x->in_sine_depth = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_depth"));
     x->in_sine_phase = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_phase"));
-
-    // --- FEEDBACK param inlets (after SINE phase, before 'partials') ---
-    x->in_fb_amount = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("fb_amount"));
-    x->in_fb_cycles = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("fb_cycles"));
-    x->in_fb_loss   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("fb_loss"));
 // Individual
     x->in_partials   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("partials"));
     x->in_index      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("index"));
@@ -1556,7 +1414,4 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gens
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index_backward, gensym("backward"), 0);
 
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_stretch, gensym("stretch"), A_FLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_amount, gensym("fb_amount"), A_FLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_cycles, gensym("fb_cycles"), A_FLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_loss,   gensym("fb_loss"),   A_FLOAT, 0);
 }
