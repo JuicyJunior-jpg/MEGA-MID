@@ -800,8 +800,10 @@ for(int m=0;m<x->n_modes;m++){
                     z1R = v->fb_b1*fb_inR - v->fb_a1*ybR + z2R;
                     z2L = v->fb_b2*fb_inL - v->fb_a2*ybL;
                     z2R = v->fb_b2*fb_inR - v->fb_a2*ybR;
-                    if(fabsf(z1L)<1e-20f) z1L=0.f; if(fabsf(z2L)<1e-20f) z2L=0.f;
-                    if(fabsf(z1R)<1e-20f) z1R=0.f; if(fabsf(z2R)<1e-20f) z2R=0.f;
+                    if(fabsf(z1L)<1e-20f) z1L=0.f;
+                    if(fabsf(z2L)<1e-20f) z2L=0.f;
+                    if(fabsf(z1R)<1e-20f) z1R=0.f;
+                    if(fabsf(z2R)<1e-20f) z2R=0.f;
                     v->fb_bz1L = z1L; v->fb_bz2L = z2L;
                     v->fb_bz1R = z1R; v->fb_bz2R = z2R;
 
@@ -833,10 +835,10 @@ for(int m=0;m<x->n_modes;m++){
 
                     fbL = v->fb_amt_s * fb_shapedL;
                     fbR = v->fb_amt_s * fb_shapedR;
-                    if(fabsf(fbL)<1e-20f) fbL=0.f; if(fabsf(fbR)<1e-20f) fbR=0.f;
+                    if(fabsf(fbL)<1e-20f) fbL=0.f;
+                    if(fabsf(fbR)<1e-20f) fbR=0.f;
                 }
 
-                float fbR = v->fb_amt_s * fb_shapedR;
 // LEFT
                 float baseL = srcL[i] + fbL;
                 float excL = use_gate * baseL * md->gain_now;
