@@ -511,11 +511,7 @@ float md_amt = jb_clamp(x->micro_detune,0.f,1.f);
 // ---------- update voice gains ----------
 static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
     for(int i=0;i<x->n_modes;i++){
-        if(!x->base[i].active){
-            /* Allow SINE layer to revive modes even if base says inactive. */
-            if (x->sine_depth <= 0.f) { v->m[i].gain_now=0.f; continue; }
-            /* else: proceed with gn starting from 0 and only SINE can contribute */
-        }
+        if(!x->base[i].active){ v->m[i].gain_now=0.f; continue; }
 
         float ratio = v->m[i].ratio_now + v->disp_offset[i];
         // spacing already applied upstream (coeffs), but ratio_rel here only for weighting functions:
@@ -549,44 +545,22 @@ float gn = g * w * wp;
         // --- SINE AM mask (applied after gn is computed) ---
         {
             int N = x->n_modes;
-            
-float pitch = jb_clamp(x->sine_pitch, 0.f, 1.f);
-float depth = x->sine_depth; // 0..2 (0=no change, 1=mute, 2=invert)
-float phase = x->sine_phase;
-
-// cycles across bank
-float cycles_min = 0.25f;
-float cycles_max = floorf((float)N * 0.5f);
-if (cycles_max < cycles_min) cycles_max = cycles_min;
-float cycles = cycles_min + pitch * (cycles_max - cycles_min);
-
-// mode position 0..1
-float k_norm = (N>1) ? ((float)i / (float)(N-1)) : 0.f;
-float theta = 2.f * (float)M_PI * (cycles * k_norm + phase);
-
-// window 0..1, sharpened
-float w01 = 0.5f * (1.f + cosf(theta));
-float sharp = 3.0f;
-float w_sharp = powf(jb_clamp(w01,0.f,1.f), sharp);
-
-if (depth <= 1.f){
-    float a = depth; // 0..1
-    float mask = (1.f - a) + a * w_sharp;   // 1 -> w_sharp
-    gn *= mask;
-} else {
-    float b = depth - 1.f;                  // 0..1
-    float mid = gn * w_sharp;               // value at depth=1 for this mode
-    float tgt = -w_sharp;                   // invert fully, independent of gn
-    gn = (1.f - b) * mid + b * tgt;         // crossfade mid -> negative target
-}
-
-
-            // per-mode mathematical ceiling
-            if (gn >  1.f) gn =  1.f;
-            if (gn < -1.f) gn = -1.f;
+            float pitch = jb_clamp(x->sine_pitch, 0.f, 1.f);
+            float depth = jb_clamp(x->sine_depth, -1.f, 1.f);
+            float phase = x->sine_phase;
+            float cycles_min = 0.25f;
+            float cycles_max = floorf((float)N * 0.5f);
+            if (cycles_max < cycles_min) cycles_max = cycles_min;
+            float cycles = cycles_min + pitch * (cycles_max - cycles_min);
+            float k_norm = (N>1) ? ((float)i / (float)(N-1)) : 0.f;
+            float theta = 2.f * (float)M_PI * (cycles * k_norm + phase);
+            float w01 = 0.5f * (1.f + cosf(theta));
+            float sharp = 1.0f + 8.0f * depth;
+            float w_sharp = powf(w01, sharp);
+            float mask = (1.f - depth) + depth * w_sharp;
+            gn *= mask;
         }
-
-        v->m[i].gain_now = gn;
+        v->m[i].gain_now = (gn<0.f)?0.f:gn;
     }
 }
 
@@ -752,7 +726,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             v->rel_env = 1.f;   // while held, fully open
         }
 for(int m=0;m<x->n_modes;m++){
-            if(!x->base[m].active) continue;
+            if(!x->base[m].active || v->m[m].gain_now<=0.f) continue;
             jb_mode_rt_t *md=&v->m[m];
 
             float y1L=md->y1L, y2L=md->y2L, y1bL=md->y1bL, y2bL=md->y2bL, driveL=md->driveL, envL=md->envL;
@@ -991,12 +965,7 @@ static void juicy_bank_tilde_sine_pitch(t_juicy_bank_tilde *x, t_floatarg f){
     x->sine_pitch = jb_clamp(f, 0.f, 1.f);
 }
 static void juicy_bank_tilde_sine_depth(t_juicy_bank_tilde *x, t_floatarg f){
-    // Bipolar domain 0..2 (0=no change, 1=mute pattern, 2=inverted pattern)
-    if (f < 0.f) f = 0.f;
-    if (f > 2.f) f = 2.f;
-    x->sine_depth = f;
-}
-
+    x->sine_depth = jb_clamp(f, -1.f, 1.f); }
 static void juicy_bank_tilde_sine_phase(t_juicy_bank_tilde *x, t_floatarg f){
     float p = f - floorf(f);
     if (p < 0.f) p += 1.f;
