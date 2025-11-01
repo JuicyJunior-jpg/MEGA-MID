@@ -933,12 +933,12 @@ for(int m=0;m<x->n_modes;m++){
                 // update envelopes (rough energy tracker)
                 float ayL=fabsf(y_totalL); envL = envL + 0.0015f*(ayL - envL); md->y_pre_lastL = y_totalL;
                 float ayR=fabsf(y_totalR); envR = envR + 0.0015f*(ayR - envR); md->y_pre_lastR = y_totalR;
+            v->fb_prevL = voice_accL;
+            v->fb_prevR = voice_accR;
             }
 
             
-            v->fb_prevL = voice_accL;
-            v->fb_prevR = voice_accR;
-md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
+            md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
             md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;
             md->decay_u=u;
         }
