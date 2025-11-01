@@ -740,6 +740,11 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         t_sample *srcL = (x->exciter_mode==0) ? inL : vinL[vix];
         t_sample *srcR = (x->exciter_mode==0) ? inR : vinR[vix];
 
+        // contact params snapshot (so we don't branch every sample)
+        float camt = jb_clamp(x->contact_amt, 0.f, 1.f);
+        float csym = jb_clamp(x->contact_sym, -1.f, 1.f);
+
+
         
         // --- global release envelope per voice ---
         // Map 0..1 to release times that are SHORT for most of the knob,
