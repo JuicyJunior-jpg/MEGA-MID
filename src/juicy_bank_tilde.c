@@ -191,6 +191,16 @@ float damping, brightness, position; float damp_broad, damp_point;
     float sine_depth;   // 0..1
     float sine_phase;   // 0..1 (wraps)
 
+    // --- FEEDBACK loop (parameters only; processing added later) ---
+    float fb_amount;       // -1..+1 (bipolar)
+    float fb_delay_cycles; // 0..2 (fractional delay in periods of f0)
+    float fb_loss_hz;      // 500..0.45*sr Hz low-pass in the feedback path
+
+    // inlets for FEEDBACK
+    t_inlet *in_fb_amount;
+    t_inlet *in_fb_cycles;
+    t_inlet *in_fb_loss;
+
     // inlets for SINE
     t_inlet *in_sine_pitch;
     t_inlet *in_sine_depth;
@@ -972,6 +982,23 @@ static void juicy_bank_tilde_sine_phase(t_juicy_bank_tilde *x, t_floatarg f){
     x->sine_phase = p;
 }
 
+// --- FEEDBACK param setters ---
+static void juicy_bank_tilde_fb_amount(t_juicy_bank_tilde *x, t_floatarg f){
+    // bipolar -1..+1 with clamp and slight slew would be ideal at control-rate; clamp here
+    if (f < -1.f) f = -1.f; if (f > 1.f) f = 1.f;
+    x->fb_amount = f;
+}
+static void juicy_bank_tilde_fb_cycles(t_juicy_bank_tilde *x, t_floatarg f){
+    // allow 0..2, UI will expose 0..1.5 then wrap in usage
+    if (f < 0.f) f = 0.f; if (f > 2.f) f = 2.f;
+    x->fb_delay_cycles = f;
+}
+static void juicy_bank_tilde_fb_loss(t_juicy_bank_tilde *x, t_floatarg f){
+    // clamp to safe range; also cap to ~0.45*sr at use time
+    if (f < 500.f) f = 500.f;
+    x->fb_loss_hz = f;
+}
+
 
 // dispersion & seeds
 static void juicy_bank_tilde_dispersion(t_juicy_bank_tilde *x, t_floatarg f){
@@ -1071,7 +1098,11 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
 inlet_free(x->in_sine_pitch);
     inlet_free(x->in_sine_depth);
     inlet_free(x->in_sine_phase);
-    inlet_free(x->in_partials); // free 'partials' inlet
+    
+    inlet_free(x->in_fb_amount);
+    inlet_free(x->in_fb_cycles);
+    inlet_free(x->in_fb_loss);
+inlet_free(x->in_partials); // free 'partials' inlet
 inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     inlet_free(x->in_attack); inlet_free(x->in_decay); inlet_free(x->in_curve); inlet_free(x->in_pan); inlet_free(x->in_keytrack);
 
@@ -1133,6 +1164,11 @@ static void *juicy_bank_tilde_new(void){
     x->phase_rand=1.f; x->phase_debug=0;
     x->bandwidth=0.1f; x->micro_detune=0.1f;
     x->sine_pitch=0.f; x->sine_depth=0.f; x->sine_phase=0.f;
+    // Feedback defaults
+    x->fb_amount = 0.f;
+    x->fb_delay_cycles = 0.80f;
+    x->fb_loss_hz = 10000.f;
+
 
 
     x->basef0_ref=261.626f; // C4
@@ -1183,6 +1219,11 @@ x->in_dispersion = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("dispe
     x->in_sine_pitch = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_pitch"));
     x->in_sine_depth = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_depth"));
     x->in_sine_phase = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_phase"));
+
+    // --- FEEDBACK param inlets (after SINE phase, before 'partials') ---
+    x->in_fb_amount = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("fb_amount"));
+    x->in_fb_cycles = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("fb_cycles"));
+    x->in_fb_loss   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("fb_loss"));
 // Individual
     x->in_partials   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("partials"));
     x->in_index      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("index"));
@@ -1414,4 +1455,7 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gens
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index_backward, gensym("backward"), 0);
 
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_stretch, gensym("stretch"), A_FLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_amount, gensym("fb_amount"), A_FLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_cycles, gensym("fb_cycles"), A_FLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_loss,   gensym("fb_loss"),   A_FLOAT, 0);
 }
