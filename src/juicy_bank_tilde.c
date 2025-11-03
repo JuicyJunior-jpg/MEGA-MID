@@ -720,6 +720,24 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     for(int vix=0; vix<x->max_voices; ++vix){
         jb_voice_t *v = &x->v[vix];
         if (v->state==V_IDLE) continue;
+        // --- FEEDBACK prep: per-block slewed amount, prev-block injection, and vbuf accumulators ---
+        int _n = n; if (_n > JB_FB_MAX) _n = JB_FB_MAX;
+        float fbz = x->fb_amt_z;
+        float fba = x->fb_slew_a;
+        float fb_inL_blk[JB_FB_MAX];
+        float fb_inR_blk[JB_FB_MAX];
+        float fb_tgt = jb_clamp(x->fb_amt, -1.f, 1.f);
+        for (int i=0;i<_n;i++){
+            fbz = fba * fbz + (1.f - fba) * fb_tgt;
+            float finL = (v->fb_prev_len==_n) ? v->fb_prevL[i] : 0.f;
+            float finR = (v->fb_prev_len==_n) ? v->fb_prevR[i] : 0.f;
+            fb_inL_blk[i] = jb_clamp(fbz * finL, -0.707f, 0.707f);
+            fb_inR_blk[i] = jb_clamp(fbz * finR, -0.707f, 0.707f);
+        }
+        x->fb_amt_z = fbz;
+        float vbufL[JB_FB_MAX];
+        float vbufR[JB_FB_MAX];
+        for (int i=0;i<_n;i++){ vbufL[i]=0.f; vbufR[i]=0.f; }
 
         float bw_amt = jb_clamp(v->bandwidth_v, 0.f, 1.f);
         // excitation gating:
@@ -742,28 +760,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 if (v->rel_env < 1e-5f) v->rel_env = 0.f;
             } else {
                 // Highly curved mapping so mid values are still short.
-        // --- FEEDBACK prep: per-block slewed amount, prev-block injection, and vbuf accumulators ---
-        int _n = n; if (_n > JB_FB_MAX) _n = JB_FB_MAX;
-        // Slew fb_amt across the block
-        float fbz = x->fb_amt_z;
-        float fba = x->fb_slew_a;
-        // Previous-block filtered+delayed feedback buffers → current injection
-        float fb_inL_blk[JB_FB_MAX];
-        float fb_inR_blk[JB_FB_MAX];
-        float fb_tgt = jb_clamp(x->fb_amt, -1.f, 1.f);
-        for (int i=0;i<_n;i++){
-            fbz = fba * fbz + (1.f - fba) * fb_tgt;
-            float finL = (v->fb_prev_len==_n) ? v->fb_prevL[i] : 0.f;
-            float finR = (v->fb_prev_len==_n) ? v->fb_prevR[i] : 0.f;
-            fb_inL_blk[i] = jb_clamp(fbz * finL, -0.707f, 0.707f);
-            fb_inR_blk[i] = jb_clamp(fbz * finR, -0.707f, 0.707f);
-        }
-        x->fb_amt_z = fbz;
-
-        // Accumulators for this voice's pre-FX output (used to build next-block feedback)
-        float vbufL[JB_FB_MAX];
-        float vbufR[JB_FB_MAX];
-        for (int i=0;i<_n;i++){ vbufL[i]=0.f; vbufR[i]=0.f; }
                 // 0..1 -> ~[10 ms .. 6000 ms] using r^4 curve
                 float _r = _rel_amt*_rel_amt*_rel_amt*_rel_amt;
                 float _tau_ms = 10.f + 6000.f * _r;
