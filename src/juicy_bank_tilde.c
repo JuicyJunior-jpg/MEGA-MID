@@ -732,7 +732,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         float bw_amt = jb_clamp(v->bandwidth_v, 0.f, 1.f);
 
         // Exciter gating and sources
-        const float use_gate = (x->exciter_mode==0) ? ((v->state==V_HELD)?1.f:0.f) : 1.f;
+        const float use_gate = (x->exciter_mode==0) ? ((v->state!=V_IDLE)?1.f:0.f) : 1.f;
         t_sample *srcL = (x->exciter_mode==0) ? inL : vinL[vix];
         t_sample *srcR = (x->exciter_mode==0) ? inR : vinR[vix];
 
