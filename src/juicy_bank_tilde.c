@@ -703,7 +703,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     // block updates
     for(int vix=0; vix<x->max_voices; ++vix){
         jb_voice_t *v = &x->v[vix];
-        if (x->exciter_mode==0 && v->state==V_IDLE) continue;
+        if (v->state==V_IDLE) continue;
 
         jb_update_crossring(x, vix);
         jb_update_voice_coeffs(x, v);
@@ -718,232 +718,204 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     t_sample *vinR[JB_MAX_VOICES] = { v1R, v2R, v3R, v4R };
 
     for(int vix=0; vix<x->max_voices; ++vix){
-        jb_voice_t *v = &x->v[vix];
-        if (x->exciter_mode==0 && v->state==V_IDLE) continue;
+    jb_voice_t *v = &x->v[vix];
+    if (v->state==V_IDLE) continue;
 
-        // Update crossring, coeffs, and gains once per block for this voice
-        jb_update_crossring(x, vix);
-        jb_update_voice_coeffs(x, v);
-        jb_update_voice_gains(x, v);
+    jb_update_crossring(x, vix);
+    jb_update_voice_coeffs(x, v);
+    jb_update_voice_gains(x, v);
 
-        // Per-voice constants for this block
-        float camt = jb_clamp(x->contact_amt, 0.f, 1.f);
-        float csym = jb_clamp(x->contact_sym, -1.f, 1.f);
-        float bw_amt = jb_clamp(v->bandwidth_v, 0.f, 1.f);
+    float camt=jb_clamp(x->contact_amt,0.f,1.f);
+    float csym=jb_clamp(x->contact_sym,-1.f,1.f);
 
-        // Exciter gating and sources
-        const float use_gate = (x->exciter_mode==0) ? ((v->state!=V_IDLE)?1.f:0.f) : 1.f;
-        t_sample *srcL = (x->exciter_mode==0) ? inL : vinL[vix];
-        t_sample *srcR = (x->exciter_mode==0) ? inR : vinR[vix];
+    // choose per-voice exciter buffers
+    t_sample *srcL = (x->exciter_mode==0) ? inL : ((vix<JB_MAX_VOICES)? ((vix==0)?v1L:(vix==1)?v2L:(vix==2)?v3L:v4L) : inL);
+    t_sample *srcR = (x->exciter_mode==0) ? inR : ((vix<JB_MAX_VOICES)? ((vix==0)?v1R:(vix==1)?v2R:(vix==2)?v3R:v4R) : inR);
 
-        // Global release envelope per voice (maintained per-sample)
-        float _rel_amt = jb_clamp(x->release_amt, 0.f, 1.f);
+    const float use_gate = (x->exciter_mode==0) ? ((v->state==V_HELD)?1.f:0.f) : 1.f;
+    float bw_amt = jb_clamp(v->bandwidth_v, 0.f, 1.f);
 
-        // Feedback path states (per-ear), pulled from voice
-        float hp_x1L = v->fb_hp_x1L, hp_y1L = v->fb_hp_y1L;
-        float hp_x1R = v->fb_hp_x1R, hp_y1R = v->fb_hp_y1R;
-        float lp_y1L = v->fb_lp_y1L, lp_y1R = v->fb_lp_y1R;
-        float d1L = v->fb_d1L, d2L = v->fb_d2L;
-        float d1R = v->fb_d1R, d2R = v->fb_d2R;
+    // feedback state locals (per-voice, per-ear)
+    float aHP = x->fb_hp_a;
+    float aLP = x->fb_lp_a;
+    float hp_x1L = v->fb_hp_x1L, hp_y1L = v->fb_hp_y1L;
+    float hp_x1R = v->fb_hp_x1R, hp_y1R = v->fb_hp_y1R;
+    float lp_y1L = v->fb_lp_y1L, lp_y1R = v->fb_lp_y1R;
+    float d1L = v->fb_d1L, d2L = v->fb_d2L;
+    float d1R = v->fb_d1R, d2R = v->fb_d2R;
 
-        // Filter coeffs and slews
-        const float aHP = x->fb_hp_a;
-        float aLPt = x->fb_lp_a;      // target LP coeff (from fb_lp_hz)
-        float aLPz = aLPt;            // z state for LP coeff; no global mem yet
-        const float aLPslew = 0.005f; // small per-sample slew
+    float fbz = x->fb_amt_z;
+    float fba = x->fb_slew_a;
+    float fb_tgt = jb_clamp(x->fb_amt, -1.f, 1.f);
 
-        // Feedback amount slew (use x->fb_amt_z as z, x->fb_amt as target)
-        float fbz = x->fb_amt_z;
-        const float fba = x->fb_slew_a;
+    // per-sample processing, sum all modes at sample i
+    for(int i=0;i<n;i++){
+        // slew amount
+        fbz = fba * fbz + (1.f - fba) * fb_tgt;
+        // 2-sample delayed feedback available in d2L/d2R from prior updates
+        float fb_inL = jb_clamp(fbz * d2L, -0.707f, 0.707f);
+        float fb_inR = jb_clamp(fbz * d2R, -0.707f, 0.707f);
 
-        // Map UI ±1 → internal ±0.2 for musical range and stability
-        // (keeps bow/jet feel without jumping over unity too easily)
-        // NOTE: we do NOT add saturator here per user's request.
-        // NOTE2: clamp the injected sample to ±0.707 as a seatbelt.
-        for (int i = 0; i < n; ++i){
-            // Update voice release envelope per-sample
-            if (v->state == V_RELEASE){
-                if (_rel_amt <= 0.f){
-                    float _tau_ms = 1.0f;
-                    float _a = expf(-1.f / (0.001f * _tau_ms * x->sr));
-                    v->rel_env *= _a;
-                    if (v->rel_env < 1e-5f) v->rel_env = 0.f;
-                } else {
-                    float _r = _rel_amt*_rel_amt*_rel_amt*_rel_amt;
-                    float _tau_ms = 10.f + 6000.f * _r;
-                    float _a = expf(-1.f / (0.001f * _tau_ms * x->sr));
-                    v->rel_env *= _a;
+        float v_sumL = 0.f, v_sumR = 0.f;
+
+        // per-mode synthesis at this sample
+        for(int m=0;m<x->n_modes;m++){
+            if(!x->base[m].active || v->m[m].gain_now<=0.f) continue;
+            jb_mode_rt_t *md=&v->m[m];
+
+            float y1L=md->y1L, y2L=md->y2L, y1bL=md->y1bL, y2bL=md->y2bL, driveL=md->driveL, envL=md->envL;
+            float y1R=md->y1R, y2R=md->y2R, y1bR=md->y1bR, y2bR=md->y2bR, driveR=md->driveR, envR=md->envR;
+            float u = md->decay_u;
+            float att_ms = jb_clamp(x->base[m].attack_ms,0.f,500.f);
+            float att_a = (att_ms<=0.f)?1.f:(1.f-expf(-1.f/(0.001f*att_ms*x->sr)));
+            float du = (md->t60_s > 1e-6f) ? (1.f / (md->t60_s * x->sr)) : 1.f;
+
+            // excitation (now includes sample-accurate feedback injection)
+            float excL = use_gate * (srcL[i] + fb_inL) * md->gain_now;
+            float excR = use_gate * (srcR[i] + fb_inR) * md->gain_now;
+
+            float absL = fabsf(excL);
+            if(absL>1e-3f){
+                if(md->hit_coolL>0){ md->hit_coolL--; }
+                if(!md->hit_gateL){
+                    if(x->phase_rand>0.f){
+                        float k=x->phase_rand*0.05f*absL;
+                        float r1=jb_rng_bi(&x->rng), r2=jb_rng_bi(&x->rng);
+                        y1L+=k*r1; y2L+=k*r2;
+                        if (bw_amt>0.f){
+                            float r3=jb_rng_bi(&x->rng), r4=jb_rng_bi(&x->rng);
+                            y1bL+=k*r3; y2bL+=k*r4;
+                        }
+                    }
+                    if(m!=0){ md->md_hit_offsetL = 0.05f * jb_rng_bi(&x->rng); } else { md->md_hit_offsetL = 0.f; }
+                    {
+                        float mode_scale = (x->n_modes>1)? ((float)m/(float)(x->n_modes-1)) : 0.f;
+                        float max_det = 0.0005f + 0.0015f * mode_scale;
+                        md->bw_hit_ratioL = max_det * jb_rng_bi(&x->rng);
+                    }
+                    md->hit_gateL=1; md->hit_coolL=(int)(x->sr*0.005f);
+                    u=0.f;
                 }
             } else {
-                v->rel_env = 1.f;
+                md->hit_gateL=0;
             }
 
-            // Slew feedback amount
-            float fb_tgt = 0.2f * jb_clamp(x->fb_amt, -1.f, 1.f);
-            fbz = fba * fbz + (1.f - fba) * fb_tgt;
-
-            // Fetch current injected feedback sample from 2-sample delay
-            float injL = jb_clamp(fbz * d2L, -0.707f, 0.707f);
-            float injR = jb_clamp(fbz * d2R, -0.707f, 0.707f);
-
-            // Exciter + feedback for this sample
-            float excL = use_gate * (srcL[i] + injL);
-            float excR = use_gate * (srcR[i] + injR);
-
-            // Run all modes for this sample and sum
-            float sumL = 0.f, sumR = 0.f;
-            for (int m = 0; m < x->n_modes; ++m){
-                if (!x->base[m].active) continue;
-                jb_mode_rt_t *md = &v->m[m];
-                if (md->gain_now <= 0.f) continue;
-
-                float y1L = md->y1L, y2L = md->y2L, y1bL = md->y1bL, y2bL = md->y2bL, driveL = md->driveL, envL = md->envL;
-                float y1R = md->y1R, y2R = md->y2R, y1bR = md->y1bR, y2bR = md->y2bR, driveR = md->driveR, envR = md->envR;
-                float u = md->decay_u;
-
-                float att_ms = jb_clamp(x->base[m].attack_ms, 0.f, 500.f);
-                float att_a = (att_ms <= 0.f) ? 1.f : (1.f - expf(-1.f / (0.001f * att_ms * x->sr)));
-                float du = (md->t60_s > 1e-6f) ? (1.f / (md->t60_s * x->sr)) : 1.f;
-
-                // one-shot per-hit stuff (phase_rand, micro_detune, bandwidth hit) driven by exc amplitude
-                float absL = fabsf(excL * md->gain_now);
-                float absR = fabsf(excR * md->gain_now);
-                if (absL > 1e-3f){
-                    if(md->hit_coolL>0){ md->hit_coolL--; }
-                    if(!md->hit_gateL){
-                        if(x->phase_rand>0.f){
-                            float k=x->phase_rand*0.05f*absL;
-                            // RNG taps
-                            float r1 = jb_rng_bi(&x->rng), r2 = jb_rng_bi(&x->rng);
-                            y1L += k*r1; y2L += k*r2;
-                            if (bw_amt>0.f){
-                                float r3=jb_rng_bi(&x->rng), r4=jb_rng_bi(&x->rng);
-                                y1bL += k*r3; y2bL += k*r4;
-                            }
+            float absR = fabsf(excR);
+            if(absR>1e-3f){
+                if(md->hit_coolR>0){ md->hit_coolR--; }
+                if(!md->hit_gateR){
+                    if(x->phase_rand>0.f){
+                        float k=x->phase_rand*0.05f*absR;
+                        float r1=jb_rng_bi(&x->rng), r2=jb_rng_bi(&x->rng);
+                        y1R+=k*r1; y2R+=k*r2;
+                        if (bw_amt>0.f){
+                            float r3=jb_rng_bi(&x->rng), r4=jb_rng_bi(&x->rng);
+                            y1bR+=k*r3; y2bR+=k*r4;
                         }
-                        if(m!=0){ md->md_hit_offsetL = 0.05f * jb_rng_bi(&x->rng); } else { md->md_hit_offsetL = 0.f; }
-                        {
-                            float mode_scale = (x->n_modes>1)? ((float)m/(float)(x->n_modes-1)) : 0.f;
-                            float max_det = 0.0005f + 0.0015f * mode_scale;
-                            md->bw_hit_ratioL = max_det * jb_rng_bi(&x->rng);
-                        }
-                        md->hit_gateL=1; md->hit_coolL=(int)(x->sr*0.005f);
-                        u=0.f;
                     }
-                } else {
-                    md->hit_gateL=0;
-                }
-                if (absR > 1e-3f){
-                    if(md->hit_coolR>0){ md->hit_coolR--; }
-                    if(!md->hit_gateR){
-                        if(x->phase_rand>0.f){
-                            float k=x->phase_rand*0.05f*absR;
-                            float r1=jb_rng_bi(&x->rng), r2=jb_rng_bi(&x->rng);
-                            y1R+=k*r1; y2R+=k*r2;
-                            if (bw_amt>0.f){
-                                float r3=jb_rng_bi(&x->rng), r4=jb_rng_bi(&x->rng);
-                                y1bR+=k*r3; y2bR+=k*r4;
-                            }
-                        }
-                        if(m!=0){ md->md_hit_offsetR = 0.05f * jb_rng_bi(&x->rng); } else { md->md_hit_offsetR = 0.f; }
-                        {
-                            float mode_scale = (x->n_modes>1)? ((float)m/(float)(x->n_modes-1)) : 0.f;
-                            float max_det = 0.0005f + 0.0015f * mode_scale;
-                            md->bw_hit_ratioR = max_det * jb_rng_bi(&x->rng);
-                        }
-                        md->hit_gateR=1; md->hit_coolR=(int)(x->sr*0.005f);
-                        u=0.f;
+                    if(m!=0){ md->md_hit_offsetR = 0.05f * jb_rng_bi(&x->rng); } else { md->md_hit_offsetR = 0.f; }
+                    {
+                        float mode_scale = (x->n_modes>1)? ((float)m/(float)(x->n_modes-1)) : 0.f;
+                        float max_det = 0.0005f + 0.0015f * mode_scale;
+                        md->bw_hit_ratioR = max_det * jb_rng_bi(&x->rng);
                     }
-                } else {
-                    md->hit_gateR=0;
+                    md->hit_gateR=1; md->hit_coolR=(int)(x->sr*0.005f);
+                    u=0.f;
                 }
+            } else {
+                md->hit_gateR=0;
+            }
 
-                // drive (attack filter) on exc input, then normalized biquad step
-                float driveExcL = excL * md->gain_now;
-                float driveExcR = excR * md->gain_now;
-                driveL += att_a * (driveExcL - driveL);
-                driveR += att_a * (driveExcR - driveR);
+            // mode filters
+            driveL += att_a*(excL - driveL);
+            float y_linL = (md->a1L*y1L + md->a2L*y2L) + driveL * md->normL;
+            y2L=y1L; y1L=y_linL;
 
-                float y_linL = (md->a1L*y1L + md->a2L*y2L) + driveL * md->normL;
-                y2L=y1L; y1L=y_linL;
-                float y_linR = (md->a1R*y1R + md->a2R*y2R) + driveR * md->normR;
-                y2R=y1R; y1R=y_linR;
+            driveR += att_a*(excR - driveR);
+            float y_linR = (md->a1R*y1R + md->a2R*y2R) + driveR * md->normR;
+            y2R=y1R; y1R=y_linR;
 
-                float y_totalL = y_linL;
-                float y_totalR = y_linR;
-                if (bw_amt > 0.f){
-                    float y_lin_bL = (md->a1bL*y1bL + md->a2bL*y2bL);
-                    y2bL=y1bL; y1bL=y_lin_bL;
-                    y_totalL += 0.12f * bw_amt * y_lin_bL;
-                    float y_lin_bR = (md->a1bR*y1bR + md->a2bR*y2bR);
-                    y2bR=y1bR; y1bR=y_lin_bR;
-                    y_totalR += 0.12f * bw_amt * y_lin_bR;
-                }
+            float y_totalL = y_linL;
+            float y_totalR = y_linR;
+            if (bw_amt > 0.f){
+                float y_lin_bL = (md->a1bL*y1bL + md->a2bL*y2bL);
+                y2bL=y1bL; y1bL=y_lin_bL;
+                y_totalL += 0.12f * bw_amt * y_lin_bL;
 
-                // Curve shaping (per-mode)
-                float S = jb_curve_shape_gain(u, x->base[m].curve_amt);
-                if (x->base[m].curve_amt < 0.f){ if (S < 0.001f) S = 0.001f; }
-                y_totalL *= S; y_totalR *= S;
-                u += du; if (u > 1.f) u = 1.f;
+                float y_lin_bR = (md->a1bR*y1bR + md->a2bR*y2bR);
+                y2bR=y1bR; y1bR=y_lin_bR;
+                y_totalR += 0.12f * bw_amt * y_lin_bR;
+            }
 
-                // Contact nonlinearity (outside feedback loop)
-                if (camt > 0.f){
-                    float drive = 1.f + 19.f * camt;
-                    float asym  = jb_clamp(csym, -1.f, 1.f) * 0.5f;
-                    float xL = y_totalL * drive;
-                    float biasL = asym * (xL >= 0.f ? (xL*xL) : -(xL*xL));
-                    xL += biasL;
-                    float k = 0.6f;
-                    y_totalL = xL - k * xL * xL * xL;
-                    float xR = y_totalR * drive;
-                    float biasR = asym * (xR >= 0.f ? (xR*xR) : -(xR*xR));
-                    xR += biasR;
-                    y_totalR = xR - k * xR * xR * xR;
-                }
+            float S = jb_curve_shape_gain(u, x->base[m].curve_amt);
+            if (x->base[m].curve_amt < 0.f){ if (S < 0.001f) S = 0.001f; }
+            y_totalL *= S; y_totalR *= S;
+            u += du; if(u>1.f){ u=1.f; }
 
-                // Equal-power pan, apply release env, sum per-sample
-                float p = jb_clamp(x->base[m].pan, -1.f, 1.f);
-                float wL = sqrtf(0.5f*(1.f - p));
-                float wR = sqrtf(0.5f*(1.f + p));
-                y_totalL *= v->rel_env; y_totalR *= v->rel_env;
-                sumL += y_totalL * wL;
-                sumR += y_totalR * wR;
+            if (camt > 0.f){
+                float drive = 1.f + 19.f * camt;
+                float asym  = jb_clamp(csym, -1.f, 1.f) * 0.5f;
+                float xL = y_totalL * drive;
+                float biasL = asym * (xL >= 0.f ? (xL*xL) : -(xL*xL));
+                xL += biasL;
+                float k = 0.6f;
+                y_totalL = xL - k * xL * xL * xL;
 
-                // Update md states
-                float ayL=fabsf(y_totalL); envL = envL + 0.0015f*(ayL - envL); md->y_pre_lastL = y_totalL;
-                float ayR=fabsf(y_totalR); envR = envR + 0.0015f*(ayR - envR); md->y_pre_lastR = y_totalR;
-                md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
-                md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;
-                md->decay_u=u;
-            } // end modes
+                float xR = y_totalR * drive;
+                float biasR = asym * (xR >= 0.f ? (xR*xR) : -(xR*xR));
+                xR += biasR;
+                y_totalR = xR - k * xR * xR * xR;
+            }
 
-            // Write to outputs
-            outL[i] += sumL;
-            outR[i] += sumR;
+            // equal-power pan, add release env
+            float p = jb_clamp(x->base[m].pan, -1.f, 1.f);
+            float wL = sqrtf(0.5f*(1.f - p));
+            float wR = sqrtf(0.5f*(1.f + p));
+            y_totalL *= v->rel_env; y_totalR *= v->rel_env;
 
-            // Update feedback path with the **current** output (HP -> LP with slewed coeff -> 2-sample delay)
-            // HP 30 Hz (leaky differentiator)
-            float hl = aHP * (hp_y1L + sumL - hp_x1L); hp_x1L = sumL; hp_y1L = hl;
-            float hr = aHP * (hp_y1R + sumR - hp_x1R); hp_x1R = sumR; hp_y1R = hr;
+            // accumulate to this voice's sample-sum and to outputs
+            v_sumL += y_totalL * wL;
+            v_sumR += y_totalR * wR;
+            outL[i] += y_totalL * wL;
+            outR[i] += y_totalR * wR;
 
-            // LP with coefficient slew toward target
-            aLPz = aLPz + aLPslew * (aLPt - aLPz);
-            float ll = aLPz * lp_y1L + (1.f - aLPz) * hl; lp_y1L = ll;
-            float lr = aLPz * lp_y1R + (1.f - aLPz) * hr; lp_y1R = lr;
+            // write-back mode states
+            md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
+            md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;
+            md->decay_u=u;
+        } // end per-mode
 
-            // 2-sample delay registers for next sample injection
-            d2L = d1L; d1L = ll;
-            d2R = d1R; d1R = lr;
-        } // end per-sample
+        // update envelopes/energy trackers roughly (per sample, using voice sum)
+        // (we keep md->env updates inside the mode loop above)
 
-        // Save back feedback and slew states
-        x->fb_amt_z = fbz;
-        v->fb_hp_x1L = hp_x1L; v->fb_hp_y1L = hp_y1L;
-        v->fb_hp_x1R = hp_x1R; v->fb_hp_y1R = hp_y1R;
-        v->fb_lp_y1L = lp_y1L; v->fb_lp_y1R = lp_y1R;
-        v->fb_d1L = d1L; v->fb_d2L = d2L;
-        v->fb_d1R = d1R; v->fb_d2R = d2R;
-// DC high-pass
+        // Update feedback filters with this voice sample (pre-mix) and advance 2-sample delay
+        // 30 Hz HP (leaky differentiator)
+        float hl = aHP * (hp_y1L + v_sumL - hp_x1L); hp_x1L = v_sumL; hp_y1L = hl;
+        float hr = aHP * (hp_y1R + v_sumR - hp_x1R); hp_x1R = v_sumR; hp_y1R = hr;
+        // 1-pole LP
+        float ll = aLP * lp_y1L + (1.f - aLP) * hl; lp_y1L = ll;
+        float lr = aLP * lp_y1R + (1.f - aLP) * hr; lp_y1R = lr;
+        // 2-sample delay
+        d2L = d1L; d1L = ll;
+        d2R = d1R; d1R = lr;
+    } // end per-sample
+
+    // store back feedback filter state
+    v->fb_hp_x1L = hp_x1L; v->fb_hp_y1L = hp_y1L;
+    v->fb_hp_x1R = hp_x1R; v->fb_hp_y1R = hp_y1R;
+    v->fb_lp_y1L = lp_y1L; v->fb_lp_y1R = lp_y1R;
+    v->fb_d1L = d1L; v->fb_d2L = d2L;
+    v->fb_d1R = d1R; v->fb_d2R = d2R;
+    x->fb_amt_z = fbz;
+
+    // energy tracker & idle
+    float lastL = outL[n-1], lastR = outR[n-1];
+    float e = 0.997f*v->energy + 0.003f*(fabsf(lastL)+fabsf(lastR));
+    v->energy = e;
+    if (v->state==V_RELEASE && e < 1e-6f){ v->state = V_IDLE; }
+}
+
+    // DC high-pass
     float a=x->hp_a; float x1L=x->hpL_x1, y1L=x->hpL_y1, x1R=x->hpR_x1, y1R=x->hpR_y1;
     for(int i=0;i<n;i++){
         float xl=outL[i], xr=outR[i];
@@ -956,7 +928,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     x->hpL_x1=x1L; x->hpL_y1=y1L; x->hpR_x1=x1R; x->hpR_y1=y1R;
 
     return (w + 15);
-}
 }
 
 // ---------- base setters & messages ----------
