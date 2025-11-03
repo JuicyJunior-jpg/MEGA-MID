@@ -703,7 +703,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     // block updates
     for(int vix=0; vix<x->max_voices; ++vix){
         jb_voice_t *v = &x->v[vix];
-        if (v->state==V_IDLE) continue;
+        if (x->exciter_mode==0 && v->state==V_IDLE) continue;
 
         jb_update_crossring(x, vix);
         jb_update_voice_coeffs(x, v);
@@ -719,7 +719,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
     for(int vix=0; vix<x->max_voices; ++vix){
         jb_voice_t *v = &x->v[vix];
-        if (v->state==V_IDLE) continue;
+        if (x->exciter_mode==0 && v->state==V_IDLE) continue;
 
         // Update crossring, coeffs, and gains once per block for this voice
         jb_update_crossring(x, vix);
