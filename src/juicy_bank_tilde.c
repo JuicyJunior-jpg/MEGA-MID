@@ -957,6 +957,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
     return (w + 15);
 }
+}
 
 // ---------- base setters & messages ----------
 static void juicy_bank_tilde_modes(t_juicy_bank_tilde *x, t_floatarg nf){
