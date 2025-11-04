@@ -123,6 +123,17 @@ typedef struct {
     // LP state
     float fb_lp_y1L, fb_lp_y1R;
     // 2-sample delay registers
+
+            // update release envelope per-sample
+            if (v->state == V_RELEASE){
+                // map release_amt (0..1) to ~20ms .. 5s time constant
+                float tau = 0.02f + 4.98f * jb_clamp(x->release_amt, 0.f, 1.f);
+                float a_rel = expf(-1.0f / (x->sr * tau));
+                v->rel_env *= a_rel;
+                if (v->rel_env < 1e-5f) { v->rel_env = 0.f; v->state = V_IDLE; }
+            } else {
+                v->rel_env = 1.f;
+            }
     float fb_d1L, fb_d2L, fb_d1R, fb_d2R;
     // previous-block filtered+delayed buffers (for injection next block)
     float fb_prevL[JB_FB_MAX];
