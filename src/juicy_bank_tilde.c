@@ -711,8 +711,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         jb_update_voice_gains(x, v);
     }
 
-    float camt=jb_clamp(x->contact_amt,0.f,1.f);
-    float csym=jb_clamp(x->contact_sym,-1.f,1.f);
 
     t_sample *vinL[JB_MAX_VOICES] = { v1L, v2L, v3L, v4L };
     t_sample *vinR[JB_MAX_VOICES] = { v1R, v2R, v3R, v4R };
@@ -849,7 +847,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     return (w + 15);
 }
 
-}
 
 // ---------- base setters & messages ----------
 static void juicy_bank_tilde_modes(t_juicy_bank_tilde *x, t_floatarg nf){
