@@ -722,22 +722,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     // constants
     const float aHP = x->fb_hp_a;
     float fbz = x->fb_amt_z;
-            if (x->fb_sustain){
-                if (v->state == V_HELD){ v->fb_env = 1.f; }
-                else {
-                    float tau = (x->fb_decay_ms <= 0.f) ? 0.f : (x->fb_decay_ms * 0.001f);
-                    if (tau > 0.f){
-                        float a_fb = expf(-1.f / (x->sr * tau));
-                        v->fb_env *= a_fb;
-                    } else v->fb_env = 0.f;
-                }
-            } else {
-                float tau = (x->fb_decay_ms <= 0.f) ? 0.f : (x->fb_decay_ms * 0.001f);
-                if (tau > 0.f){
-                    float a_fb = expf(-1.f / (x->sr * tau));
-                    v->fb_env *= a_fb;
-                } else v->fb_env = 0.f;
-            }
+            
     const float fba = x->fb_slew_a;
 
     // Process per-voice, sample-major so feedback uses only a 2-sample delay (no block latency)
@@ -760,6 +745,24 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             // Slew fb amount per-sample (shared param)
             float fb_tgt = jb_clamp(x->fb_amt, -1.f, 1.f);
             fbz = fba * fbz + (1.f - fba) * fb_tgt;
+            // feedback envelope update (per-voice, per-sample)
+            if (x->fb_sustain){
+                if (v->state == V_HELD){ v->fb_env = 1.f; }
+                else {
+                    float tau = (x->fb_decay_ms <= 0.f) ? 0.f : (x->fb_decay_ms * 0.001f);
+                    if (tau > 0.f){
+                        float a_fb = expf(-1.f / (x->sr * tau));
+                        v->fb_env *= a_fb;
+                    } else v->fb_env = 0.f;
+                }
+            } else {
+                float tau = (x->fb_decay_ms <= 0.f) ? 0.f : (x->fb_decay_ms * 0.001f);
+                if (tau > 0.f){
+                    float a_fb = expf(-1.f / (x->sr * tau));
+                    v->fb_env *= a_fb;
+                } else v->fb_env = 0.f;
+            }
+
 
             // compute feedback injection for this sample from 2-sample delayed, filtered voice output
             float loop_g = fbz * jb_clamp(v->fb_env, 0.f, 1.f);
@@ -1091,9 +1094,6 @@ inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     for(int i=0;i<JB_MAX_VOICES;i++){ if(x->in_vL[i]) inlet_free(x->in_vL[i]); if(x->in_vR[i]) inlet_free(x->in_vR[i]); }
 
     outlet_free(x->outL); outlet_free(x->outR);
-}
-
-
 
 // ---------- FEEDBACK setters ----------
 }
