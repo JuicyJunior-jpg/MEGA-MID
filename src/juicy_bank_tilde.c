@@ -721,9 +721,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
     // constants
     const float aHP = x->fb_hp_a;
-    const float aLP = x->fb_lp_a;
     float fbz = x->fb_amt_z;
-            // feedback envelope update
             if (x->fb_sustain){
                 if (v->state == V_HELD){ v->fb_env = 1.f; }
                 else {
@@ -755,7 +753,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         // feedback filter & delay states per-voice/per-ear
         float hp_x1L = v->fb_hp_x1L, hp_y1L = v->fb_hp_y1L;
         float hp_x1R = v->fb_hp_x1R, hp_y1R = v->fb_hp_y1R;
-        float lp_y1L = v->fb_lp_y1L, lp_y1R = v->fb_lp_y1R;
         float d1L = v->fb_d1L, d2L = v->fb_d2L;
         float d1R = v->fb_d1R, d2R = v->fb_d2R;
 
@@ -857,7 +854,6 @@ float vsumL = 0.f, vsumR = 0.f; // this sample's voice sum
         // write back states
         v->fb_hp_x1L = hp_x1L; v->fb_hp_y1L = hp_y1L;
         v->fb_hp_x1R = hp_x1R; v->fb_hp_y1R = hp_y1R;
-        v->fb_lp_y1L = lp_y1L; v->fb_lp_y1R = lp_y1R;
         v->fb_d1L = d1L; v->fb_d2L = d2L;
         v->fb_d1R = d1R; v->fb_d2R = d2R;
     } // end voices
@@ -1039,7 +1035,7 @@ static void juicy_bank_tilde_reset(t_juicy_bank_tilde *x){
         // FEEDBACK per-voice init
         x->v[v].fb_hp_x1L = x->v[v].fb_hp_y1L = 0.f;
         x->v[v].fb_hp_x1R = x->v[v].fb_hp_y1R = 0.f;
-        x->v[v].fb_lp_y1L = x->v[v].fb_lp_y1R = 0.f;
+        x->v[v]. = x->v[v]. = 0.f;
         x->v[v].fb_d1L = x->v[v].fb_d2L = 0.f;
         x->v[v].fb_d1R = x->v[v].fb_d2R = 0.f;
         x->v[v].fb_env = 0.f;
@@ -1059,7 +1055,7 @@ static void juicy_bank_tilde_dsp(t_juicy_bank_tilde *x, t_signal **sp){
 
     // FEEDBACK coeffs
     x->fb_hp_a  = expf(-2.f * (float)M_PI * 30.f / x->sr);
-    x->fb_lp_a  = expf(-2.f * (float)M_PI * jb_clamp(x->fb_lp_hz,200.f,6000.f) / x->sr);
+    x->  = expf(-2.f * (float)M_PI * jb_clamp(x->,200.f,6000.f) / x->sr);
     x->fb_slew_a = expf(-1.f / (0.010f * x->sr)); // ~10 ms slew
     float fc=8.f; float RC=1.f/(2.f*M_PI*fc); float dt=1.f/x->sr; x->hp_a=RC/(RC+dt);
 
@@ -1102,14 +1098,6 @@ inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
 
 
 // ---------- FEEDBACK setters ----------
-static void juicy_bank_tilde_fb_lp_hz(t_juicy_bank_tilde *x, t_floatarg f){
-    float hz = (float)f;
-    if (hz < 200.f) hz = 200.f;
-    if (hz > 6000.f) hz = 6000.f;
-    x->fb_lp_hz = hz;
-    if (x->sr > 0.f){
-        x->fb_lp_a = expf(-2.f * (float)M_PI * x->fb_lp_hz / x->sr);
-    }
 }
 
 static void juicy_bank_tilde_fb_amt(t_juicy_bank_tilde *x, t_floatarg f){
@@ -1181,9 +1169,7 @@ static void *juicy_bank_tilde_new(void){
     x->bandwidth=0.1f; x->micro_detune=0.1f;
     x->sine_pitch=0.f; x->sine_depth=0.f; x->sine_phase=0.f;
 
-    // FEEDBACK defaults
-    x->fb_lp_hz = 1000.f;
-    x->fb_amt   = 0.f;
+    // FEEDBACK defaults    x->fb_amt   = 0.f;
     x->fb_amt_z = 0.f;
 
 
@@ -1477,7 +1463,7 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gens
 
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_stretch, gensym("stretch"), A_FLOAT, 0);
 
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_lp_hz, gensym("fb_lp_hz"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_, gensym(""), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_amt,   gensym("fb_amt"),   A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_drive,   gensym("fb_drive"),   A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_sustain, gensym("fb_sustain"), A_DEFFLOAT, 0);
