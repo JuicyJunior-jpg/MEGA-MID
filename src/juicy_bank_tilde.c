@@ -1035,7 +1035,6 @@ static void juicy_bank_tilde_reset(t_juicy_bank_tilde *x){
         // FEEDBACK per-voice init
         x->v[v].fb_hp_x1L = x->v[v].fb_hp_y1L = 0.f;
         x->v[v].fb_hp_x1R = x->v[v].fb_hp_y1R = 0.f;
-        x->v[v]. = x->v[v]. = 0.f;
         x->v[v].fb_d1L = x->v[v].fb_d2L = 0.f;
         x->v[v].fb_d1R = x->v[v].fb_d2R = 0.f;
         x->v[v].fb_env = 0.f;
@@ -1055,7 +1054,6 @@ static void juicy_bank_tilde_dsp(t_juicy_bank_tilde *x, t_signal **sp){
 
     // FEEDBACK coeffs
     x->fb_hp_a  = expf(-2.f * (float)M_PI * 30.f / x->sr);
-    x->  = expf(-2.f * (float)M_PI * jb_clamp(x->,200.f,6000.f) / x->sr);
     x->fb_slew_a = expf(-1.f / (0.010f * x->sr)); // ~10 ms slew
     float fc=8.f; float RC=1.f/(2.f*M_PI*fc); float dt=1.f/x->sr; x->hp_a=RC/(RC+dt);
 
@@ -1463,8 +1461,7 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gens
 
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_stretch, gensym("stretch"), A_FLOAT, 0);
 
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_, gensym(""), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_amt,   gensym("fb_amt"),   A_DEFFLOAT, 0);
+        class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_amt,   gensym("fb_amt"),   A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_drive,   gensym("fb_drive"),   A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_sustain, gensym("fb_sustain"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_decay,   gensym("fb_decay"),   A_DEFFLOAT, 0);
