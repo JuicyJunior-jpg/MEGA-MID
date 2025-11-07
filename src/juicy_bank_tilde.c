@@ -120,13 +120,9 @@ typedef struct {
     // --- FEEDBACK per-voice, per-ear states ---
     // DC HP state
     float fb_hp_x1L, fb_hp_y1L, fb_hp_x1R, fb_hp_y1R;
-    // LP state
-    // 2-sample delay registers
-
-            // update release envelope per-sample
-            
+// 2-sample delay registers
     float fb_d1L, fb_d2L, fb_d1R, fb_d2R;
-    float fb_env;
+    float fb_env; // 0..1
     // previous-block filtered+delayed buffers (for injection next block)
     float fb_prevL[JB_FB_MAX];
     float fb_prevR[JB_FB_MAX];
@@ -167,11 +163,17 @@ float damping, brightness, position; float damp_broad, damp_point;
     float basef0_ref;
 
     // FEEDBACK params (global controls)
+    t_inlet *in_fb_drive; // float inlet (0..1)
     t_inlet *in_fb_amt;   // float inlet (-1..+1)
+    t_inlet *in_fb_sustain; // float inlet (0 or 1)
+    t_inlet *in_fb_decay;   // float inlet (ms)
     float fb_hp_a;        // fixed 30 Hz 1-pole HP coeff
     float fb_amt;         // -1..+1, startup 0
     float fb_amt_z;       // slewed value
     float fb_slew_a;      // slew pole (~10 ms)
+    float fb_drive;      // 0..1
+    int   fb_sustain;     // 0/1
+    float fb_decay_ms;    // milliseconds
 
 
     // BEHAVIOR depths
@@ -629,7 +631,7 @@ static void jb_note_on(t_juicy_bank_tilde *x, float f0, float vel){
     v->state = V_HELD; v->f0 = (f0<=0.f)?1.f:f0; v->vel = jb_clamp(vel,0.f,1.f);
     jb_voice_reset_states(x, v, &x->rng);
     jb_project_behavior_into_voice(x, v);
-    v->fb_env = x->fb_sustain ? 1.f : 0.f;
+    v->fb_env = (x->fb_sustain ? 1.f : 0.f);
 }
 
 static void jb_note_off(t_juicy_bank_tilde *x, float f0){
@@ -656,7 +658,7 @@ static void jb_note_on_voice(t_juicy_bank_tilde *x, int vix1, float f0, float ve
     v->state = V_HELD; v->f0 = f0; v->vel = vel;
     jb_voice_reset_states(x, v, &x->rng);
     jb_project_behavior_into_voice(x, v);
-    v->fb_env = x->fb_sustain ? 1.f : 0.f;
+    v->fb_env = (x->fb_sustain ? 1.f : 0.f);
 }
 
 static void jb_note_off_voice(t_juicy_bank_tilde *x, int vix1){
@@ -719,7 +721,25 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
     // constants
     const float aHP = x->fb_hp_a;
+    const float aLP = x->fb_lp_a;
     float fbz = x->fb_amt_z;
+            // feedback envelope update
+            if (x->fb_sustain){
+                if (v->state == V_HELD){ v->fb_env = 1.f; }
+                else {
+                    float tau = (x->fb_decay_ms <= 0.f) ? 0.f : (x->fb_decay_ms * 0.001f);
+                    if (tau > 0.f){
+                        float a_fb = expf(-1.f / (x->sr * tau));
+                        v->fb_env *= a_fb;
+                    } else v->fb_env = 0.f;
+                }
+            } else {
+                float tau = (x->fb_decay_ms <= 0.f) ? 0.f : (x->fb_decay_ms * 0.001f);
+                if (tau > 0.f){
+                    float a_fb = expf(-1.f / (x->sr * tau));
+                    v->fb_env *= a_fb;
+                } else v->fb_env = 0.f;
+            }
     const float fba = x->fb_slew_a;
 
     // Process per-voice, sample-major so feedback uses only a 2-sample delay (no block latency)
@@ -735,6 +755,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         // feedback filter & delay states per-voice/per-ear
         float hp_x1L = v->fb_hp_x1L, hp_y1L = v->fb_hp_y1L;
         float hp_x1R = v->fb_hp_x1R, hp_y1R = v->fb_hp_y1R;
+        float lp_y1L = v->fb_lp_y1L, lp_y1R = v->fb_lp_y1R;
         float d1L = v->fb_d1L, d2L = v->fb_d2L;
         float d1R = v->fb_d1R, d2R = v->fb_d2R;
 
@@ -836,17 +857,12 @@ float vsumL = 0.f, vsumR = 0.f; // this sample's voice sum
         // write back states
         v->fb_hp_x1L = hp_x1L; v->fb_hp_y1L = hp_y1L;
         v->fb_hp_x1R = hp_x1R; v->fb_hp_y1R = hp_y1R;
+        v->fb_lp_y1L = lp_y1L; v->fb_lp_y1R = lp_y1R;
         v->fb_d1L = d1L; v->fb_d2L = d2L;
         v->fb_d1R = d1R; v->fb_d2R = d2R;
     } // end voices
 
     x->fb_amt_z = fbz;
-    t_inlet *in_fb_drive;
-    t_inlet *in_fb_sustain;
-    t_inlet *in_fb_decay;
-    float fb_drive;
-    int fb_sustain;
-    float fb_decay_ms;
 
     // Output DC HP (post-sum)
     float a=x->hp_a; float x1L=x->hpL_x1, y1L=x->hpL_y1, x1R=x->hpR_x1, y1R=x->hpR_y1;
@@ -1023,6 +1039,7 @@ static void juicy_bank_tilde_reset(t_juicy_bank_tilde *x){
         // FEEDBACK per-voice init
         x->v[v].fb_hp_x1L = x->v[v].fb_hp_y1L = 0.f;
         x->v[v].fb_hp_x1R = x->v[v].fb_hp_y1R = 0.f;
+        x->v[v].fb_lp_y1L = x->v[v].fb_lp_y1R = 0.f;
         x->v[v].fb_d1L = x->v[v].fb_d2L = 0.f;
         x->v[v].fb_d1R = x->v[v].fb_d2R = 0.f;
         x->v[v].fb_env = 0.f;
@@ -1042,6 +1059,7 @@ static void juicy_bank_tilde_dsp(t_juicy_bank_tilde *x, t_signal **sp){
 
     // FEEDBACK coeffs
     x->fb_hp_a  = expf(-2.f * (float)M_PI * 30.f / x->sr);
+    x->fb_lp_a  = expf(-2.f * (float)M_PI * jb_clamp(x->fb_lp_hz,200.f,6000.f) / x->sr);
     x->fb_slew_a = expf(-1.f / (0.010f * x->sr)); // ~10 ms slew
     float fc=8.f; float RC=1.f/(2.f*M_PI*fc); float dt=1.f/x->sr; x->hp_a=RC/(RC+dt);
 
@@ -1084,10 +1102,13 @@ inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
 
 
 // ---------- FEEDBACK setters ----------
+static void juicy_bank_tilde_fb_lp_hz(t_juicy_bank_tilde *x, t_floatarg f){
     float hz = (float)f;
     if (hz < 200.f) hz = 200.f;
     if (hz > 6000.f) hz = 6000.f;
+    x->fb_lp_hz = hz;
     if (x->sr > 0.f){
+        x->fb_lp_a = expf(-2.f * (float)M_PI * x->fb_lp_hz / x->sr);
     }
 }
 
@@ -1100,13 +1121,13 @@ static void juicy_bank_tilde_fb_amt(t_juicy_bank_tilde *x, t_floatarg f){
 }
 
 static void juicy_bank_tilde_fb_drive(t_juicy_bank_tilde *x, t_floatarg f){
-    float d = (float)f; if (d<0.f) d=0.f; if (d>1.f) d=1.f; x->fb_drive = d;
+    float d=(float)f; if(d<0.f)d=0.f; if(d>1.f)d=1.f; x->fb_drive=d;
 }
 static void juicy_bank_tilde_fb_sustain(t_juicy_bank_tilde *x, t_floatarg f){
     x->fb_sustain = (f>0.f)?1:0;
 }
 static void juicy_bank_tilde_fb_decay(t_juicy_bank_tilde *x, t_floatarg ms){
-    if (ms<0.f) ms=0.f; x->fb_decay_ms = ms;
+    if(ms<0.f) ms=0.f; x->fb_decay_ms = (float)ms;
 }
 // ---------- defaults helper ----------
 static void jb_apply_default_saw(t_juicy_bank_tilde *x){
@@ -1161,11 +1182,15 @@ static void *juicy_bank_tilde_new(void){
     x->sine_pitch=0.f; x->sine_depth=0.f; x->sine_phase=0.f;
 
     // FEEDBACK defaults
+    x->fb_lp_hz = 1000.f;
     x->fb_amt   = 0.f;
     x->fb_amt_z = 0.f;
 
 
 
+    x->fb_drive = 0.f;
+    x->fb_sustain = 1;
+    x->fb_decay_ms = 250.f;
     x->basef0_ref=261.626f; // C4
     x->stiffen_amt=x->shortscale_amt=x->linger_amt=x->tilt_amt=x->bite_amt=x->bloom_amt=x->crossring_amt=0.f;
 
@@ -1216,7 +1241,10 @@ x->in_dispersion = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("dispe
     x->in_sine_phase = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_phase"));
 
     // FEEDBACK controls (placed after sine_phase, before partials)
+    x->in_fb_drive = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("fb_drive"));
     x->in_fb_amt   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("fb_amt"));
+    x->in_fb_sustain = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("fb_sustain"));
+    x->in_fb_decay   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("fb_decay"));
 // Individual
     x->in_partials   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("partials"));
     x->in_index      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("index"));
@@ -1449,9 +1477,9 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gens
 
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_stretch, gensym("stretch"), A_FLOAT, 0);
 
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_lp_hz, gensym("fb_lp_hz"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_amt,   gensym("fb_amt"),   A_DEFFLOAT, 0);
-
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_drive, gensym("fb_drive"), A_FLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_sustain, gensym("fb_sustain"), A_FLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_decay, gensym("fb_decay"), A_FLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_drive,   gensym("fb_drive"),   A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_sustain, gensym("fb_sustain"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_decay,   gensym("fb_decay"),   A_DEFFLOAT, 0);
 }
