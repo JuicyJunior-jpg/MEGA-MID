@@ -118,12 +118,15 @@ typedef struct {
     jb_mode_rt_t m[JB_MAX_MODES];
 
     // --- FEEDBACK per-voice, per-ear states ---
-    // DC HP state
+// DC HP state (30 Hz highpass on voice sum before feedback path)
     float fb_hp_x1L, fb_hp_y1L, fb_hp_x1R, fb_hp_y1R;
-// 2-sample delay registers
+// 2-sample delay registers (core feedback delay line)
     float fb_d1L, fb_d2L, fb_d1R, fb_d2R;
-    float fb_env; // 0..1
-    // previous-block filtered+delayed buffers (for injection next block)
+// one-pole lowpass state in the feedback path (per-ear)
+    float fb_lpL, fb_lpR;
+// smoothed pulse state (per-ear)
+    float fb_pulseL, fb_pulseR;
+// previous-block filtered+delayed buffers (legacy; currently unused but kept for compatibility)
     float fb_prevL[JB_FB_MAX];
     float fb_prevR[JB_FB_MAX];
     int   fb_prev_len;
@@ -165,15 +168,15 @@ float damping, brightness, position; float damp_broad, damp_point;
     // FEEDBACK params (global controls)
     t_inlet *in_fb_drive; // float inlet (0..1)
     t_inlet *in_fb_amt;   // float inlet (-1..+1)
-    t_inlet *in_fb_sustain; // float inlet (0 or 1)
-    t_inlet *in_fb_decay;   // float inlet (ms)
+    t_inlet *in_fb_timer; // float inlet (0..1)
+    t_inlet *in_fb_fmax;  // float inlet (0..1)
     float fb_hp_a;        // fixed 30 Hz 1-pole HP coeff
     float fb_amt;         // -1..+1, startup 0
     float fb_amt_z;       // slewed value
     float fb_slew_a;      // slew pole (~10 ms)
-    float fb_drive;      // 0..1
-    int   fb_sustain;     // 0/1
-    float fb_decay_ms;    // milliseconds
+    float fb_drive;       // 0..1
+    float fb_timer;       // 0..1 crossfade between raw feedback and pulse-shaped feedback
+    float fb_fmax;        // 0..1 maps to max pulse frequency / LP cutoff
 
 
     // BEHAVIOR depths
@@ -631,7 +634,6 @@ static void jb_note_on(t_juicy_bank_tilde *x, float f0, float vel){
     v->state = V_HELD; v->f0 = (f0<=0.f)?1.f:f0; v->vel = jb_clamp(vel,0.f,1.f);
     jb_voice_reset_states(x, v, &x->rng);
     jb_project_behavior_into_voice(x, v);
-    v->fb_env = (x->fb_sustain ? 1.f : 0.f);
 }
 
 static void jb_note_off(t_juicy_bank_tilde *x, float f0){
@@ -658,7 +660,6 @@ static void jb_note_on_voice(t_juicy_bank_tilde *x, int vix1, float f0, float ve
     v->state = V_HELD; v->f0 = f0; v->vel = vel;
     jb_voice_reset_states(x, v, &x->rng);
     jb_project_behavior_into_voice(x, v);
-    v->fb_env = (x->fb_sustain ? 1.f : 0.f);
 }
 
 static void jb_note_off_voice(t_juicy_bank_tilde *x, int vix1){
@@ -740,32 +741,31 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         float hp_x1R = v->fb_hp_x1R, hp_y1R = v->fb_hp_y1R;
         float d1L = v->fb_d1L, d2L = v->fb_d2L;
         float d1R = v->fb_d1R, d2R = v->fb_d2R;
+        float lpL  = v->fb_lpL,  lpR  = v->fb_lpR;
+        float pL   = v->fb_pulseL, pR = v->fb_pulseR;
+
+        // per-voice feedback shaping constants (depend on pitch and global params)
+        float fb_timer = jb_clamp(x->fb_timer, 0.f, 1.f);
+        float fb_fmax_norm = jb_clamp(x->fb_fmax, 0.f, 1.f);
+        float f0 = v->f0;
+        if (f0 <= 0.f) f0 = x->basef0_ref;
+        float fmax_ratio = powf(2.f, 2.f * fb_fmax_norm); // up to +2 octaves
+        float fmax = f0 * fmax_ratio;
+        float nyq = 0.5f * x->sr;
+        if (fmax < 10.f) fmax = 10.f;
+        if (fmax > nyq) fmax = nyq;
+        float k = 2.f * (float)M_PI * fmax / x->sr;
+        if (k > 1.f) k = 1.f;
+        float a_lp = expf(-k);
+        float b_lp = 1.f - a_lp;
 
         for(int i=0;i<n;i++){
             // Slew fb amount per-sample (shared param)
             float fb_tgt = jb_clamp(x->fb_amt, -1.f, 1.f);
             fbz = fba * fbz + (1.f - fba) * fb_tgt;
-            // feedback envelope update (per-voice, per-sample)
-            if (x->fb_sustain){
-                if (v->state == V_HELD){ v->fb_env = 1.f; }
-                else {
-                    float tau = (x->fb_decay_ms <= 0.f) ? 0.f : (x->fb_decay_ms * 0.001f);
-                    if (tau > 0.f){
-                        float a_fb = expf(-1.f / (x->sr * tau));
-                        v->fb_env *= a_fb;
-                    } else v->fb_env = 0.f;
-                }
-            } else {
-                float tau = (x->fb_decay_ms <= 0.f) ? 0.f : (x->fb_decay_ms * 0.001f);
-                if (tau > 0.f){
-                    float a_fb = expf(-1.f / (x->sr * tau));
-                    v->fb_env *= a_fb;
-                } else v->fb_env = 0.f;
-            }
 
-
-            // compute feedback injection for this sample from 2-sample delayed, filtered voice output
-            float loop_g = fbz * jb_clamp(v->fb_env, 0.f, 1.f);
+            // compute feedback injection for this sample from 2-sample delayed, shaped voice output
+            float loop_g = fbz;
             float fbL = loop_g * d2L;
             float fbR = loop_g * d2R;
 float vsumL = 0.f, vsumR = 0.f; // this sample's voice sum
@@ -833,15 +833,33 @@ float vsumL = 0.f, vsumR = 0.f; // this sample's voice sum
 
             // Update feedback filter/delay from this sample's voice sum so next sample sees it
             // 30 Hz HP (leaky differentiator)
+                        // 30 Hz HP (leaky differentiator)
             float hl = aHP * (hp_y1L + vsumL - hp_x1L); hp_x1L = vsumL; hp_y1L = hl;
             float hr = aHP * (hp_y1R + vsumR - hp_x1R); hp_x1R = vsumR; hp_y1R = hr;
+
             // Soft saturator (tanh) with drive
             float drv = 1.0f + 7.0f * jb_clamp(x->fb_drive, 0.f, 1.f);
-            float sl = tanhf(drv * hl);
-            float sr = tanhf(drv * hr);
-            // 2-sample delay
-            d2L = d1L; d1L = sl;
-            d2R = d1R; d1R = sr;
+            float rawL = tanhf(drv * hl);
+            float rawR = tanhf(drv * hr);
+
+            // One-pole lowpass in the feedback path (cutoff controlled by fb_fmax)
+            lpL = a_lp * lpL + b_lp * rawL;
+            lpR = a_lp * lpR + b_lp * rawR;
+
+            // Derive pulse signal via comparator + smoothing
+            float sqL = (lpL >= 0.f) ? 1.f : -1.f;
+            float sqR = (lpR >= 0.f) ? 1.f : -1.f;
+            pL = a_lp * pL + b_lp * sqL;
+            pR = a_lp * pR + b_lp * sqR;
+
+            // Crossfade between smoothed continuous feedback and pulse-shaped version
+            float shapedL = (1.f - fb_timer) * lpL + fb_timer * pL;
+            float shapedR = (1.f - fb_timer) * lpR + fb_timer * pR;
+
+            // 2-sample delay in feedback loop
+            d2L = d1L; d1L = shapedL;
+            d2R = d1R; d1R = shapedR;
+
             // per-sample release envelope update (decays in V_RELEASE, 20ms..5s)
             if (v->state == V_RELEASE){
                 float tau = 0.02f + 4.98f * jb_clamp(x->release_amt, 0.f, 1.f);
@@ -859,6 +877,8 @@ float vsumL = 0.f, vsumR = 0.f; // this sample's voice sum
         v->fb_hp_x1R = hp_x1R; v->fb_hp_y1R = hp_y1R;
         v->fb_d1L = d1L; v->fb_d2L = d2L;
         v->fb_d1R = d1R; v->fb_d2R = d2R;
+        v->fb_lpL = lpL;   v->fb_lpR = lpR;
+        v->fb_pulseL = pL; v->fb_pulseR = pR;
     } // end voices
 
     x->fb_amt_z = fbz;
@@ -1040,7 +1060,8 @@ static void juicy_bank_tilde_reset(t_juicy_bank_tilde *x){
         x->v[v].fb_hp_x1R = x->v[v].fb_hp_y1R = 0.f;
         x->v[v].fb_d1L = x->v[v].fb_d2L = 0.f;
         x->v[v].fb_d1R = x->v[v].fb_d2R = 0.f;
-        x->v[v].fb_env = 0.f;
+        x->v[v].fb_lpL = x->v[v].fb_lpR = 0.f;
+        x->v[v].fb_pulseL = x->v[v].fb_pulseR = 0.f;
         x->v[v].fb_prev_len = 0;
         for (int _i=0; _i<JB_FB_MAX; ++_i){ x->v[v].fb_prevL[_i]=0.f; x->v[v].fb_prevR[_i]=0.f; }
         for(int i=0;i<JB_MAX_MODES;i++){
@@ -1084,8 +1105,8 @@ inlet_free(x->in_sine_pitch);
     inlet_free(x->in_sine_phase);
     inlet_free(x->in_fb_amt);
     inlet_free(x->in_fb_drive);
-    inlet_free(x->in_fb_sustain);
-    inlet_free(x->in_fb_decay);
+    inlet_free(x->in_fb_timer);
+    inlet_free(x->in_fb_fmax);
     inlet_free(x->in_partials); // free 'partials' inlet
 inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     inlet_free(x->in_attack); inlet_free(x->in_decay); inlet_free(x->in_curve); inlet_free(x->in_pan); inlet_free(x->in_keytrack);
@@ -1107,13 +1128,22 @@ static void juicy_bank_tilde_fb_amt(t_juicy_bank_tilde *x, t_floatarg f){
 }
 
 static void juicy_bank_tilde_fb_drive(t_juicy_bank_tilde *x, t_floatarg f){
-    float d=(float)f; if(d<0.f)d=0.f; if(d>1.f)d=1.f; x->fb_drive=d;
+    float d = (float)f;
+    if (d < 0.f) d = 0.f;
+    if (d > 1.f) d = 1.f;
+    x->fb_drive = d;
 }
-static void juicy_bank_tilde_fb_sustain(t_juicy_bank_tilde *x, t_floatarg f){
-    x->fb_sustain = (f>0.f)?1:0;
+static void juicy_bank_tilde_fb_timer(t_juicy_bank_tilde *x, t_floatarg f){
+    float t = (float)f;
+    if (t < 0.f) t = 0.f;
+    if (t > 1.f) t = 1.f;
+    x->fb_timer = t;
 }
-static void juicy_bank_tilde_fb_decay(t_juicy_bank_tilde *x, t_floatarg ms){
-    if(ms<0.f) ms=0.f; x->fb_decay_ms = (float)ms;
+static void juicy_bank_tilde_fb_fmax(t_juicy_bank_tilde *x, t_floatarg f){
+    float v = (float)f;
+    if (v < 0.f) v = 0.f;
+    if (v > 1.f) v = 1.f;
+    x->fb_fmax = v;
 }
 // ---------- defaults helper ----------
 static void jb_apply_default_saw(t_juicy_bank_tilde *x){
@@ -1167,14 +1197,12 @@ static void *juicy_bank_tilde_new(void){
     x->bandwidth=0.1f; x->micro_detune=0.1f;
     x->sine_pitch=0.f; x->sine_depth=0.f; x->sine_phase=0.f;
 
-    // FEEDBACK defaults    x->fb_amt   = 0.f;
+    // FEEDBACK defaults
+    x->fb_amt   = 0.f;
     x->fb_amt_z = 0.f;
-
-
-
     x->fb_drive = 0.f;
-    x->fb_sustain = 1;
-    x->fb_decay_ms = 250.f;
+    x->fb_timer = 0.f;
+    x->fb_fmax  = 0.5f;
     x->basef0_ref=261.626f; // C4
     x->stiffen_amt=x->shortscale_amt=x->linger_amt=x->tilt_amt=x->bite_amt=x->bloom_amt=x->crossring_amt=0.f;
 
@@ -1227,8 +1255,8 @@ x->in_dispersion = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("dispe
     // FEEDBACK controls (placed after sine_phase, before partials)
     x->in_fb_drive = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("fb_drive"));
     x->in_fb_amt   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("fb_amt"));
-    x->in_fb_sustain = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("fb_sustain"));
-    x->in_fb_decay   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("fb_decay"));
+    x->in_fb_timer = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("fb_timer"));
+    x->in_fb_fmax  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("fb_fmax"));
 // Individual
     x->in_partials   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("partials"));
     x->in_index      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("index"));
@@ -1463,6 +1491,6 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gens
 
         class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_amt,   gensym("fb_amt"),   A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_drive,   gensym("fb_drive"),   A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_sustain, gensym("fb_sustain"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_decay,   gensym("fb_decay"),   A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_timer,   gensym("fb_timer"),   A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_fb_fmax,    gensym("fb_fmax"),    A_DEFFLOAT, 0);
 }
