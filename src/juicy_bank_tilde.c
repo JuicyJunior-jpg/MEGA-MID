@@ -1371,25 +1371,28 @@ static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
 
     for(int i=0;i<x->n_modes;i++){
         if (!x->base[i].active) continue;
-        // --- SINE mask ---
+        // --- SINE mask (bipolar, same semantics as jb_update_voice_gains) ---
         float k_norm = (N>1) ? ((float)i / (float)(N-1)) : 0.f;
         float theta = 2.f * (float)M_PI * (cycles * k_norm + phase);
-        float w01 = 0.5f * (1.f + cosf(theta));
+        float w01 = 0.5f * (1.f + cosf(theta)); // 1 at pattern center, 0 at pattern nulls
         float sharp = 1.0f + 8.0f * fabsf(depth);   // use |depth| for window sharpness
-        float w_sharp = powf(w01, sharp);
-        
-        if (depth >= 0.f){
-            float sine_mask = (1.f - depth) + depth * w_sharp; // 0..1
-            x->base[i].base_gain *= jb_clamp(sine_mask, 0.f, 1.f);
-        } else {
-            float amt = -depth;                                // 0..1
-            float boost = 1.f + amt * (1.f - w_sharp);         // 1..2
-            x->base[i].base_gain *= boost;
-            if (x->base[i].base_gain > 1.f) x->base[i].base_gain = 1.f;
-            if (x->base[i].base_gain < 0.f) x->base[i].base_gain = 0.f;
-        }
+        float pattern = powf(w01, sharp);          // pattern membership mask in [0,1]
 
-        // --- DAMPER bake into base_decay_ms ---
+        // bipolar amount:
+        //   depth > 0: attenuate pattern partials
+        //   depth < 0: attenuate non-pattern partials
+        float a_pos = (depth > 0.f) ? depth : 0.f;
+        float a_neg = (depth < 0.f) ? -depth : 0.f;
+
+        float weight = 1.f
+                       - a_pos * pattern          // turn down pattern when depth > 0
+                       - a_neg * (1.f - pattern); // turn down complement when depth < 0;
+
+        if (weight < 0.f) weight = 0.f;
+        x->base[i].base_gain *= weight;
+
+
+// --- DAMPER bake into base_decay_ms ---
         float k_mode = (x->n_modes>1)? ((float)i/(float)(x->n_modes-1)) : 0.f;
         float dx = fabsf(k_mode - p); if (dx > 0.5f) dx = 1.f - dx; // circular distance
         float wloc = expf(-0.5f * (dx*dx) / (sigma*sigma)); // 0..1
