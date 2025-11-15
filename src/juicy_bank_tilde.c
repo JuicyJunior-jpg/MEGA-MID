@@ -735,6 +735,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         const float use_gate = (x->exciter_mode==0) ? ((v->state==V_HELD)?1.f:0.f) : 1.f;
         t_sample *srcL = (x->exciter_mode==0) ? inL : vinL[vix];
         t_sample *srcR = (x->exciter_mode==0) ? inR : vinR[vix];
+        // global modal bank master gain (0..1) from former fb_drive inlet
+        float bank_gain = jb_clamp(x->fb_drive, 0.f, 1.f);
 
         // feedback filter & delay states per-voice/per-ear
         float hp_x1L = v->fb_hp_x1L, hp_y1L = v->fb_hp_y1L;
@@ -761,7 +763,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
         for(int i=0;i<n;i++){
             // Slew fb amount per-sample (shared param)
-            float fb_tgt = jb_clamp(x->fb_amt, -1.f, 1.f);
+            float fb_tgt = 0.99f * jb_clamp(x->fb_amt, -1.f, 1.f);
             fbz = fba * fbz + (1.f - fba) * fb_tgt;
 
             // compute feedback injection for this sample from 2-sample delayed, shaped voice output
@@ -814,15 +816,17 @@ float vsumL = 0.f, vsumR = 0.f; // this sample's voice sum
                 y_totalL *= S; y_totalR *= S;
                 u += du; if(u>1.f){ u=1.f; }
 
-                // equal-power pan and sum
+                // equal-power pan and sum (scaled by global bank_gain)
                 float p = jb_clamp(x->base[m].pan, -1.f, 1.f);
                 float wL = sqrtf(0.5f*(1.f - p));
                 float wR = sqrtf(0.5f*(1.f + p));
                 y_totalL *= v->rel_env; y_totalR *= v->rel_env;
-                outL[i] += y_totalL * wL;
-                outR[i] += y_totalR * wR;
-                vsumL += y_totalL * wL;
-                vsumR += y_totalR * wR;
+                float voiceL = y_totalL * wL * bank_gain;
+                float voiceR = y_totalR * wR * bank_gain;
+                outL[i] += voiceL;
+                outR[i] += voiceR;
+                vsumL += voiceL;
+                vsumR += voiceR;
 
                 // write back small subset (leave other slow vars unchanged)
                 md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
@@ -837,10 +841,14 @@ float vsumL = 0.f, vsumR = 0.f; // this sample's voice sum
             float hl = aHP * (hp_y1L + vsumL - hp_x1L); hp_x1L = vsumL; hp_y1L = hl;
             float hr = aHP * (hp_y1R + vsumR - hp_x1R); hp_x1R = vsumR; hp_y1R = hr;
 
-            // Soft saturator (tanh) with drive
-            float drv = 1.0f + 7.0f * jb_clamp(x->fb_drive, 0.f, 1.f);
-            float rawL = tanhf(drv * hl);
-            float rawR = tanhf(drv * hr);
+            // Feedback limiter: hard clip to +/-0.99 before further shaping
+            const float fb_lim = 0.99f;
+            float rawL = hl;
+            if (rawL > fb_lim)  rawL = fb_lim;
+            else if (rawL < -fb_lim) rawL = -fb_lim;
+            float rawR = hr;
+            if (rawR > fb_lim)  rawR = fb_lim;
+            else if (rawR < -fb_lim) rawR = -fb_lim;
 
             // One-pole lowpass in the feedback path (cutoff controlled by fb_fmax)
             lpL = a_lp * lpL + b_lp * rawL;
@@ -1200,7 +1208,7 @@ static void *juicy_bank_tilde_new(void){
     // FEEDBACK defaults
     x->fb_amt   = 0.f;
     x->fb_amt_z = 0.f;
-    x->fb_drive = 0.f;
+    x->fb_drive = 1.f;
     x->fb_timer = 0.f;
     x->fb_fmax  = 0.5f;
     x->basef0_ref=261.626f; // C4
