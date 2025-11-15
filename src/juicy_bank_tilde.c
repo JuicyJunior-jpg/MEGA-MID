@@ -571,23 +571,38 @@ static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
 float gn = g * w * wp;
         if (v->m[i].nyq_kill) gn = 0.f;
             if (x->active_modes < x->n_modes) { if (i >= x->active_modes) gn = 0.f; }
-        // --- SINE AM mask (applied after gn is computed) ---
+        // --- SINE AM mask (bipolar focus vs complement, applied after gn is computed) ---
         {
             int N = x->n_modes;
             float pitch = jb_clamp(x->sine_pitch, 0.f, 1.f);
             float depth = jb_clamp(x->sine_depth, -1.f, 1.f);
             float phase = x->sine_phase;
+
+            // build a smooth 0..1 pattern mask along modes
             float cycles_min = 0.25f;
             float cycles_max = floorf((float)N * 0.5f);
             if (cycles_max < cycles_min) cycles_max = cycles_min;
             float cycles = cycles_min + pitch * (cycles_max - cycles_min);
             float k_norm = (N>1) ? ((float)i / (float)(N-1)) : 0.f;
             float theta = 2.f * (float)M_PI * (cycles * k_norm + phase);
-            float w01 = 0.5f * (1.f + cosf(theta));
-            float sharp = 1.0f + 8.0f * depth;
-            float w_sharp = powf(w01, sharp);
-            float mask = (1.f - depth) + depth * w_sharp;
-            gn *= mask;
+            float w01 = 0.5f * (1.f + cosf(theta)); // 1 at pattern center, 0 at pattern "nulls"
+
+            // make the pattern "sharper" as |depth| increases
+            float sharp = 1.0f + 8.0f * fabsf(depth);
+            float pattern = powf(w01, sharp); // pattern membership mask in [0,1]
+
+            // bipolar amount:
+            //   depth > 0: attenuate pattern partials
+            //   depth < 0: attenuate non-pattern partials
+            float a_pos = (depth > 0.f) ? depth : 0.f;
+            float a_neg = (depth < 0.f) ? -depth : 0.f;
+
+            float weight = 1.f
+                           - a_pos * pattern          // turn down pattern when depth > 0
+                           - a_neg * (1.f - pattern); // turn down complement when depth < 0
+
+            if (weight < 0.f) weight = 0.f;
+            gn *= weight;
         }
         v->m[i].gain_now = (gn<0.f)?0.f:gn;
     }
