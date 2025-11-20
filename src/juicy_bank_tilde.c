@@ -328,9 +328,10 @@ static void jb_project_behavior_into_voice(t_juicy_bank_tilde *x, jb_voice_t *v)
     // Linger → velocity extends decays
     v->decay_vel_mul = (1.f + (0.30f + 1.20f * x->linger_amt) * jb_clamp(v->vel,0.f,1.f));
 
-    // Tilt + Bite → brightness
+    // Tilt + Bite → brightness (0.5 = neutral; velocity is centered around 0.5)
+    float vel           = jb_clamp(v->vel,0.f,1.f);
     float dbright_pitch = (0.02f + 0.08f * x->tilt_amt) * log2f(xfac);
-    float dbright_vel   = (0.25f + 0.35f * x->bite_amt) * jb_clamp(v->vel,0.f,1.f);
+    float dbright_vel   = (0.30f + 0.30f * x->bite_amt) * (vel - 0.5f);
     v->brightness_v = jb_clamp(x->brightness + dbright_pitch + dbright_vel, 0.f, 1.f);
 
     // Bloom → bandwidth
