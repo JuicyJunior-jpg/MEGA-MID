@@ -63,7 +63,6 @@ typedef struct {
 
     // signatures (random)
     float disp_signature;
-    float micro_sig;
 } jb_mode_base_t;
 
 typedef struct {
@@ -160,9 +159,6 @@ float damping, brightness, position; float damp_broad, damp_point;
     float contact_amt, contact_sym;
 
     // realism/misc
-    float phase_rand; int phase_debug;
-    float bandwidth;        // base for Bloom
-    float micro_detune;     // base for micro detune
     float basef0_ref;
 
     // FEEDBACK params (global controls)
@@ -180,7 +176,7 @@ float damping, brightness, position; float damp_broad, damp_point;
 
 
     // BEHAVIOR depths
-    float stiffen_amt, shortscale_amt, linger_amt, tilt_amt, bite_amt, bloom_amt, crossring_amt;
+    float crossring_amt;
 
     // voices
     int   max_voices;
@@ -316,31 +312,21 @@ static void jb_project_behavior_into_voice(t_juicy_bank_tilde *x, jb_voice_t *v)
     if (xfac < 1e-6f) xfac = 1e-6f;
     v->pitch_x = xfac;
 
-    // Stiffen → extra dispersion depth
-    float k_disp = (0.02f + 0.10f * jb_clamp(x->stiffen_amt,0.f,1.f));
-    float alpha  = 0.60f + 0.20f * x->stiffen_amt;
-    v->stiffen_add = k_disp * powf(xfac, alpha);
+    // Neutral decay: no pitch/velocity curvature
+    v->decay_pitch_mul = 1.f;
+    v->decay_vel_mul   = 1.f;
 
-    // Shortscale → decays shorten with pitch
-    float beta = 0.40f + 0.50f * x->shortscale_amt;
-    v->decay_pitch_mul = powf(xfac, -beta);
+    // Brightness: directly from global brightness control
+    v->brightness_v = jb_clamp(x->brightness, 0.f, 1.f);
 
-    // Linger → velocity extends decays
-    v->decay_vel_mul = (1.f + (0.30f + 1.20f * x->linger_amt) * jb_clamp(v->vel,0.f,1.f));
+    // Bandwidth / twin modes disabled (always off)
+    v->bandwidth_v = 0.f;
 
-    // Tilt + Bite → brightness (0.5 = neutral; velocity is centered around 0.5)
-    float vel           = jb_clamp(v->vel,0.f,1.f);
-    float dbright_pitch = (0.02f + 0.08f * x->tilt_amt) * log2f(xfac);
-    float dbright_vel   = (0.30f + 0.30f * x->bite_amt) * (vel - 0.5f);
-    v->brightness_v = jb_clamp(x->brightness + dbright_pitch + dbright_vel, 0.f, 1.f);
-
-    // Bloom → bandwidth
-    float baseBW = x->bandwidth;
-    float addBW  = (0.15f + 0.45f * x->bloom_amt) * jb_clamp(v->vel,0.f,1.f);
-    v->bandwidth_v = jb_clamp(baseBW + addBW, 0.f, 1.f);
+    // No extra stiffening; dispersion comes only from x->dispersion
+    v->stiffen_add = 0.f;
 
     // per-mode dispersion targets (ignore fundamental)
-    float total_disp = jb_clamp(x->dispersion + v->stiffen_add, 0.f, 1.f);
+    float total_disp = jb_clamp(x->dispersion, 0.f, 1.f);
     if (x->dispersion_last<0.f){ x->dispersion_last = -1.f; }
     for(int i=0;i<x->n_modes;i++){
         if (!x->base[i].active || i==0){ v->disp_target[i]=0.f; continue; }
@@ -430,7 +416,7 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
 
     jb_lock_fundamental_after_density(x, v);
 jb_apply_stretch(x, v);
-float md_amt = jb_clamp(x->micro_detune,0.f,1.f);
+    float md_amt = 0.f;
     float bw_amt = jb_clamp(v->bandwidth_v, 0.f, 1.f);
 
     for(int i=0;i<x->n_modes;i++){
@@ -998,10 +984,6 @@ static void juicy_bank_tilde_release(t_juicy_bank_tilde *x, t_floatarg f){ x->re
 static void juicy_bank_tilde_contact_sym(t_juicy_bank_tilde *x, t_floatarg f){ x->contact_sym=jb_clamp(f,-1.f,1.f); }
 
 // realism & misc
-static void juicy_bank_tilde_phase_random(t_juicy_bank_tilde *x, t_floatarg f){ x->phase_rand=jb_clamp(f,0.f,1.f); }
-static void juicy_bank_tilde_phase_debug(t_juicy_bank_tilde *x, t_floatarg on){ x->phase_debug=(on>0.f)?1:0; }
-static void juicy_bank_tilde_bandwidth(t_juicy_bank_tilde *x, t_floatarg f){ x->bandwidth=jb_clamp(f,0.f,1.f); }
-static void juicy_bank_tilde_micro_detune(t_juicy_bank_tilde *x, t_floatarg f){ x->micro_detune=jb_clamp(f,0.f,1.f); }
 // --- SINE param setters ---
 static void juicy_bank_tilde_sine_pitch(t_juicy_bank_tilde *x, t_floatarg f){
     x->sine_pitch = jb_clamp(f, 0.f, 1.f);
@@ -1029,7 +1011,6 @@ static void juicy_bank_tilde_seed(t_juicy_bank_tilde *x, t_floatarg f){
     jb_rng_seed(&x->rng, (unsigned int)((int)f*2654435761u));
     for(int i=0;i<x->n_modes;i++){
         x->base[i].disp_signature=(i==0)?0.f:jb_rng_bi(&x->rng);
-        x->base[i].micro_sig      =(i==0)?0.f:jb_rng_bi(&x->rng);
     }
     x->dispersion_last=x->dispersion;
 }
@@ -1040,12 +1021,6 @@ static void juicy_bank_tilde_dispersion_reroll(t_juicy_bank_tilde *x){
 }
 
 // BEHAVIOR amounts
-static void juicy_bank_tilde_stiffen(t_juicy_bank_tilde *x, t_floatarg f){ x->stiffen_amt=jb_clamp(f,0.f,1.f); }
-static void juicy_bank_tilde_shortscale(t_juicy_bank_tilde *x, t_floatarg f){ x->shortscale_amt=jb_clamp(f,0.f,1.f); }
-static void juicy_bank_tilde_linger(t_juicy_bank_tilde *x, t_floatarg f){ x->linger_amt=jb_clamp(f,0.f,1.f); }
-static void juicy_bank_tilde_tilt(t_juicy_bank_tilde *x, t_floatarg f){ x->tilt_amt=jb_clamp(f,0.f,1.f); }
-static void juicy_bank_tilde_bite(t_juicy_bank_tilde *x, t_floatarg f){ x->bite_amt=jb_clamp(f,0.f,1.f); }
-static void juicy_bank_tilde_bloom(t_juicy_bank_tilde *x, t_floatarg f){ x->bloom_amt=jb_clamp(f,0.f,1.f); }
 static void juicy_bank_tilde_crossring(t_juicy_bank_tilde *x, t_floatarg f){ x->crossring_amt=jb_clamp(f,0.f,1.f); }
 
 // Notes/poly (non-voice-addressed)
@@ -1184,7 +1159,6 @@ static void jb_apply_default_saw(t_juicy_bank_tilde *x){
         x->base[i].pan = 0.f;
         x->base[i].keytrack = 1;
         x->base[i].disp_signature = 0.f;
-        x->base[i].micro_sig      = 0.f;
     }
     // sensible body defaults
     x->damping = 0.f; x->brightness = 0.5f; x->position = 0.f; x->damp_broad=0.f; x->damp_point=0.f;
@@ -1217,8 +1191,6 @@ static void *juicy_bank_tilde_new(void){
 
         x->warp = 0.f;
 // realism defaults
-    x->phase_rand=1.f; x->phase_debug=0;
-    x->bandwidth=0.1f; x->micro_detune=0.1f;
     x->sine_pitch=0.f; x->sine_depth=0.f; x->sine_phase=0.f;
 
     // FEEDBACK defaults
@@ -1228,7 +1200,7 @@ static void *juicy_bank_tilde_new(void){
     x->fb_timer = 0.f;
     x->fb_fmax  = 0.5f;
     x->basef0_ref=261.626f; // C4
-    x->stiffen_amt=x->shortscale_amt=x->linger_amt=x->tilt_amt=x->bite_amt=x->bloom_amt=x->crossring_amt=0.f;
+    x->crossring_amt=0.f;
 
     x->max_voices = JB_MAX_VOICES;
     for(int v=0; v<JB_MAX_VOICES; ++v){
@@ -1428,13 +1400,6 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_snapshot_undo
     CLASS_MAINSIGNALIN(juicy_bank_tilde_class, t_juicy_bank_tilde, f_dummy);
 
     // BEHAVIOR
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_stiffen, gensym("stiffen"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_shortscale, gensym("shortscale"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_shortscale, gensym("shortscle"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_linger, gensym("linger"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_tilt, gensym("tilt"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bite, gensym("bite"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bloom, gensym("bloom"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_crossring, gensym("crossring"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gensym("release"), A_DEFFLOAT, 0);
 
@@ -1487,10 +1452,6 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gens
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_dispersion_reroll, gensym("dispersion_reroll"), 0);
 
     // realism & misc
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_phase_random, gensym("phase_random"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_phase_debug, gensym("phase_debug"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bandwidth, gensym("bandwidth"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_micro_detune, gensym("micro_detune"), A_DEFFLOAT, 0);
 
     // notes/poly (non-voice-specific)
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_note, gensym("note"), A_DEFFLOAT, A_DEFFLOAT, 0);
