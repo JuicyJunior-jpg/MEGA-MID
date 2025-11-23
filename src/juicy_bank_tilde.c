@@ -63,6 +63,7 @@ typedef struct {
 
     // signatures (random)
     float disp_signature;
+    float micro_sig;
 } jb_mode_base_t;
 
 typedef struct {
@@ -154,11 +155,12 @@ typedef struct _juicy_bank_tilde {
 float damping, brightness, position; float damp_broad, damp_point;
     float density_amt; jb_density_mode density_mode;
     float dispersion, dispersion_last;
-    float spacing; // NEW — 0..1
     float aniso, aniso_eps;
-    float contact_amt, contact_sym;
 
     // realism/misc
+    float phase_rand; int phase_debug;
+    float bandwidth;        // base for Bloom
+    float micro_detune;     // base for micro detune
     float basef0_ref;
 
     // FEEDBACK params (global controls)
@@ -176,7 +178,7 @@ float damping, brightness, position; float damp_broad, damp_point;
 
 
     // BEHAVIOR depths
-    float crossring_amt;
+    float stiffen_amt, shortscale_amt, linger_amt, tilt_amt, bite_amt, bloom_amt, crossring_amt;
 
     // voices
     int   max_voices;
@@ -206,8 +208,8 @@ float damping, brightness, position; float damp_broad, damp_point;
     t_inlet *in_crossring;
     
         t_inlet *in_release;
-// Body (now includes spacing between dispersion & anisotropy)
-    t_inlet *in_damping, *in_damp_broad, *in_damp_point, *in_brightness, *in_position, *in_density, *in_stretch, *in_warp, *in_dispersion, *in_spacing, *in_aniso, *in_contact;
+// Body controls (damping, brightness, position, density, dispersion, anisotropy)
+    t_inlet *in_damping, *in_damp_broad, *in_damp_point, *in_brightness, *in_position, *in_density, *in_stretch, *in_warp, *in_dispersion, *in_aniso;
     // Individual
     t_inlet *in_index, *in_ratio, *in_gain, *in_attack, *in_decay, *in_curve, *in_pan, *in_keytrack;
 
@@ -252,7 +254,7 @@ static inline float jb_curve_shape_gain(float u, float curve){
 // Only keytracked modes are spread by density; absolute-Hz modes keep base_ratio.
 static void jb_apply_density(const t_juicy_bank_tilde *x, jb_voice_t *v){
     float s_amt = 1.f + 0.5f * jb_clamp(x->density_amt, -1.f, 1.f);
-    float bias  = jb_clamp(x->spacing, 0.f, 1.f); // 0 = fundamental pivot, 1 = neighbor mapping
+    float bias  = 1.f; // fixed: neighbor mapping (per-resonator pivot)
 
     int idxs[JB_MAX_MODES], count=0;
     for(int i=0;i<x->n_modes;i++){
@@ -312,21 +314,31 @@ static void jb_project_behavior_into_voice(t_juicy_bank_tilde *x, jb_voice_t *v)
     if (xfac < 1e-6f) xfac = 1e-6f;
     v->pitch_x = xfac;
 
-    // Neutral decay: no pitch/velocity curvature
-    v->decay_pitch_mul = 1.f;
-    v->decay_vel_mul   = 1.f;
+    // Stiffen → extra dispersion depth
+    float k_disp = (0.02f + 0.10f * jb_clamp(x->stiffen_amt,0.f,1.f));
+    float alpha  = 0.60f + 0.20f * x->stiffen_amt;
+    v->stiffen_add = k_disp * powf(xfac, alpha);
 
-    // Brightness: directly from global brightness control
-    v->brightness_v = jb_clamp(x->brightness, 0.f, 1.f);
+    // Shortscale → decays shorten with pitch
+    float beta = 0.40f + 0.50f * x->shortscale_amt;
+    v->decay_pitch_mul = powf(xfac, -beta);
 
-    // Bandwidth / twin modes disabled (always off)
-    v->bandwidth_v = 0.f;
+    // Linger → velocity extends decays
+    v->decay_vel_mul = (1.f + (0.30f + 1.20f * x->linger_amt) * jb_clamp(v->vel,0.f,1.f));
 
-    // No extra stiffening; dispersion comes only from x->dispersion
-    v->stiffen_add = 0.f;
+    // Tilt + Bite → brightness (0.5 = neutral; velocity is centered around 0.5)
+    float vel           = jb_clamp(v->vel,0.f,1.f);
+    float dbright_pitch = (0.02f + 0.08f * x->tilt_amt) * log2f(xfac);
+    float dbright_vel   = (0.30f + 0.30f * x->bite_amt) * (vel - 0.5f);
+    v->brightness_v = jb_clamp(x->brightness + dbright_pitch + dbright_vel, 0.f, 1.f);
+
+    // Bloom → bandwidth
+    float baseBW = x->bandwidth;
+    float addBW  = (0.15f + 0.45f * x->bloom_amt) * jb_clamp(v->vel,0.f,1.f);
+    v->bandwidth_v = jb_clamp(baseBW + addBW, 0.f, 1.f);
 
     // per-mode dispersion targets (ignore fundamental)
-    float total_disp = jb_clamp(x->dispersion, 0.f, 1.f);
+    float total_disp = jb_clamp(x->dispersion + v->stiffen_add, 0.f, 1.f);
     if (x->dispersion_last<0.f){ x->dispersion_last = -1.f; }
     for(int i=0;i<x->n_modes;i++){
         if (!x->base[i].active || i==0){ v->disp_target[i]=0.f; continue; }
@@ -416,7 +428,7 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
 
     jb_lock_fundamental_after_density(x, v);
 jb_apply_stretch(x, v);
-    float md_amt = 0.f;
+float md_amt = jb_clamp(x->micro_detune,0.f,1.f);
     float bw_amt = jb_clamp(v->bandwidth_v, 0.f, 1.f);
 
     for(int i=0;i<x->n_modes;i++){
@@ -433,7 +445,7 @@ jb_apply_stretch(x, v);
         float ratio_base = md->ratio_now + v->disp_offset[i];
         if (x->dispersion < 0.f){ float a = jb_clamp(-x->dispersion, 0.f, 1.f); float nearest = roundf(ratio_base); ratio_base = (1.f - a)*ratio_base + a*nearest; }
 
-        // spacing inlet repurposed as density pivot bias; no harmonic stepping here.
+        // density pivot bias now fixed to neighbor mapping (per-resonator); no harmonic stepping here.
 // micro detune per-ear (except fundamental)
         float ratioL = ratio_base;
         float ratioR = ratio_base;
@@ -530,7 +542,7 @@ static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
         if(!x->base[i].active){ v->m[i].gain_now=0.f; continue; }
 
         float ratio = v->m[i].ratio_now + v->disp_offset[i];
-        // spacing already applied upstream (coeffs), but ratio_rel here only for weighting functions:
+        // ratio_rel here only for weighting functions (brightness, anisotropy, etc.):
         float ratio_rel = x->base[i].keytrack ? ratio : ((v->f0>0.f)? (ratio / v->f0) : ratio);
 
         float g = x->base[i].base_gain * jb_bright_gain(ratio_rel, v->brightness_v);
@@ -975,15 +987,15 @@ static void juicy_bank_tilde_position(t_juicy_bank_tilde *x, t_floatarg f){ x->p
 static void juicy_bank_tilde_density(t_juicy_bank_tilde *x, t_floatarg f){ x->density_amt=jb_clamp(f,-1.f,1.f); }
 static void juicy_bank_tilde_density_pivot(t_juicy_bank_tilde *x){ x->density_mode=DENSITY_PIVOT; }
 static void juicy_bank_tilde_density_individual(t_juicy_bank_tilde *x){ x->density_mode=DENSITY_INDIV; }
-static void juicy_bank_tilde_spacing(t_juicy_bank_tilde *x, t_floatarg f){ x->spacing=jb_clamp(f,0.f,1.f); } // NEW
 static void juicy_bank_tilde_anisotropy(t_juicy_bank_tilde *x, t_floatarg f){ x->aniso=jb_clamp(f,-1.f,1.f); }
 static void juicy_bank_tilde_aniso_eps(t_juicy_bank_tilde *x, t_floatarg f){ x->aniso_eps=jb_clamp(f,0.f,0.25f); }
-static void juicy_bank_tilde_contact(t_juicy_bank_tilde *x, t_floatarg f){ x->contact_amt=jb_clamp(f,0.f,1.f); }
-
 static void juicy_bank_tilde_release(t_juicy_bank_tilde *x, t_floatarg f){ x->release_amt = jb_clamp(f, 0.f, 1.f); }
-static void juicy_bank_tilde_contact_sym(t_juicy_bank_tilde *x, t_floatarg f){ x->contact_sym=jb_clamp(f,-1.f,1.f); }
 
 // realism & misc
+static void juicy_bank_tilde_phase_random(t_juicy_bank_tilde *x, t_floatarg f){ x->phase_rand=jb_clamp(f,0.f,1.f); }
+static void juicy_bank_tilde_phase_debug(t_juicy_bank_tilde *x, t_floatarg on){ x->phase_debug=(on>0.f)?1:0; }
+static void juicy_bank_tilde_bandwidth(t_juicy_bank_tilde *x, t_floatarg f){ x->bandwidth=jb_clamp(f,0.f,1.f); }
+static void juicy_bank_tilde_micro_detune(t_juicy_bank_tilde *x, t_floatarg f){ x->micro_detune=jb_clamp(f,0.f,1.f); }
 // --- SINE param setters ---
 static void juicy_bank_tilde_sine_pitch(t_juicy_bank_tilde *x, t_floatarg f){
     x->sine_pitch = jb_clamp(f, 0.f, 1.f);
@@ -1011,6 +1023,7 @@ static void juicy_bank_tilde_seed(t_juicy_bank_tilde *x, t_floatarg f){
     jb_rng_seed(&x->rng, (unsigned int)((int)f*2654435761u));
     for(int i=0;i<x->n_modes;i++){
         x->base[i].disp_signature=(i==0)?0.f:jb_rng_bi(&x->rng);
+        x->base[i].micro_sig      =(i==0)?0.f:jb_rng_bi(&x->rng);
     }
     x->dispersion_last=x->dispersion;
 }
@@ -1021,6 +1034,12 @@ static void juicy_bank_tilde_dispersion_reroll(t_juicy_bank_tilde *x){
 }
 
 // BEHAVIOR amounts
+static void juicy_bank_tilde_stiffen(t_juicy_bank_tilde *x, t_floatarg f){ x->stiffen_amt=jb_clamp(f,0.f,1.f); }
+static void juicy_bank_tilde_shortscale(t_juicy_bank_tilde *x, t_floatarg f){ x->shortscale_amt=jb_clamp(f,0.f,1.f); }
+static void juicy_bank_tilde_linger(t_juicy_bank_tilde *x, t_floatarg f){ x->linger_amt=jb_clamp(f,0.f,1.f); }
+static void juicy_bank_tilde_tilt(t_juicy_bank_tilde *x, t_floatarg f){ x->tilt_amt=jb_clamp(f,0.f,1.f); }
+static void juicy_bank_tilde_bite(t_juicy_bank_tilde *x, t_floatarg f){ x->bite_amt=jb_clamp(f,0.f,1.f); }
+static void juicy_bank_tilde_bloom(t_juicy_bank_tilde *x, t_floatarg f){ x->bloom_amt=jb_clamp(f,0.f,1.f); }
 static void juicy_bank_tilde_crossring(t_juicy_bank_tilde *x, t_floatarg f){ x->crossring_amt=jb_clamp(f,0.f,1.f); }
 
 // Notes/poly (non-voice-addressed)
@@ -1095,8 +1114,8 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
 
     inlet_free(x->in_damping); inlet_free(x->in_damp_broad); inlet_free(x->in_damp_point); inlet_free(x->in_brightness); inlet_free(x->in_position);
     inlet_free(x->in_density);
-    inlet_free(x->in_warp); inlet_free(x->in_dispersion); inlet_free(x->in_spacing);
-    inlet_free(x->in_aniso); inlet_free(x->in_contact);
+    inlet_free(x->in_warp); inlet_free(x->in_dispersion);
+    inlet_free(x->in_aniso);
 
             inlet_free(x->in_stretch);
 inlet_free(x->in_sine_pitch);
@@ -1159,14 +1178,13 @@ static void jb_apply_default_saw(t_juicy_bank_tilde *x){
         x->base[i].pan = 0.f;
         x->base[i].keytrack = 1;
         x->base[i].disp_signature = 0.f;
+        x->base[i].micro_sig      = 0.f;
     }
     // sensible body defaults
     x->damping = 0.f; x->brightness = 0.5f; x->position = 0.f; x->damp_broad=0.f; x->damp_point=0.f;
     x->density_amt = 0.f; x->density_mode = DENSITY_PIVOT;
     x->dispersion = 0.f; x->dispersion_last = -1.f;
-    x->spacing = 0.f;
     x->aniso = 0.f; x->aniso_eps = 0.02f;
-    x->contact_amt=0.f; x->contact_sym=0.f;
     x->release_amt = 1.f;
 }
 
@@ -1182,15 +1200,15 @@ static void *juicy_bank_tilde_new(void){
     x->damping=0.f; x->brightness=0.5f; x->position=0.f;
     x->density_amt=0.f; x->density_mode=DENSITY_PIVOT;
     x->dispersion=0.f; x->dispersion_last=-1.f;
-    x->spacing=0.f; // NEW
     x->aniso=0.f; x->aniso_eps=0.02f;
-    x->contact_amt=0.f; x->contact_sym=0.f;
 
     // Stretch default
     x->stretch = 0.f;
 
         x->warp = 0.f;
 // realism defaults
+    x->phase_rand=1.f; x->phase_debug=0;
+    x->bandwidth=0.1f; x->micro_detune=0.1f;
     x->sine_pitch=0.f; x->sine_depth=0.f; x->sine_phase=0.f;
 
     // FEEDBACK defaults
@@ -1200,7 +1218,7 @@ static void *juicy_bank_tilde_new(void){
     x->fb_timer = 0.f;
     x->fb_fmax  = 0.5f;
     x->basef0_ref=261.626f; // C4
-    x->crossring_amt=0.f;
+    x->stiffen_amt=x->shortscale_amt=x->linger_amt=x->tilt_amt=x->bite_amt=x->bloom_amt=x->crossring_amt=0.f;
 
     x->max_voices = JB_MAX_VOICES;
     for(int v=0; v<JB_MAX_VOICES; ++v){
@@ -1230,7 +1248,7 @@ static void *juicy_bank_tilde_new(void){
     x->in_crossring  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("crossring"));
     x->in_release    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("release")); // release 0..1
 
-    // Body (order: damping, brightness, position, density, dispersion, spacing, anisotropy, contact)
+    // Body (order: damping, brightness, position, density, dispersion, anisotropy)
     x->in_damping    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("damping"));
     x->in_damp_broad= inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("damp_broad"));
     x->in_damp_point= inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("damp_point"));
@@ -1240,9 +1258,7 @@ static void *juicy_bank_tilde_new(void){
         x->in_stretch    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("stretch"));
     x->in_warp       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("warp"));
 x->in_dispersion = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("dispersion"));
-    x->in_spacing    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("spacing"));   // NEW
     x->in_aniso      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("anisotropy"));
-    x->in_contact    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("contact"));
 // SINE controls
     x->in_sine_pitch = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_pitch"));
     x->in_sine_depth = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_depth"));
@@ -1400,6 +1416,13 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_snapshot_undo
     CLASS_MAINSIGNALIN(juicy_bank_tilde_class, t_juicy_bank_tilde, f_dummy);
 
     // BEHAVIOR
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_stiffen, gensym("stiffen"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_shortscale, gensym("shortscale"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_shortscale, gensym("shortscle"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_linger, gensym("linger"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_tilt, gensym("tilt"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bite, gensym("bite"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bloom, gensym("bloom"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_crossring, gensym("crossring"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gensym("release"), A_DEFFLOAT, 0);
 
@@ -1413,11 +1436,8 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_snapshot_undo
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_density_pivot, gensym("density_pivot"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_density_individual, gensym("density_individual"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_dispersion, gensym("dispersion"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_spacing, gensym("spacing"), A_DEFFLOAT, 0); // NEW
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_anisotropy, gensym("anisotropy"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_aniso_eps, gensym("aniso_epsilon"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_contact, gensym("contact"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_contact_sym, gensym("contact_symmetry"), A_DEFFLOAT, 0);
 
     
     
@@ -1452,6 +1472,10 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gens
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_dispersion_reroll, gensym("dispersion_reroll"), 0);
 
     // realism & misc
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_phase_random, gensym("phase_random"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_phase_debug, gensym("phase_debug"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bandwidth, gensym("bandwidth"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_micro_detune, gensym("micro_detune"), A_DEFFLOAT, 0);
 
     // notes/poly (non-voice-specific)
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_note, gensym("note"), A_DEFFLOAT, A_DEFFLOAT, 0);
