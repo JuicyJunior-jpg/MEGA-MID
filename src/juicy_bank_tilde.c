@@ -882,9 +882,16 @@ float vsumL = 0.f, vsumR = 0.f; // this sample's voice sum
                 float tau = 0.02f + 4.98f * jb_clamp(x->release_amt, 0.f, 1.f);
                 float a_rel = expf(-1.0f / (x->sr * tau));
                 v->rel_env *= a_rel;
-                if (v->rel_env < 1e-5f) { v->rel_env = 0.f; v->state = V_IDLE; }
-            } else {
+                if (v->rel_env < 1e-5f) {
+                    v->rel_env = 0.f;
+                    v->state   = V_IDLE;
+                }
+            } else if (v->state == V_HELD) {
+                // fully open envelope while key is held
                 v->rel_env = 1.f;
+            } else {
+                // idle voices stay at 0 to avoid re-opening residual ring
+                v->rel_env = 0.f;
             }
 
         } // end samples
@@ -1377,13 +1384,22 @@ static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
 
 
 // --- DAMPER bake into base_decay_ms ---
+// mirror jb_update_voice_coeffs damping logic onto the stored T60
         float k_mode = (x->n_modes>1)? ((float)i/(float)(x->n_modes-1)) : 0.f;
         float dx = fabsf(k_mode - p); if (dx > 0.5f) dx = 1.f - dx; // circular distance
         float wloc = expf(-0.5f * (dx*dx) / (sigma*sigma)); // 0..1
-        float local = d_amt_global * wloc;                   // -1..1 * 0..1
-        float mul = (1.f - local);                           // >0
-        if (mul < 1e-4f) mul = 1e-4f;
-        x->base[i].base_decay_ms *= mul;
+        float d_amt = d_amt_global * wloc;                  // local -1..1
+        // convert current base decay to seconds and apply same mapping as runtime
+        float T60 = jb_clamp(x->base[i].base_decay_ms, 0.f, 1e7f) * 0.001f;
+        if (d_amt >= 0.f){
+            T60 *= (1.f - d_amt);
+        } else {
+            float Dneg = -d_amt;
+            float ceiling = JB_MAX_DECAY_S;
+            T60 = T60 + Dneg * (ceiling - T60);
+            if (T60 > ceiling) T60 = ceiling;
+        }
+        x->base[i].base_decay_ms = T60 * 1000.f;
         if (x->base[i].base_decay_ms < 0.f) x->base[i].base_decay_ms = 0.f;
     }
 
