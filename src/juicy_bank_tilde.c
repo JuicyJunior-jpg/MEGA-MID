@@ -253,53 +253,75 @@ static inline float jb_curve_shape_gain(float u, float curve){
 // ---------- density mapping ----------
 // Only keytracked modes are spread by density; absolute-Hz modes keep base_ratio.
 static void jb_apply_density(const t_juicy_bank_tilde *x, jb_voice_t *v){
-    float s_amt = 1.f + 0.5f * jb_clamp(x->density_amt, -1.f, 1.f);
-    float bias  = 1.f; // fixed: neighbor mapping (per-resonator pivot)
+    // New density mapping:
+    //  • Only keytracked, active modes are affected; absolute-Hz modes keep base_ratio.
+    //  • density_amt is interpreted in "harmonic gap units":
+    //      0   -> gap = 1  (1x, 2x, 3x, ... : normal harmonic spacing)
+    //      1   -> gap = 2  (1x, 3x, 5x, ... : every other harmonic)
+    //      2   -> gap = 3  (1x, 4x, 7x, ... : skipping 2 harmonics, etc.)
+    //     -1   -> gap = 0  (all keytracked modes collapse onto the fundamental)
+    //  • Negative side is clamped to -1, positive side is unbounded.
+    //
+    // 1. Collect keytracked modes, keep absolute-Hz modes unchanged.
+    float dens = x->density_amt;
+    if (dens < -1.f)
+        dens = -1.f;
 
-    int idxs[JB_MAX_MODES], count=0;
-    for(int i=0;i<x->n_modes;i++){
-        if(x->base[i].active && x->base[i].keytrack) idxs[count++]=i;
-        else v->m[i].ratio_now = x->base[i].base_ratio;
-    }
-    if(count==0) return;
-
-    for(int k=1;k<count;k++){
-        int id=idxs[k], j=k;
-        while(j>0 && x->base[idxs[j-1]].base_ratio > x->base[id].base_ratio){ idxs[j]=idxs[j-1]; j--; }
-        idxs[j]=id;
-    }
-
-    float pivot_map[JB_MAX_MODES];
-    float neigh_map[JB_MAX_MODES];
-
-    int fid=-1; float best=1e9f;
-    for(int i=0;i<count;i++){ int id=idxs[i]; float d=fabsf(x->base[id].base_ratio-1.f); if(d<best){best=d; fid=id;} }
-    float r_pivot = (fid>=0) ? x->base[fid].base_ratio : 1.f;
-    for(int i=0;i<count;i++){
-        int m=idxs[i];
-        if(m==fid) pivot_map[i] = x->base[m].base_ratio;
-        else pivot_map[i] = r_pivot + (x->base[m].base_ratio - r_pivot) * s_amt;
-    }
-
-    for(int j=0;j<count;j++){
-        int i=idxs[j];
-        if(j==0) neigh_map[j] = x->base[i].base_ratio;
-        else {
-            int prev=idxs[j-1];
-            float gap=(x->base[i].base_ratio - x->base[prev].base_ratio) * s_amt;
-            neigh_map[j] = neigh_map[j-1] + gap;
+    int idxs[JB_MAX_MODES];
+    int count = 0;
+    for (int i = 0; i < x->n_modes; ++i){
+        if (x->base[i].active && x->base[i].keytrack){
+            idxs[count++] = i;
+        } else {
+            // absolute-Hz or inactive modes: keep their base ratio
+            v->m[i].ratio_now = x->base[i].base_ratio;
         }
     }
+    if (count == 0)
+        return;
 
-    for(int j=0;j<count;j++){
-        int i=idxs[j];
-        float r = (1.f - bias) * pivot_map[j] + bias * neigh_map[j];
-        v->m[i].ratio_now = r;
+    // 2. Sort keytracked modes by their base_ratio so we can apply an ordered gap.
+    for (int k = 1; k < count; ++k){
+        int id = idxs[k];
+        int j  = k;
+        while (j > 0 && x->base[idxs[j-1]].base_ratio > x->base[id].base_ratio){
+            idxs[j] = idxs[j-1];
+            --j;
+        }
+        idxs[j] = id;
     }
 
+    // 3. Find the "fundamental" among keytracked modes: the one closest to ratio = 1.
+    int   pivot_j = 0;
+    float best    = 1e9f;
+    for (int j = 0; j < count; ++j){
+        int   id = idxs[j];
+        float d  = fabsf(x->base[id].base_ratio - 1.f);
+        if (d < best){
+            best    = d;
+            pivot_j = j;
+        }
+    }
+    int pivot_id = idxs[pivot_j];
+    float r_pivot = x->base[pivot_id].base_ratio;
+
+    // 4. Map density to a harmonic gap.
+    //    1 whole unit of density corresponds to 1 whole additional integer gap.
+    //    gap = 1 + dens, clamped so it never goes negative.
+    float gap = 1.f + dens;
+    if (gap < 0.f)
+        gap = 0.f;
+
+    // 5. Write new ratios: equally spaced by "gap" around the pivot.
+    for (int j = 0; j < count; ++j){
+        int id   = idxs[j];
+        int step = j - pivot_j;            // 0 at pivot (fundamental)
+        float r  = r_pivot + gap * (float)step;
+        if (r < 0.01f)
+            r = 0.01f;
+        v->m[id].ratio_now = r;
+    }
 }
-
-
 // --- Fundamental lock: keep mode 0 at exact x1 if keytracked ---
 static void jb_lock_fundamental_after_density(const t_juicy_bank_tilde *x, jb_voice_t *v){
     if (x->n_modes > 0 && x->base[0].keytrack){
@@ -986,7 +1008,16 @@ static void juicy_bank_tilde_damp_point(t_juicy_bank_tilde *x, t_floatarg f){ x-
 static void juicy_bank_tilde_damping(t_juicy_bank_tilde *x, t_floatarg f){ x->damping=jb_clamp(f,-1.f,1.f); }
 static void juicy_bank_tilde_brightness(t_juicy_bank_tilde *x, t_floatarg f){ x->brightness=jb_clamp(f,0.f,1.f); }
 static void juicy_bank_tilde_position(t_juicy_bank_tilde *x, t_floatarg f){ x->position=(f<=0.f)?0.f:jb_clamp(f,0.f,1.f); }
-static void juicy_bank_tilde_density(t_juicy_bank_tilde *x, t_floatarg f){ x->density_amt=jb_clamp(f,-1.f,1.f); }
+static void juicy_bank_tilde_density(t_juicy_bank_tilde *x, t_floatarg f){
+    // Interpret density as "harmonic gap units":
+    //   0 -> 1x spacing, 1 -> 2x spacing, 2 -> 3x spacing, ...
+    // Negative side is limited to -1 (one whole-number gap less, i.e. gap cannot go below 0).
+    float v = (float)f;
+    if (v < -1.f)
+        v = -1.f;
+    x->density_amt = v;
+}
+
 static void juicy_bank_tilde_density_pivot(t_juicy_bank_tilde *x){ x->density_mode=DENSITY_PIVOT; }
 static void juicy_bank_tilde_density_individual(t_juicy_bank_tilde *x){ x->density_mode=DENSITY_INDIV; }
 static void juicy_bank_tilde_anisotropy(t_juicy_bank_tilde *x, t_floatarg f){ x->aniso=jb_clamp(f,-1.f,1.f); }
