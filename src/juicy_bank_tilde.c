@@ -431,6 +431,15 @@ static void jb_apply_stretch(const t_juicy_bank_tilde *x, jb_voice_t *v){
             bias = 1.f - powf(1.f - t, 1.f + alpha * (-w));
         }
 
+        float expo = 1.f + k * bias;
+        if (expo < 0.1f) expo = 0.1f;
+        if (expo > 3.0f) expo = 3.0f;
+        v->m[i].ratio_now = powf(r, expo);
+    }
+
+}
+
+
 static void jb_apply_offset(const t_juicy_bank_tilde *x, jb_voice_t *v){
     float amt = jb_clamp(x->offset_amt, -1.f, 1.f);
     if (amt == 0.f)
@@ -445,13 +454,6 @@ static void jb_apply_offset(const t_juicy_bank_tilde *x, jb_voice_t *v){
     }
 }
 
-        float expo = 1.f + k * bias;
-        if (expo < 0.1f) expo = 0.1f;
-        if (expo > 3.0f) expo = 3.0f;
-        v->m[i].ratio_now = powf(r, expo);
-    }
-
-}
 
 static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
     for(int i=0;i<x->n_modes;i++){ v->disp_offset[i] = v->disp_target[i]; }
