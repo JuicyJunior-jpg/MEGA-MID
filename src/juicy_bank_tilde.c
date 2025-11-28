@@ -219,10 +219,24 @@ float damping, brightness, position; float damp_broad, damp_point;
     float sine_depth;   // 0..1
     float sine_phase;   // 0..1 (wraps)
 
+    // --- LFO globals (for modulation matrix) ---
+    float lfo_shape;   // 1..4 (1=saw,2=square,3=sine,4=SH)
+    float lfo_rate;    // 1..20 Hz
+    float lfo_phase;   // 0..1
+    float lfo_index;   // 1 or 2 (selects which LFO)
+    float adsr_ms;     // ADSR length from exciter (ms)
+
     // inlets for SINE
     t_inlet *in_sine_pitch;
     t_inlet *in_sine_depth;
     t_inlet *in_sine_phase;
+
+    // --- LFO + ADSR inlets (for modulation matrix) ---
+    t_inlet *in_lfo_shape;
+    t_inlet *in_lfo_rate;
+    t_inlet *in_lfo_phase;
+    t_inlet *in_lfo_index;
+    t_inlet *in_adsr_ms;
 // --- SNAPSHOT (bake) undo buffer ---
 int _undo_valid;
 float _undo_base_gain[JB_MAX_MODES];
@@ -1059,7 +1073,32 @@ static void juicy_bank_tilde_sine_phase(t_juicy_bank_tilde *x, t_floatarg f){
     x->sine_phase = p;
 }
 
-
+// --- LFO + ADSR param setters (for modulation matrix) ---
+static void juicy_bank_tilde_lfo_shape(t_juicy_bank_tilde *x, t_floatarg f){
+    int s = (int)floorf(f + 0.5f);
+    if (s < 1) s = 1;
+    if (s > 4) s = 4;
+    x->lfo_shape = (float)s;
+}
+static void juicy_bank_tilde_lfo_rate(t_juicy_bank_tilde *x, t_floatarg f){
+    float r = jb_clamp(f, 1.f, 20.f);
+    x->lfo_rate = r;
+}
+static void juicy_bank_tilde_lfo_phase(t_juicy_bank_tilde *x, t_floatarg f){
+    float p = f - floorf(f);
+    if (p < 0.f) p += 1.f;
+    x->lfo_phase = p;
+}
+static void juicy_bank_tilde_lfo_index(t_juicy_bank_tilde *x, t_floatarg f){
+    int idx = (int)floorf(f + 0.5f);
+    if (idx < 1) idx = 1;
+    if (idx > 2) idx = 2;
+    x->lfo_index = (float)idx;
+}
+static void juicy_bank_tilde_adsr_ms(t_juicy_bank_tilde *x, t_floatarg f){
+    float v = (f < 0.f) ? 0.f : f;
+    x->adsr_ms = v;
+}
 
 static void juicy_bank_tilde_offset(t_juicy_bank_tilde *x, t_floatarg f){
     x->offset_amt = jb_clamp(f, -1.f, 1.f);
@@ -1270,6 +1309,13 @@ static void *juicy_bank_tilde_new(void){
     x->bandwidth=0.1f; x->micro_detune=0.1f;
     x->sine_pitch=0.f; x->sine_depth=0.f; x->sine_phase=0.f;
 
+    // LFO + ADSR defaults
+    x->lfo_shape = 1.f;   // default: shape 1
+    x->lfo_rate  = 1.f;   // 1 Hz
+    x->lfo_phase = 0.f;   // start at phase 0
+    x->lfo_index = 1.f;   // LFO 1 by default
+    x->adsr_ms   = 0.f;   // until exciter reports something
+
     // FEEDBACK defaults
     x->fb_amt   = 0.f;
     x->fb_amt_z = 0.f;
@@ -1340,6 +1386,13 @@ static void *juicy_bank_tilde_new(void){
     x->in_curve      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("curve"));
     x->in_pan        = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("pan"));
     x->in_keytrack   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("keytrack"));
+
+    // LFO + ADSR inlets (for future modulation matrix)
+    x->in_lfo_shape = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("lfo_shape"));
+    x->in_lfo_rate  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("lfo_rate"));
+    x->in_lfo_phase = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("lfo_phase"));
+    x->in_lfo_index = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("lfo_index"));
+    x->in_adsr_ms   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("adsr_ms"));
 
     // Outs
     x->outL = outlet_new(&x->x_obj, &s_signal);
@@ -1520,6 +1573,13 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gens
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_sine_pitch, gensym("sine_pitch"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_sine_depth, gensym("sine_depth"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_sine_phase, gensym("sine_phase"), A_DEFFLOAT, 0);
+
+    // LFO + ADSR methods
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo_shape, gensym("lfo_shape"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo_rate,  gensym("lfo_rate"),  A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo_phase, gensym("lfo_phase"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo_index, gensym("lfo_index"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_adsr_ms,   gensym("adsr_ms"),   A_DEFFLOAT, 0);
 // INDIVIDUAL (per-mode)
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index, gensym("index"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_ratio_i, gensym("ratio"), A_DEFFLOAT, 0);
