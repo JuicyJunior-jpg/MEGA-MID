@@ -1616,6 +1616,7 @@ static void juicy_bank_tilde_anything(t_juicy_bank_tilde *x, t_symbol *s, int ar
         tgt_idx >= 0 && tgt_idx < JB_N_MODTGT){
         x->mod_matrix[src_idx][tgt_idx] = amt;
     }
+}
 
 static void juicy_bank_tilde_matrix(t_juicy_bank_tilde *x, t_symbol *s, int argc, t_atom *argv){
     (void)s;
