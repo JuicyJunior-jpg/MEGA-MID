@@ -906,8 +906,29 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         const float use_gate = (x->exciter_mode==0) ? ((v->state==V_HELD)?1.f:0.f) : 1.f;
         t_sample *srcL = (x->exciter_mode==0) ? inL : vinL[vix];
         t_sample *srcR = (x->exciter_mode==0) ? inR : vinR[vix];
-        // global modal bank master gain (0..1) from former fb_drive inlet
-        float bank_gain = jb_clamp(x->fb_drive, 0.f, 1.f);
+        // global modal bank master gain (0..1) from former fb_drive inlet,
+        // modulated per-voice by the modulation matrix target "master" (index 11).
+        float fb_base = jb_clamp(x->fb_drive, 0.f, 1.f);
+
+        // master_mod accumulates contributions from all sources mapped to "master".
+        // For now we only use LFO1 (source 3) and LFO2 (source 4).
+        float master_mod = 0.f;
+        master_mod += x->lfo_val[0] * x->mod_matrix[3][11]; // lfo1_to_master
+        master_mod += x->lfo_val[1] * x->mod_matrix[4][11]; // lfo2_to_master
+
+        // Clamp summed modulation to [-1,1] so it stays well-behaved even if multiple sources are active.
+        if (master_mod > 1.f) master_mod = 1.f;
+        else if (master_mod < -1.f) master_mod = -1.f;
+
+        // Map modulation into the 0..1 range around fb_base without overshooting:
+        //   master_mod > 0  -> move towards 1
+        //   master_mod < 0  -> move towards 0
+        float bank_gain;
+        if (master_mod >= 0.f){
+            bank_gain = fb_base + master_mod * (1.f - fb_base);
+        } else {
+            bank_gain = fb_base + master_mod * fb_base;
+        }
 
         // feedback filter & delay states per-voice/per-ear
         float hp_x1L = v->fb_hp_x1L, hp_y1L = v->fb_hp_y1L;
