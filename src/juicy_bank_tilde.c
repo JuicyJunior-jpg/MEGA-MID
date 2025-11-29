@@ -54,54 +54,7 @@ static inline float jb_rng_bi(jb_rng_t *r){ return 2.f * jb_rng_uni(r) - 1.f; }
 
 
 // Per-block LFO1 update for modulation matrix (block-rate)
-typedef struct _juicy_bank_tilde t_juicy_bank_tilde;
 
-static void jb_update_lfo_block(t_juicy_bank_tilde *x, int n){
-    if (x->sr <= 0.f || n <= 0){
-        x->lfo1_val = 0.f;
-        return;
-    }
-
-    float rate = jb_clamp(x->lfo_rate, 0.f, 20.f); // Hz
-    if (rate <= 0.f){
-        x->lfo1_val = 0.f;
-        return;
-    }
-
-    // advance phase in cycles
-    float phase = x->lfo1_phase;
-    float dcycles = rate * ((float)n / x->sr);
-    phase = jb_wrap01(phase + dcycles);
-    x->lfo1_phase = phase;
-
-    // base phase offset from user parameter (0..1)
-    float ph = jb_wrap01(phase + x->lfo_phase);
-
-    int shape = (int)floorf(x->lfo_shape + 0.5f);
-    if (shape < 1) shape = 1;
-    if (shape > 4) shape = 4;
-
-    float val = 0.f;
-    switch(shape){
-        case 1: // saw -1..1
-            val = 2.f * ph - 1.f;
-            break;
-        case 2: // square -1..1
-            val = (ph < 0.5f) ? 1.f : -1.f;
-            break;
-        case 3: // sine -1..1
-            val = sinf(2.f * (float)M_PI * ph);
-            break;
-        case 4: // sample & hold (noise)
-        default:
-            // new random each block, bipolar -1..1
-            x->lfo1_snh = jb_rng_bi(&x->rng);
-            val = x->lfo1_snh;
-            break;
-    }
-
-    x->lfo1_val = val;
-}
 static int jb_is_near_integer(float x, float eps){ float n=roundf(x); return fabsf(x-n)<=eps; }
 static inline float jb_midi_to_hz(float n){ return 440.f * powf(2.f, (n-69.f)/12.f); }
 
@@ -305,6 +258,54 @@ int _undo_valid;
 float _undo_base_gain[JB_MAX_MODES];
 float _undo_base_decay_ms[JB_MAX_MODES];
 } t_juicy_bank_tilde;
+
+static void jb_update_lfo_block(t_juicy_bank_tilde *x, int n){
+    if (x->sr <= 0.f || n <= 0){
+        x->lfo1_val = 0.f;
+        return;
+    }
+
+    float rate = jb_clamp(x->lfo_rate, 0.f, 20.f); // Hz
+    if (rate <= 0.f){
+        x->lfo1_val = 0.f;
+        return;
+    }
+
+    // advance phase in cycles
+    float phase = x->lfo1_phase;
+    float dcycles = rate * ((float)n / x->sr);
+    phase = jb_wrap01(phase + dcycles);
+    x->lfo1_phase = phase;
+
+    // base phase offset from user parameter (0..1)
+    float ph = jb_wrap01(phase + x->lfo_phase);
+
+    int shape = (int)floorf(x->lfo_shape + 0.5f);
+    if (shape < 1) shape = 1;
+    if (shape > 4) shape = 4;
+
+    float val = 0.f;
+    switch(shape){
+        case 1: // saw -1..1
+            val = 2.f * ph - 1.f;
+            break;
+        case 2: // square -1..1
+            val = (ph < 0.5f) ? 1.f : -1.f;
+            break;
+        case 3: // sine -1..1
+            val = sinf(2.f * (float)M_PI * ph);
+            break;
+        case 4: // sample & hold (noise)
+        default:
+            // new random each block, bipolar -1..1
+            x->lfo1_snh = jb_rng_bi(&x->rng);
+            val = x->lfo1_snh;
+            break;
+    }
+
+    x->lfo1_val = val;
+}
+
 
 // ---------- helpers ----------
 static float jb_bright_gain(float ratio_rel, float b){
