@@ -37,6 +37,7 @@
 #define JB_FB_MAX      4096
 #define JB_N_MODSRC    5
 #define JB_N_MODTGT    15
+#define JB_LFO_PITCH_RANGE  2.0f  /* semitone range for full-depth LFO->pitch */
 
 // ---------- utils ----------
 static inline float jb_clamp(float x, float lo, float hi){ return (x<lo)?lo:((x>hi)?hi:x); }
@@ -51,6 +52,54 @@ static inline unsigned int jb_rng_u32(jb_rng_t *r){ unsigned int x = r->s; x ^= 
 static inline float jb_rng_uni(jb_rng_t *r){ return (jb_rng_u32(r) >> 8) * (1.0f/16777216.0f); }
 static inline float jb_rng_bi(jb_rng_t *r){ return 2.f * jb_rng_uni(r) - 1.f; }
 
+
+// Per-block LFO1 update for modulation matrix (block-rate)
+static void jb_update_lfo_block(t_juicy_bank_tilde *x, int n){
+    if (x->sr <= 0.f || n <= 0){
+        x->lfo1_val = 0.f;
+        return;
+    }
+
+    float rate = jb_clamp(x->lfo_rate, 0.f, 20.f); // Hz
+    if (rate <= 0.f){
+        x->lfo1_val = 0.f;
+        return;
+    }
+
+    // advance phase in cycles
+    float phase = x->lfo1_phase;
+    float dcycles = rate * ((float)n / x->sr);
+    phase = jb_wrap01(phase + dcycles);
+    x->lfo1_phase = phase;
+
+    // base phase offset from user parameter (0..1)
+    float ph = jb_wrap01(phase + x->lfo_phase);
+
+    int shape = (int)floorf(x->lfo_shape + 0.5f);
+    if (shape < 1) shape = 1;
+    if (shape > 4) shape = 4;
+
+    float val = 0.f;
+    switch(shape){
+        case 1: // saw -1..1
+            val = 2.f * ph - 1.f;
+            break;
+        case 2: // square -1..1
+            val = (ph < 0.5f) ? 1.f : -1.f;
+            break;
+        case 3: // sine -1..1
+            val = sinf(2.f * (float)M_PI * ph);
+            break;
+        case 4: // sample & hold (noise)
+        default:
+            // new random each block, bipolar -1..1
+            x->lfo1_snh = jb_rng_bi(&x->rng);
+            val = x->lfo1_snh;
+            break;
+    }
+
+    x->lfo1_val = val;
+}
 static int jb_is_near_integer(float x, float eps){ float n=roundf(x); return fabsf(x-n)<=eps; }
 static inline float jb_midi_to_hz(float n){ return 440.f * powf(2.f, (n-69.f)/12.f); }
 
@@ -226,6 +275,11 @@ float damping, brightness, position; float damp_broad, damp_point;
     float lfo_rate;    // 1..20 Hz
     float lfo_phase;   // 0..1
     float lfo_index;   // 1 or 2 (selects which LFO)
+
+    // internal LFO1 state (phase in cycles, current output, and S&H memory)
+    float lfo1_phase;
+    float lfo1_val;
+    float lfo1_snh;
 
     // modulation matrix [modsource][target] amounts, -1..+1
     float mod_matrix[JB_N_MODSRC][JB_N_MODTGT];
@@ -484,7 +538,28 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
     jb_lock_fundamental_after_density(x, v);
     jb_apply_stretch(x, v);
     jb_apply_offset(x, v);
-float md_amt = jb_clamp(x->micro_detune,0.f,1.f);
+
+    // --- apply modulation-matrix pitch offsets (currently: LFO1 -> pitch only) ---
+    float f0_eff = v->f0;
+    if (f0_eff <= 0.f) f0_eff = x->basef0_ref;
+
+    // source index 3 = lfo1, target index 12 = pitch
+    const int src_lfo1 = 3;
+    const int tgt_pitch = 12;
+
+    float lfo_depth = x->mod_matrix[src_lfo1][tgt_pitch];
+    if (lfo_depth != 0.f){
+        // LFO value is already bipolar -1..1
+        float lfo_val = x->lfo1_val;
+        float m = lfo_depth * lfo_val; // -1..1
+        if (m != 0.f){
+            float semis = m * JB_LFO_PITCH_RANGE; // +/- JB_LFO_PITCH_RANGE semitones at full depth
+            float ratio = powf(2.f, semis / 12.f);
+            f0_eff *= ratio;
+        }
+    }
+
+    float md_amt = jb_clamp(x->micro_detune,0.f,1.f);
     float bw_amt = jb_clamp(v->bandwidth_v, 0.f, 1.f);
 
     for(int i=0;i<x->n_modes;i++){
@@ -509,8 +584,8 @@ float md_amt = jb_clamp(x->micro_detune,0.f,1.f);
         if (ratioL < 0.01f) ratioL = 0.01f;
         if (ratioR < 0.01f) ratioR = 0.01f;
 
-        float HzL = x->base[i].keytrack ? (v->f0 * ratioL) : ratioL;
-        float HzR = x->base[i].keytrack ? (v->f0 * ratioR) : ratioR;
+        float HzL = x->base[i].keytrack ? (f0_eff * ratioL) : ratioL;
+        float HzR = x->base[i].keytrack ? (f0_eff * ratioR) : ratioR;
         md->nyq_kill = 0;
         if (HzL >= 0.5f * x->sr || HzR >= 0.5f * x->sr){
             md->nyq_kill = 1;
@@ -774,7 +849,11 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     t_sample *outR=(t_sample *)(w[13]);
     int n=(int)(w[14]);
 
+    // clear outputs
     for(int i=0;i<n;i++){ outL[i]=0; outR[i]=0; }
+
+    // update block-rate LFO used by the modulation matrix
+    jb_update_lfo_block(x, n);
 
     // Per-block updates that don't change sample-phase
     for(int vix=0; vix<x->max_voices; ++vix){
@@ -1321,6 +1400,12 @@ static void *juicy_bank_tilde_new(void){
     x->lfo_rate  = 1.f;   // 1 Hz
     x->lfo_phase = 0.f;   // start at phase 0
     x->lfo_index = 1.f;   // LFO 1 by default
+
+    // internal LFO1 state
+    x->lfo1_phase = 0.f;
+    x->lfo1_val   = 0.f;
+    x->lfo1_snh   = 0.f;
+
     x->adsr_ms   = 0.f;   // until exciter reports something
 
     // clear modulation matrix
