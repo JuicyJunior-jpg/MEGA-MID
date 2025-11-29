@@ -1544,7 +1544,7 @@ static void *juicy_bank_tilde_new(void){
     x->in_lfo_phase = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("lfo_phase"));
     x->in_lfo_index = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("lfo_index"));
     // inlet for modulation-matrix configuration messages
-    x->in_matrix    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_anything, &s_anything);
+    x->in_matrix    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, gensym("matrix"), gensym("matrix"));
     x->in_adsr_ms   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("adsr_ms"));
 
     // Outs
@@ -1755,6 +1755,28 @@ static void juicy_bank_tilde_anything(t_juicy_bank_tilde *x, t_symbol *s, int ar
         x->mod_matrix[src_idx][tgt_idx] = amt;
     }
 }
+static void juicy_bank_tilde_matrix(t_juicy_bank_tilde *x, t_symbol *s, int argc, t_atom *argv){
+    (void)s;
+    if (argc < 2) return;
+    if (argv[0].a_type != A_SYMBOL) return;
+
+    t_symbol *route = atom_getsymbol(argv);
+    if (!route) return;
+
+    int src_idx = -1, tgt_idx = -1;
+    if (!jb_modmatrix_parse_selector(route->s_name, &src_idx, &tgt_idx))
+        return;
+
+    t_float amt = atom_getfloat(argv + 1);
+    if (amt < -1.f) amt = -1.f;
+    else if (amt > 1.f) amt = 1.f;
+
+    if (src_idx >= 0 && src_idx < JB_N_MODSRC &&
+        tgt_idx >= 0 && tgt_idx < JB_N_MODTGT){
+        x->mod_matrix[src_idx][tgt_idx] = amt;
+    }
+}
+
 void juicy_bank_tilde_setup(void){
     juicy_bank_tilde_class = class_new(gensym("juicy_bank~"),
                            (t_newmethod)juicy_bank_tilde_new,
@@ -1765,8 +1787,11 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_snapshot, gen
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_snapshot_undo, gensym("snapshot_undo"), 0);
     CLASS_MAINSIGNALIN(juicy_bank_tilde_class, t_juicy_bank_tilde, f_dummy);
 
-    // accept modulation-matrix configuration messages like "velocity_to_damping 0.5"
+    // accept modulation-matrix configuration messages in two formats:
+    // 1) Direct: "lfo1_to_pitch 0.5" (left inlet, via 'anything')
+    // 2) Tagged: "matrix lfo1_to_pitch 0.5" (matrix inlet, via 'matrix' method)
     class_addanything(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_anything);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_matrix, gensym("matrix"), A_GIMME, 0);
 
     // BEHAVIOR
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_stiffen, gensym("stiffen"), A_DEFFLOAT, 0);
