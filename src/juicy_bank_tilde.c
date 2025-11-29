@@ -54,6 +54,8 @@ static inline float jb_rng_bi(jb_rng_t *r){ return 2.f * jb_rng_uni(r) - 1.f; }
 
 
 // Per-block LFO1 update for modulation matrix (block-rate)
+typedef struct _juicy_bank_tilde t_juicy_bank_tilde;
+
 static void jb_update_lfo_block(t_juicy_bank_tilde *x, int n){
     if (x->sr <= 0.f || n <= 0){
         x->lfo1_val = 0.f;
