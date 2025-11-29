@@ -35,6 +35,8 @@
 #define JB_MAX_MODES    64
 #define JB_MAX_VOICES    4
 #define JB_FB_MAX      4096
+#define JB_N_MODSRC    5
+#define JB_N_MODTGT    15
 
 // ---------- utils ----------
 static inline float jb_clamp(float x, float lo, float hi){ return (x<lo)?lo:((x>hi)?hi:x); }
@@ -224,7 +226,11 @@ float damping, brightness, position; float damp_broad, damp_point;
     float lfo_rate;    // 1..20 Hz
     float lfo_phase;   // 0..1
     float lfo_index;   // 1 or 2 (selects which LFO)
-    float adsr_ms;     // ADSR length from exciter (ms)
+
+    // modulation matrix [modsource][target] amounts, -1..+1
+    float mod_matrix[JB_N_MODSRC][JB_N_MODTGT];
+
+    float adsr_ms;     // ADSR length from exciter (ms; legacy placeholder for now)
 
     // inlets for SINE
     t_inlet *in_sine_pitch;
@@ -236,6 +242,7 @@ float damping, brightness, position; float damp_broad, damp_point;
     t_inlet *in_lfo_rate;
     t_inlet *in_lfo_phase;
     t_inlet *in_lfo_index;
+    t_inlet *in_matrix;   // inlet for modulation-matrix messages (anything)
     t_inlet *in_adsr_ms;
 // --- SNAPSHOT (bake) undo buffer ---
 int _undo_valid;
@@ -1316,6 +1323,12 @@ static void *juicy_bank_tilde_new(void){
     x->lfo_index = 1.f;   // LFO 1 by default
     x->adsr_ms   = 0.f;   // until exciter reports something
 
+    // clear modulation matrix
+    for(int i=0;i<JB_N_MODSRC;i++)
+        for(int j=0;j<JB_N_MODTGT;j++)
+            x->mod_matrix[i][j] = 0.f;
+
+
     // FEEDBACK defaults
     x->fb_amt   = 0.f;
     x->fb_amt_z = 0.f;
@@ -1392,6 +1405,8 @@ static void *juicy_bank_tilde_new(void){
     x->in_lfo_rate  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("lfo_rate"));
     x->in_lfo_phase = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("lfo_phase"));
     x->in_lfo_index = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("lfo_index"));
+    // inlet for modulation-matrix configuration messages
+    x->in_matrix    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_anything, &s_anything);
     x->in_adsr_ms   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("adsr_ms"));
 
     // Outs
@@ -1528,6 +1543,80 @@ static void juicy_bank_tilde_snapshot_undo(t_juicy_bank_tilde *x){
     }
     x->_undo_valid = 0;
 }
+
+// -------------------------------------------------------------------------
+// Modulation matrix helpers: parse selectors like "velocity_to_damping"
+// -------------------------------------------------------------------------
+static int jb_modmatrix_parse_selector(const char *name, int *src_out, int *tgt_out){
+    if (!name) return 0;
+    const char *sep = strstr(name, "_to_");
+    if (!sep) return 0;
+
+    size_t src_len = (size_t)(sep - name);
+    size_t tgt_len = strlen(sep + 4);
+    if (src_len == 0 || tgt_len == 0) return 0;
+
+    char src[32];
+    char tgt[32];
+    if (src_len >= sizeof(src)) src_len = sizeof(src) - 1;
+    if (tgt_len >= sizeof(tgt)) tgt_len = sizeof(tgt) - 1;
+
+    memcpy(src, name, src_len);
+    src[src_len] = '\0';
+    memcpy(tgt, sep + 4, tgt_len);
+    tgt[tgt_len] = '\0';
+
+    int src_idx = -1;
+    int tgt_idx = -1;
+
+    // --- sources ---
+    if (!strcmp(src, "velocity"))      src_idx = 0;
+    else if (!strcmp(src, "pitch"))    src_idx = 1;
+    else if (!strcmp(src, "adsr"))     src_idx = 2;
+    else if (!strcmp(src, "lfo1"))     src_idx = 3;
+    else if (!strcmp(src, "lfo2"))     src_idx = 4;
+    else return 0;
+
+    // --- targets ---
+    if (!strcmp(tgt, "damping") || !strcmp(tgt, "damper"))              tgt_idx = 0;
+    else if (!strcmp(tgt, "broadness"))                                 tgt_idx = 1;
+    else if (!strcmp(tgt, "location"))                                  tgt_idx = 2;
+    else if (!strcmp(tgt, "brightness"))                                tgt_idx = 3;
+    else if (!strcmp(tgt, "position"))                                  tgt_idx = 4;
+    else if (!strcmp(tgt, "density"))                                   tgt_idx = 5;
+    else if (!strcmp(tgt, "stretch"))                                   tgt_idx = 6;
+    else if (!strcmp(tgt, "warp"))                                      tgt_idx = 7;
+    else if (!strcmp(tgt, "offset"))                                    tgt_idx = 8;
+    else if (!strcmp(tgt, "sinepattern") || !strcmp(tgt, "sine_pattern")) tgt_idx = 9;
+    else if (!strcmp(tgt, "sinephase")   || !strcmp(tgt, "sine_phase"))   tgt_idx = 10;
+    else if (!strcmp(tgt, "master"))                                    tgt_idx = 11;
+    else if (!strcmp(tgt, "pitch"))                                     tgt_idx = 12;
+    else if (!strcmp(tgt, "pan"))                                       tgt_idx = 13;
+    else if (!strcmp(tgt, "partials"))                                  tgt_idx = 14;
+    else return 0;
+
+    if (src_out) *src_out = src_idx;
+    if (tgt_out) *tgt_out = tgt_idx;
+    return 1;
+}
+
+// accept anything-style messages on the matrix inlet / left inlet
+// e.g. "velocity_to_damping 0.5" or "lfo1_to_brightness -0.25"
+static void juicy_bank_tilde_anything(t_juicy_bank_tilde *x, t_symbol *s, int argc, t_atom *argv){
+    if (!s) return;
+    int src_idx = -1, tgt_idx = -1;
+    if (!jb_modmatrix_parse_selector(s->s_name, &src_idx, &tgt_idx)) return;
+    if (argc < 1) return;
+
+    t_float amt = atom_getfloat(argv);
+    if (amt < -1.f) amt = -1.f;
+    else if (amt > 1.f) amt = 1.f;
+
+    if (src_idx >= 0 && src_idx < JB_N_MODSRC &&
+        tgt_idx >= 0 && tgt_idx < JB_N_MODTGT){
+        x->mod_matrix[src_idx][tgt_idx] = amt;
+    }
+}
 void juicy_bank_tilde_setup(void){
     juicy_bank_tilde_class = class_new(gensym("juicy_bank~"),
                            (t_newmethod)juicy_bank_tilde_new,
@@ -1537,6 +1626,9 @@ void juicy_bank_tilde_setup(void){
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_snapshot, gensym("snapshot"), 0);
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_snapshot_undo, gensym("snapshot_undo"), 0);
     CLASS_MAINSIGNALIN(juicy_bank_tilde_class, t_juicy_bank_tilde, f_dummy);
+
+    // accept modulation-matrix configuration messages like "velocity_to_damping 0.5"
+    class_addanything(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_anything);
 
     // BEHAVIOR
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_stiffen, gensym("stiffen"), A_DEFFLOAT, 0);
