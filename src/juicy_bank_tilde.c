@@ -37,7 +37,8 @@
 #define JB_FB_MAX      4096
 #define JB_N_MODSRC    5
 #define JB_N_MODTGT    15
-#define JB_LFO_PITCH_RANGE  2.0f  /* semitone range for full-depth LFO->pitch */
+#define JB_N_LFO       2
+#define JB_PITCH_MOD_SEMITONES  2.0f
 
 // ---------- utils ----------
 static inline float jb_clamp(float x, float lo, float hi){ return (x<lo)?lo:((x>hi)?hi:x); }
@@ -51,9 +52,6 @@ static inline void jb_rng_seed(jb_rng_t *r, unsigned int s){ if(!s) s=1; r->s = 
 static inline unsigned int jb_rng_u32(jb_rng_t *r){ unsigned int x = r->s; x ^= x << 13; x ^= x >> 17; x ^= x << 5; r->s = x; return x; }
 static inline float jb_rng_uni(jb_rng_t *r){ return (jb_rng_u32(r) >> 8) * (1.0f/16777216.0f); }
 static inline float jb_rng_bi(jb_rng_t *r){ return 2.f * jb_rng_uni(r) - 1.f; }
-
-
-// Per-block LFO1 update for modulation matrix (block-rate)
 
 static int jb_is_near_integer(float x, float eps){ float n=roundf(x); return fabsf(x-n)<=eps; }
 static inline float jb_midi_to_hz(float n){ return 440.f * powf(2.f, (n-69.f)/12.f); }
@@ -225,21 +223,28 @@ float damping, brightness, position; float damp_broad, damp_point;
     float sine_depth;   // 0..1
     float sine_phase;   // 0..1 (wraps)
 
-    // --- LFO globals (for modulation matrix) ---
+    // --- LFO globals (for modulation matrix UI) ---
+    // lfo_shape / lfo_rate / lfo_phase always reflect the *currently selected* LFO,
+    // as chosen by lfo_index (1 or 2). Per-LFO values live in the arrays below.
     float lfo_shape;   // 1..4 (1=saw,2=square,3=sine,4=SH)
     float lfo_rate;    // 1..20 Hz
     float lfo_phase;   // 0..1
     float lfo_index;   // 1 or 2 (selects which LFO)
 
-    // internal LFO1 state (phase in cycles, current output, and S&H memory)
-    float lfo1_phase;
-    float lfo1_val;
-    float lfo1_snh;
+    // per-LFO parameter storage
+    float lfo_shape_v[JB_N_LFO];
+    float lfo_rate_v[JB_N_LFO];
+    float lfo_phase_v[JB_N_LFO];
+
+    // per-LFO runtime state (phase in cycles, current output, and S&H memory)
+    float lfo_phase_state[JB_N_LFO];
+    float lfo_val[JB_N_LFO];
+    float lfo_snh[JB_N_LFO];
 
     // modulation matrix [modsource][target] amounts, -1..+1
     float mod_matrix[JB_N_MODSRC][JB_N_MODTGT];
 
-    float adsr_ms;     // ADSR length from exciter (ms; legacy placeholder for now)
+    float adsr_ms;     // ADSR envelope (0..1) from exciter (legacy name)
 
     // inlets for SINE
     t_inlet *in_sine_pitch;
@@ -259,51 +264,66 @@ float _undo_base_gain[JB_MAX_MODES];
 float _undo_base_decay_ms[JB_MAX_MODES];
 } t_juicy_bank_tilde;
 
-static void jb_update_lfo_block(t_juicy_bank_tilde *x, int n){
+// ---------- LFO runtime update (per block) ----------
+// Updates both LFOs for this block. Outputs live in x->lfo_val[0..JB_N_LFO-1],
+// normalised to -1..+1 for all shapes.
+static void jb_update_lfos_block(t_juicy_bank_tilde *x, int n){
     if (x->sr <= 0.f || n <= 0){
-        x->lfo1_val = 0.f;
+        for (int li = 0; li < JB_N_LFO; ++li){
+            x->lfo_val[li] = 0.f;
+        }
         return;
     }
 
-    float rate = jb_clamp(x->lfo_rate, 0.f, 20.f); // Hz
-    if (rate <= 0.f){
-        x->lfo1_val = 0.f;
-        return;
-    }
+    const float inv_sr = 1.f / x->sr;
 
-    // advance phase in cycles
-    float phase = x->lfo1_phase;
-    float dcycles = rate * ((float)n / x->sr);
-    phase = jb_wrap01(phase + dcycles);
-    x->lfo1_phase = phase;
+    for (int li = 0; li < JB_N_LFO; ++li){
+        float rate  = jb_clamp(x->lfo_rate_v[li], 0.f, 20.f);   // Hz
+        float shape_f = x->lfo_shape_v[li];
+        float phase_off = x->lfo_phase_v[li];
 
-    // base phase offset from user parameter (0..1)
-    float ph = jb_wrap01(phase + x->lfo_phase);
+        if (rate <= 0.f){
+            x->lfo_val[li] = 0.f;
+            continue;
+        }
 
-    int shape = (int)floorf(x->lfo_shape + 0.5f);
-    if (shape < 1) shape = 1;
-    if (shape > 4) shape = 4;
+        // advance phase in *cycles* (0..1)
+        float phase = x->lfo_phase_state[li];
+        const float dcycles = rate * ((float)n * inv_sr);
+        float prev_phase = phase;
+        phase += dcycles;
+        phase -= floorf(phase); // wrap to 0..1
 
-    float val = 0.f;
-    switch(shape){
-        case 1: // saw -1..1
+        // apply user phase offset
+        float ph = phase + phase_off;
+        ph -= floorf(ph);
+
+        int shape = (int)floorf(shape_f + 0.5f);
+        if (shape < 1) shape = 1;
+        if (shape > 4) shape = 4;
+
+        float val = 0.f;
+        if (shape == 1){
+            // saw: -1..+1
             val = 2.f * ph - 1.f;
-            break;
-        case 2: // square -1..1
+        } else if (shape == 2){
+            // square
             val = (ph < 0.5f) ? 1.f : -1.f;
-            break;
-        case 3: // sine -1..1
-            val = sinf(2.f * (float)M_PI * ph);
-            break;
-        case 4: // sample & hold (noise)
-        default:
-            // new random each block, bipolar -1..1
-            x->lfo1_snh = jb_rng_bi(&x->rng);
-            val = x->lfo1_snh;
-            break;
-    }
+        } else if (shape == 3){
+            // sine
+            val = sinf(2.f * M_PI * ph);
+        } else {
+            // shape == 4 : sample & hold noise
+            // generate a new random value whenever the phase wraps around
+            if (phase < prev_phase){
+                x->lfo_snh[li] = jb_rng_bi(&x->rng);
+            }
+            val = x->lfo_snh[li];
+        }
 
-    x->lfo1_val = val;
+        x->lfo_phase_state[li] = phase;
+        x->lfo_val[li] = val;
+    }
 }
 
 
@@ -542,24 +562,23 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
     jb_apply_stretch(x, v);
     jb_apply_offset(x, v);
 
-    // --- apply modulation-matrix pitch offsets (currently: LFO1 -> pitch only) ---
+    // --- pitch modulation via modulation matrix (currently: LFO1/LFO2 -> pitch) ---
     float f0_eff = v->f0;
     if (f0_eff <= 0.f) f0_eff = x->basef0_ref;
+    if (f0_eff <= 0.f) f0_eff = 1.f;
 
-    // source index 3 = lfo1, target index 12 = pitch
-    const int src_lfo1 = 3;
-    const int tgt_pitch = 12;
+    // pitch_mod is in -1..+1 roughly when only one source is active,
+    // summed if multiple sources are used.
+    float pitch_mod = 0.f;
 
-    float lfo_depth = x->mod_matrix[src_lfo1][tgt_pitch];
-    if (lfo_depth != 0.f){
-        // LFO value is already bipolar -1..1
-        float lfo_val = x->lfo1_val;
-        float m = lfo_depth * lfo_val; // -1..1
-        if (m != 0.f){
-            float semis = m * JB_LFO_PITCH_RANGE; // +/- JB_LFO_PITCH_RANGE semitones at full depth
-            float ratio = powf(2.f, semis / 12.f);
-            f0_eff *= ratio;
-        }
+    // source index 3 = lfo1, source index 4 = lfo2, target index 12 = pitch
+    pitch_mod += x->lfo_val[0] * x->mod_matrix[3][12];
+    pitch_mod += x->lfo_val[1] * x->mod_matrix[4][12];
+
+    if (pitch_mod != 0.f){
+        float semis = pitch_mod * JB_PITCH_MOD_SEMITONES; // +/- range in semitones
+        float ratio = powf(2.f, semis / 12.f);
+        f0_eff *= ratio;
     }
 
     float md_amt = jb_clamp(x->micro_detune,0.f,1.f);
@@ -855,8 +874,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     // clear outputs
     for(int i=0;i<n;i++){ outL[i]=0; outR[i]=0; }
 
-    // update block-rate LFO used by the modulation matrix
-    jb_update_lfo_block(x, n);
+    // update LFOs once per block (for modulation matrix sources)
+    jb_update_lfos_block(x, n);
 
     // Per-block updates that don't change sample-phase
     for(int vix=0; vix<x->max_voices; ++vix){
@@ -1168,24 +1187,51 @@ static void juicy_bank_tilde_lfo_shape(t_juicy_bank_tilde *x, t_floatarg f){
     if (s < 1) s = 1;
     if (s > 4) s = 4;
     x->lfo_shape = (float)s;
+
+    // write into the currently selected LFO slot
+    int idx = (int)floorf(x->lfo_index + 0.5f) - 1;
+    if (idx < 0) idx = 0;
+    if (idx >= JB_N_LFO) idx = JB_N_LFO - 1;
+    x->lfo_shape_v[idx] = (float)s;
 }
 static void juicy_bank_tilde_lfo_rate(t_juicy_bank_tilde *x, t_floatarg f){
-    float r = jb_clamp(f, 1.f, 20.f);
+    float r = jb_clamp(f, 0.f, 20.f);
     x->lfo_rate = r;
+
+    // write into the currently selected LFO slot
+    int idx = (int)floorf(x->lfo_index + 0.5f) - 1;
+    if (idx < 0) idx = 0;
+    if (idx >= JB_N_LFO) idx = JB_N_LFO - 1;
+    x->lfo_rate_v[idx] = r;
 }
 static void juicy_bank_tilde_lfo_phase(t_juicy_bank_tilde *x, t_floatarg f){
     float p = f - floorf(f);
     if (p < 0.f) p += 1.f;
     x->lfo_phase = p;
+
+    // write into the currently selected LFO slot
+    int idx = (int)floorf(x->lfo_index + 0.5f) - 1;
+    if (idx < 0) idx = 0;
+    if (idx >= JB_N_LFO) idx = JB_N_LFO - 1;
+    x->lfo_phase_v[idx] = p;
 }
 static void juicy_bank_tilde_lfo_index(t_juicy_bank_tilde *x, t_floatarg f){
     int idx = (int)floorf(f + 0.5f);
     if (idx < 1) idx = 1;
-    if (idx > 2) idx = 2;
+    if (idx > JB_N_LFO) idx = JB_N_LFO;
     x->lfo_index = (float)idx;
+
+    // when switching LFO index, mirror that slot back to the scalar view
+    int li = idx - 1;
+    if (li < 0) li = 0;
+    if (li >= JB_N_LFO) li = JB_N_LFO - 1;
+    x->lfo_shape = x->lfo_shape_v[li];
+    x->lfo_rate  = x->lfo_rate_v[li];
+    x->lfo_phase = x->lfo_phase_v[li];
 }
 static void juicy_bank_tilde_adsr_ms(t_juicy_bank_tilde *x, t_floatarg f){
-    float v = (f < 0.f) ? 0.f : f;
+    // treat this as a real-time ADSR envelope value in 0..1
+    float v = jb_clamp(f, 0.f, 1.f);
     x->adsr_ms = v;
 }
 
@@ -1399,17 +1445,21 @@ static void *juicy_bank_tilde_new(void){
     x->sine_pitch=0.f; x->sine_depth=0.f; x->sine_phase=0.f;
 
     // LFO + ADSR defaults
-    x->lfo_shape = 1.f;   // default: shape 1
+    x->lfo_shape = 1.f;   // default: shape 1 (for currently selected LFO)
     x->lfo_rate  = 1.f;   // 1 Hz
     x->lfo_phase = 0.f;   // start at phase 0
-    x->lfo_index = 1.f;   // LFO 1 by default
+    x->lfo_index = 1.f;   // LFO 1 selected by default
+    x->adsr_ms   = 0.f;   // ADSR env 0..1 (legacy name)
 
-    // internal LFO1 state
-    x->lfo1_phase = 0.f;
-    x->lfo1_val   = 0.f;
-    x->lfo1_snh   = 0.f;
-
-    x->adsr_ms   = 0.f;   // until exciter reports something
+    // initialise per-LFO parameter and runtime state
+    for (int li = 0; li < JB_N_LFO; ++li){
+        x->lfo_shape_v[li]      = 1.f;
+        x->lfo_rate_v[li]       = 1.f;
+        x->lfo_phase_v[li]      = 0.f;
+        x->lfo_phase_state[li]  = 0.f;
+        x->lfo_val[li]          = 0.f;
+        x->lfo_snh[li]          = 0.f;
+    }
 
     // clear modulation matrix
     for(int i=0;i<JB_N_MODSRC;i++)
@@ -1494,7 +1544,7 @@ static void *juicy_bank_tilde_new(void){
     x->in_lfo_phase = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("lfo_phase"));
     x->in_lfo_index = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("lfo_index"));
     // inlet for modulation-matrix configuration messages
-    x->in_matrix    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, gensym("matrix"), gensym("matrix"));
+    x->in_matrix    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_anything, &s_anything);
     x->in_adsr_ms   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("adsr_ms"));
 
     // Outs
@@ -1705,30 +1755,6 @@ static void juicy_bank_tilde_anything(t_juicy_bank_tilde *x, t_symbol *s, int ar
         x->mod_matrix[src_idx][tgt_idx] = amt;
     }
 }
-
-
-static void juicy_bank_tilde_matrix(t_juicy_bank_tilde *x, t_symbol *s, int argc, t_atom *argv){
-    (void)s;
-    if (argc < 2) return;
-    if (argv[0].a_type != A_SYMBOL) return;
-
-    t_symbol *route = atom_getsymbol(argv);
-    if (!route) return;
-
-    int src_idx = -1, tgt_idx = -1;
-    if (!jb_modmatrix_parse_selector(route->s_name, &src_idx, &tgt_idx))
-        return;
-
-    t_float amt = atom_getfloat(argv + 1);
-    if (amt < -1.f) amt = -1.f;
-    else if (amt > 1.f) amt = 1.f;
-
-    if (src_idx >= 0 && src_idx < JB_N_MODSRC &&
-        tgt_idx >= 0 && tgt_idx < JB_N_MODTGT){
-        x->mod_matrix[src_idx][tgt_idx] = amt;
-    }
-}
-
 void juicy_bank_tilde_setup(void){
     juicy_bank_tilde_class = class_new(gensym("juicy_bank~"),
                            (t_newmethod)juicy_bank_tilde_new,
@@ -1739,8 +1765,8 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_snapshot, gen
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_snapshot_undo, gensym("snapshot_undo"), 0);
     CLASS_MAINSIGNALIN(juicy_bank_tilde_class, t_juicy_bank_tilde, f_dummy);
 
-    // inlet/method for modulation-matrix configuration messages like "matrix lfo1_to_pitch 1"
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_matrix, gensym("matrix"), A_GIMME, 0);
+    // accept modulation-matrix configuration messages like "velocity_to_damping 0.5"
+    class_addanything(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_anything);
 
     // BEHAVIOR
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_stiffen, gensym("stiffen"), A_DEFFLOAT, 0);
