@@ -1639,7 +1639,7 @@ static void juicy_bank_tilde_matrix(t_juicy_bank_tilde *x, t_symbol *s, int argc
         x->mod_matrix[src_idx][tgt_idx] = amt;
     }
 }
-}
+
 void juicy_bank_tilde_setup(void){
     juicy_bank_tilde_class = class_new(gensym("juicy_bank~"),
                            (t_newmethod)juicy_bank_tilde_new,
