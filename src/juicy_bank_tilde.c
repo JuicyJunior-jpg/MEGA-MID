@@ -325,6 +325,7 @@ static void jb_update_lfos_block(t_juicy_bank_tilde *x, int n){
         x->lfo_val[li] = val;
     }
 
+}
 // ---------- modulation-source normalisation helper ----------
 // Returns a normalised value for each modulation source:
 //   0: velocity  -> 0..1
@@ -369,7 +370,6 @@ static float jb_mod_source_value(const t_juicy_bank_tilde *x,
     }
 }
 
-}
 
 
 // ---------- helpers ----------
