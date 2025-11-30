@@ -1011,8 +1011,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         } else {
             bank_gain = fb_base + master_mod * fb_base;
         }
-            bank_gain = fb_base + master_mod * fb_base;
-        }
 
         // --- pan modulation (target index 13 = "pan") ---
         // Accumulate contributions from all modulation sources for this voice.
