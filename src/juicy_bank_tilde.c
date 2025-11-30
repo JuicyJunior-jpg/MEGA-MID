@@ -493,7 +493,21 @@ static void jb_project_behavior_into_voice(t_juicy_bank_tilde *x, jb_voice_t *v)
     v->decay_vel_mul = (1.f + (0.30f + 1.20f * x->linger_amt) * jb_clamp(v->vel,0.f,1.f));
 
     // Brightness: purely user-controlled, no pitch/velocity dependence
-    v->brightness_v = jb_clamp(x->brightness, 0.f, 1.f);
+    // Brightness: user-controlled plus modulation matrix (per-voice)
+    float bright_base = jb_clamp(x->brightness, 0.f, 1.f);
+    float bright_mod = 0.f;
+    for (int src = 0; src < JB_N_MODSRC; ++src){
+        float amt = x->mod_matrix[src][3]; // target 3 = brightness
+        if (amt == 0.f) continue;
+        float src_v = jb_mod_source_value(x, v, src);
+        bright_mod += amt * src_v;
+    }
+    if (bright_mod > 1.f) bright_mod = 1.f;
+    else if (bright_mod < -1.f) bright_mod = -1.f;
+    float bright_total = bright_base + bright_mod;
+    if (bright_total < 0.f) bright_total = 0.f;
+    else if (bright_total > 1.f) bright_total = 1.f;
+    v->brightness_v = bright_total;
 
     // Bloom → bandwidth
     float baseBW = x->bandwidth;
@@ -613,12 +627,16 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
     if (f0_eff <= 0.f) f0_eff = 1.f;
 
     // pitch_mod is in -1..+1 roughly when only one source is active,
-    // summed if multiple sources are used.
+    // summed if multiple sources are used, applied per-voice.
     float pitch_mod = 0.f;
-
-    // source index 3 = lfo1, source index 4 = lfo2, target index 12 = pitch
-    pitch_mod += x->lfo_val[0] * x->mod_matrix[3][12];
-    pitch_mod += x->lfo_val[1] * x->mod_matrix[4][12];
+    for (int src = 0; src < JB_N_MODSRC; ++src){
+        float amt = x->mod_matrix[src][12]; // target 12 = pitch
+        if (amt == 0.f) continue;
+        float src_v = jb_mod_source_value(x, v, src);
+        pitch_mod += amt * src_v;
+    }
+    if (pitch_mod > 1.f) pitch_mod = 1.f;
+    else if (pitch_mod < -1.f) pitch_mod = -1.f;
 
     if (pitch_mod != 0.f){
         float semis = pitch_mod * JB_PITCH_MOD_SEMITONES; // +/- range in semitones
@@ -628,6 +646,22 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
 
     float md_amt = jb_clamp(x->micro_detune,0.f,1.f);
     float bw_amt = jb_clamp(v->bandwidth_v, 0.f, 1.f);
+
+    // Damping global control (target 0) with modulation matrix, per-voice.
+    float damping_base = x->damping; // -1..1 from GUI
+    float damping_mod = 0.f;
+    for (int src = 0; src < JB_N_MODSRC; ++src){
+        float amt = x->mod_matrix[src][0]; // target 0 = damping
+        if (amt == 0.f) continue;
+        float src_v = jb_mod_source_value(x, v, src);
+        damping_mod += amt * src_v;
+    }
+    if (damping_mod > 1.f) damping_mod = 1.f;
+    else if (damping_mod < -1.f) damping_mod = -1.f;
+    float damping_total = damping_base + damping_mod;
+    if (damping_total > 1.f) damping_total = 1.f;
+    else if (damping_total < -1.f) damping_total = -1.f;
+
 
     for(int i=0;i<x->n_modes;i++){
         jb_mode_rt_t *md=&v->m[i];
@@ -690,7 +724,7 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
             float sigma = (1.f - b)*sigma_max + b*sigma_min;
             float wloc = expf(-0.5f * (dx*dx) / (sigma*sigma)); /* 0..1 */
             /*/* apply local weighting to global damping amount */
-            float d_amt = jb_clamp(x->damping, -1.f, 1.f) * wloc;
+            float d_amt = jb_clamp(damping_total, -1.f, 1.f) * wloc;
             if (d_amt >= 0.f){
                 T60 *= (1.f - d_amt);
             } else {
@@ -957,11 +991,14 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
         // master_mod accumulates contributions from all sources mapped to "master".
         // For now we only use LFO1 (source 3) and LFO2 (source 4).
+        // master_mod accumulates contributions from all modulation sources mapped to "master" (target 11).
         float master_mod = 0.f;
-        master_mod += x->lfo_val[0] * x->mod_matrix[3][11]; // lfo1_to_master
-        master_mod += x->lfo_val[1] * x->mod_matrix[4][11]; // lfo2_to_master
-
-        // Clamp summed modulation to [-1,1] so it stays well-behaved even if multiple sources are active.
+        for (int src = 0; src < JB_N_MODSRC; ++src){
+            float amt = x->mod_matrix[src][11];
+            if (amt == 0.f) continue;
+            float src_v = jb_mod_source_value(x, v, src);
+            master_mod += amt * src_v;
+        }
         if (master_mod > 1.f) master_mod = 1.f;
         else if (master_mod < -1.f) master_mod = -1.f;
 
@@ -972,6 +1009,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         if (master_mod >= 0.f){
             bank_gain = fb_base + master_mod * (1.f - fb_base);
         } else {
+            bank_gain = fb_base + master_mod * fb_base;
+        }
             bank_gain = fb_base + master_mod * fb_base;
         }
 
