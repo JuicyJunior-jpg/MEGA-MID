@@ -324,6 +324,51 @@ static void jb_update_lfos_block(t_juicy_bank_tilde *x, int n){
         x->lfo_phase_state[li] = phase;
         x->lfo_val[li] = val;
     }
+
+// ---------- modulation-source normalisation helper ----------
+// Returns a normalised value for each modulation source:
+//   0: velocity  -> 0..1
+//   1: pitch     -> -1..+1 (approx. +/- two octaves around basef0_ref)
+//   2: adsr      -> 0..1 (envelope from exciter)
+//   3: lfo1      -> -1..+1
+//   4: lfo2      -> -1..+1
+static float jb_mod_source_value(const t_juicy_bank_tilde *x,
+                                 const jb_voice_t *v,
+                                 int src_idx)
+{
+    switch (src_idx){
+    case 0: // velocity
+        return jb_clamp(v->vel, 0.f, 1.f);
+
+    case 1: // pitch: normalise semitone offset around basef0_ref
+        if (v->f0 <= 0.f || x->basef0_ref <= 0.f)
+            return 0.f;
+        else {
+            float ratio = v->f0 / x->basef0_ref;
+            if (ratio <= 0.f)
+                return 0.f;
+            // convert to semitones and map roughly +/-24 st -> -1..+1
+            float semis = 12.f * (logf(ratio) / logf(2.f));
+            float norm = semis / 24.f;
+            if (norm > 1.f) norm = 1.f;
+            else if (norm < -1.f) norm = -1.f;
+            return norm;
+        }
+
+    case 2: // ADSR envelope (0..1)
+        return jb_clamp(x->adsr_ms, 0.f, 1.f);
+
+    case 3: // LFO1
+        return jb_clamp(x->lfo_val[0], -1.f, 1.f);
+
+    case 4: // LFO2
+        return jb_clamp(x->lfo_val[1], -1.f, 1.f);
+
+    default:
+        return 0.f;
+    }
+}
+
 }
 
 
@@ -930,6 +975,18 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             bank_gain = fb_base + master_mod * fb_base;
         }
 
+        // --- pan modulation (target index 13 = "pan") ---
+        // Accumulate contributions from all modulation sources for this voice.
+        float pan_mod = 0.f;
+        for (int src = 0; src < JB_N_MODSRC; ++src){
+            float amt = x->mod_matrix[src][13]; // matrix: [source][pan]
+            if (amt == 0.f) continue;
+            float src_v = jb_mod_source_value(x, v, src);
+            pan_mod += amt * src_v;
+        }
+        if (pan_mod > 1.f) pan_mod = 1.f;
+        else if (pan_mod < -1.f) pan_mod = -1.f;
+
         // feedback filter & delay states per-voice/per-ear
         float hp_x1L = v->fb_hp_x1L, hp_y1L = v->fb_hp_y1L;
         float hp_x1R = v->fb_hp_x1R, hp_y1R = v->fb_hp_y1R;
@@ -1009,7 +1066,10 @@ float vsumL = 0.f, vsumR = 0.f; // this sample's voice sum
                 u += du; if(u>1.f){ u=1.f; }
 
                 // equal-power pan and sum (scaled by global bank_gain)
-                float p = jb_clamp(x->base[m].pan, -1.f, 1.f);
+                float base_pan = jb_clamp(x->base[m].pan, -1.f, 1.f);
+                float p = base_pan + pan_mod;
+                if (p > 1.f) p = 1.f;
+                else if (p < -1.f) p = -1.f;
                 float wL = sqrtf(0.5f*(1.f - p));
                 float wR = sqrtf(0.5f*(1.f + p));
                 y_totalL *= v->rel_env; y_totalR *= v->rel_env;
