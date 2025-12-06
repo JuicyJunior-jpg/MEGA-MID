@@ -797,7 +797,23 @@ static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
         
 float gn = g * w * wp;
         if (v->m[i].nyq_kill) gn = 0.f;
-            if (x->active_modes < x->n_modes) { if (i >= x->active_modes) gn = 0.f; }
+            // smooth partial-count taper: fade out modes above active_modes instead of hard mute
+            if (x->active_modes <= 0){
+                gn = 0.f;
+            } else if (x->active_modes < x->n_modes){
+                int K = x->active_modes;
+                if (i >= K){
+                    // fade over a small number of partials (not too smooth, not brickwall)
+                    float fade_width = 3.f; // number of partial steps for the taper
+                    float u = ((float)i - (float)K) / fade_width;
+                    if (u >= 1.f){
+                        gn = 0.f;
+                    } else if (u > 0.f){
+                        float w_fade = 0.5f * (1.f + cosf((float)M_PI * u));
+                        gn *= w_fade;
+                    }
+                }
+            }
         // --- SINE AM mask (bipolar focus vs complement, applied after gn is computed) ---
         {
             int N = x->n_modes;
@@ -805,18 +821,18 @@ float gn = g * w * wp;
             float depth = jb_clamp(x->sine_depth, -1.f, 1.f);
             float phase = x->sine_phase;
 
-            // build a smooth 0..1 pattern mask along modes
+            // build a genuine sine-shaped 0..1 pattern mask along modes
             float cycles_min = 0.25f;
             float cycles_max = floorf((float)N * 0.5f);
             if (cycles_max < cycles_min) cycles_max = cycles_min;
             float cycles = cycles_min + pitch * (cycles_max - cycles_min);
+
             float k_norm = (N>1) ? ((float)i / (float)(N-1)) : 0.f;
             float theta = 2.f * (float)M_PI * (cycles * k_norm + phase);
-            float w01 = 0.5f * (1.f + cosf(theta)); // 1 at pattern center, 0 at pattern "nulls"
 
-            // make the pattern "sharper" as |depth| increases
-            float sharp = 1.0f + 8.0f * fabsf(depth);
-            float pattern = powf(w01, sharp); // pattern membership mask in [0,1]
+            // pure sine in -1..+1, mapped to 0..1 for gain mask
+            float s = sinf(theta);
+            float pattern = 0.5f * (1.f + s); // 0 at troughs, 1 at peaks
 
             // bipolar amount:
             //   depth > 0: attenuate pattern partials
@@ -1741,9 +1757,10 @@ static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
         // --- SINE mask (bipolar, same semantics as jb_update_voice_gains) ---
         float k_norm = (N>1) ? ((float)i / (float)(N-1)) : 0.f;
         float theta = 2.f * (float)M_PI * (cycles * k_norm + phase);
-        float w01 = 0.5f * (1.f + cosf(theta)); // 1 at pattern center, 0 at pattern nulls
-        float sharp = 1.0f + 8.0f * fabsf(depth);   // use |depth| for window sharpness
-        float pattern = powf(w01, sharp);          // pattern membership mask in [0,1]
+
+        // pure sine in -1..+1, mapped to 0..1 for gain mask
+        float s = sinf(theta);
+        float pattern = 0.5f * (1.f + s); // 0 at troughs, 1 at peaks
 
         // bipolar amount:
         //   depth > 0: attenuate pattern partials
@@ -1756,10 +1773,7 @@ static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
                        - a_neg * (1.f - pattern); // turn down complement when depth < 0;
 
         if (weight < 0.f) weight = 0.f;
-        x->base[i].base_gain *= weight;
-
-
-// --- DAMPER bake into base_decay_ms ---
+        x->base[i].base_gain *= weight;// --- DAMPER bake into base_decay_ms ---
 // mirror jb_update_voice_coeffs damping logic onto the stored T60
         float k_mode = (x->n_modes>1)? ((float)i/(float)(x->n_modes-1)) : 0.f;
         float dx = fabsf(k_mode - p); if (dx > 0.5f) dx = 1.f - dx; // circular distance
