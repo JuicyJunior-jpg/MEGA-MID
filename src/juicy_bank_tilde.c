@@ -374,8 +374,27 @@ static float jb_mod_source_value(const t_juicy_bank_tilde *x,
 
 // ---------- helpers ----------
 static float jb_bright_gain(float ratio_rel, float b){
-    float t=(jb_clamp(b,0.f,1.f)-0.5f)*2.f; float p=0.6f*t; float rr=jb_clamp(ratio_rel,1.f,1e6f);
-    return powf(rr, p);
+    // Tela-style tilt:
+    //  - brightness b in [-1,1]
+    //  - b = 0: natural falloff ~ 1 / ratio_rel
+    //  - b > 0: brighten by flattening the falloff towards linear (all partials ~ equal)
+    //  - b < 0: darken by increasing falloff (stronger attenuation of higher partials)
+    float bb = jb_clamp(b, -1.f, 1.f);
+    float rr = jb_clamp(ratio_rel, 1.f, 1e6f);
+
+    // exponent alpha controls how fast amplitudes drop with partial ratio:
+    // gain ~ rr^(-alpha)
+    float alpha;
+    if (bb >= 0.f){
+        // from natural 1/ratio (alpha=1) towards flat (alpha=0)
+        alpha = 1.f - bb;
+    } else {
+        // from natural 1/ratio (alpha=1) towards steeper 1/ratio^3 (alpha=3)
+        float k_dark = 2.f; // range of extra darkness
+        alpha = 1.f - bb * k_dark; // bb in [-1,0) -> alpha in (1,3]
+    }
+
+    return powf(rr, -alpha);
 }
 static float jb_position_weight(float ratio_rel, float pos){
     if (pos<=0.f) return 1.f;
@@ -493,7 +512,7 @@ static void jb_project_behavior_into_voice(t_juicy_bank_tilde *x, jb_voice_t *v)
     v->decay_vel_mul = (1.f + (0.30f + 1.20f * x->linger_amt) * jb_clamp(v->vel,0.f,1.f));
 
     // Brightness: purely user-controlled, no pitch/velocity dependence
-    v->brightness_v = jb_clamp(x->brightness, 0.f, 1.f);
+    v->brightness_v = jb_clamp(x->brightness, -1.f, 1.f);
 
     // Bloom → bandwidth
     float baseBW = x->bandwidth;
@@ -1273,7 +1292,7 @@ static void juicy_bank_tilde_amps(t_juicy_bank_tilde *x, t_symbol *s, int argc, 
 static void juicy_bank_tilde_damp_broad(t_juicy_bank_tilde *x, t_floatarg f){ x->damp_broad=jb_clamp(f,0.f,1.f); }
 static void juicy_bank_tilde_damp_point(t_juicy_bank_tilde *x, t_floatarg f){ x->damp_point=jb_wrap01(f); }
 static void juicy_bank_tilde_damping(t_juicy_bank_tilde *x, t_floatarg f){ x->damping=jb_clamp(f,-1.f,1.f); }
-static void juicy_bank_tilde_brightness(t_juicy_bank_tilde *x, t_floatarg f){ x->brightness=jb_clamp(f,0.f,1.f); }
+static void juicy_bank_tilde_brightness(t_juicy_bank_tilde *x, t_floatarg f){ x->brightness=jb_clamp(f,-1.f,1.f); }
 static void juicy_bank_tilde_position(t_juicy_bank_tilde *x, t_floatarg f){ x->position=(f<=0.f)?0.f:jb_clamp(f,0.f,1.f); }
 static void juicy_bank_tilde_density(t_juicy_bank_tilde *x, t_floatarg f){
     // Interpret density as "harmonic gap units":
@@ -1773,7 +1792,8 @@ static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
                        - a_neg * (1.f - pattern); // turn down complement when depth < 0;
 
         if (weight < 0.f) weight = 0.f;
-        x->base[i].base_gain *= weight;// --- DAMPER bake into base_decay_ms ---
+        x->base[i].base_gain *= weight;
+// --- DAMPER bake into base_decay_ms ---
 // mirror jb_update_voice_coeffs damping logic onto the stored T60
         float k_mode = (x->n_modes>1)? ((float)i/(float)(x->n_modes-1)) : 0.f;
         float dx = fabsf(k_mode - p); if (dx > 0.5f) dx = 1.f - dx; // circular distance
