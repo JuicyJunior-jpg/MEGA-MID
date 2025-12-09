@@ -1857,61 +1857,36 @@ static void juicy_bank_tilde_index_backward(t_juicy_bank_tilde *x){
 
 // ---------- SNAPSHOT: bake current SINE mask into base gains and DAMPER into base decays ----------
 static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
-    // Save undo of base fields
-    for (int i=0;i<JB_MAX_MODES;i++){
-        x->_undo_base_gain[i] = x->base[i].base_gain;
+    // Save undo of base fields so we can restore both gain and decay.
+    for (int i = 0; i < JB_MAX_MODES; ++i){
+        x->_undo_base_gain[i]     = x->base[i].base_gain;
         x->_undo_base_decay_ms[i] = x->base[i].base_decay_ms;
     }
     x->_undo_valid = 1;
 
-    // Precompute SINE AM mask per index (same math as in jb_update_voice_gains)
-    int N = x->n_modes;
-    float pitch = jb_clamp(x->sine_pitch, 0.f, 1.f);
-    float depth = jb_clamp(x->sine_depth, -1.f, 1.f);
-    float phase = x->sine_phase;
-    float cycles_min = 0.25f;
-    float cycles_max = floorf((float)((N>0)?N:1) * 0.5f);
-    if (cycles_max < cycles_min) cycles_max = cycles_min;
-    float cycles = cycles_min + pitch * (cycles_max - cycles_min);
-
-    // Damper weights per mode (same formula as in jb_update_voice_coeffs)
+    // --- DAMPER bake into base_decay_ms (only damping is snapshotted) ---
+    // Mirror the runtime damping logic (jb_update_voice_coeffs) onto the stored
+    // T60 values, without touching the SINE pattern at all.
     float b = jb_clamp(x->damp_broad, 0.f, 1.f);
-    float p = x->damp_point; if (p < 0.f) p = 0.f;
-            if (p > 1.f) p = 1.f;
-    float n = (float)((x->n_modes>0)?x->n_modes:1);
+    float p = x->damp_point;
+    if (p < 0.f) p = 0.f;
+    if (p > 1.f) p = 1.f;
+    float n = (float)((x->n_modes > 0) ? x->n_modes : 1);
     float sigma_min = 0.5f / n;      // ~single-mode width
     float sigma_max = 0.5f;          // whole bank
-    float sigma = (1.f - b)*sigma_max + b*sigma_min;
+    float sigma = (1.f - b) * sigma_max + b * sigma_min;
     float d_amt_global = jb_clamp(x->damping, -1.f, 1.f);
 
-    for(int i=0;i<x->n_modes;i++){
+    for (int i = 0; i < x->n_modes; ++i){
         if (!x->base[i].active) continue;
-        // --- SINE mask (bipolar, same semantics as jb_update_voice_gains) ---
-        float k_norm = (N>1) ? ((float)i / (float)(N-1)) : 0.f;
-        float theta = 2.f * (float)M_PI * (cycles * k_norm + phase);
 
-        // pure sine in -1..+1, mapped to 0..1 for gain mask
-        float s = sinf(theta);
-        float pattern = 0.5f * (1.f + s); // 0 at troughs, 1 at peaks
+        // local weighting over modes (same Gaussian window as runtime)
+        float k_mode = (x->n_modes > 1) ? ((float)i / (float)(x->n_modes - 1)) : 0.f;
+        float dx = fabsf(k_mode - p);
+        if (dx > 0.5f) dx = 1.f - dx;        // circular distance
+        float wloc = expf(-0.5f * (dx * dx) / (sigma * sigma)); // 0..1
+        float d_amt = d_amt_global * wloc;                     // local -1..1
 
-        // bipolar amount:
-        //   depth > 0: attenuate pattern partials
-        //   depth < 0: attenuate non-pattern partials
-        float a_pos = (depth > 0.f) ? depth : 0.f;
-        float a_neg = (depth < 0.f) ? -depth : 0.f;
-
-        float weight = 1.f
-                       - a_pos * pattern          // turn down pattern when depth > 0
-                       - a_neg * (1.f - pattern); // turn down complement when depth < 0;
-
-        if (weight < 0.f) weight = 0.f;
-        x->base[i].base_gain *= weight;
-// --- DAMPER bake into base_decay_ms ---
-// mirror jb_update_voice_coeffs damping logic onto the stored T60
-        float k_mode = (x->n_modes>1)? ((float)i/(float)(x->n_modes-1)) : 0.f;
-        float dx = fabsf(k_mode - p); if (dx > 0.5f) dx = 1.f - dx; // circular distance
-        float wloc = expf(-0.5f * (dx*dx) / (sigma*sigma)); // 0..1
-        float d_amt = d_amt_global * wloc;                  // local -1..1
         // convert current base decay to seconds and apply same mapping as runtime
         float T60 = jb_clamp(x->base[i].base_decay_ms, 0.f, 1e7f) * 0.001f;
         if (d_amt >= 0.f){
@@ -1923,14 +1898,13 @@ static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
             if (T60 > ceiling) T60 = ceiling;
         }
         x->base[i].base_decay_ms = T60 * 1000.f;
-        if (x->base[i].base_decay_ms < 0.f) x->base[i].base_decay_ms = 0.f;
+        if (x->base[i].base_decay_ms < 0.f)
+            x->base[i].base_decay_ms = 0.f;
     }
 
-    // Neutralize the two controllers so you can re-apply on top of the baked shape
-    x->sine_depth = 0.f;
+    // Neutralise damping so it can be layered again on top of the baked shape.
     x->damping = 0.f;
 }
-
 static void juicy_bank_tilde_snapshot_undo(t_juicy_bank_tilde *x){
     if (!x->_undo_valid) return;
     for (int i=0;i<JB_MAX_MODES;i++){
