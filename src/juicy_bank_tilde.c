@@ -221,7 +221,9 @@ float damping, brightness, position; float damp_broad, damp_point;
 
     // --- SINE (AM across modes) ---
     float sine_pitch;   // 0..1
-    float sine_depth;   // 0..1
+    float sine_depth;   // -1..1 (bipolar amount)
+    float sine_width;   // 0..1 (pattern peak width / sharpness)
+    float sine_skew;    // -1..1 (pattern asymmetry via 2nd harmonic)
     float sine_phase;   // 0..1 (wraps)
 
     // --- LFO globals (for modulation matrix UI) ---
@@ -250,6 +252,8 @@ float damping, brightness, position; float damp_broad, damp_point;
     // inlets for SINE
     t_inlet *in_sine_pitch;
     t_inlet *in_sine_depth;
+    t_inlet *in_sine_width;
+    t_inlet *in_sine_skew;
     t_inlet *in_sine_phase;
 
     // --- LFO + ADSR inlets (for modulation matrix) ---
@@ -905,6 +909,8 @@ static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
             float pitch = jb_clamp(x->sine_pitch, 0.f, 1.f);
             float depth = jb_clamp(x->sine_depth, -1.f, 1.f);
             float phase = x->sine_phase;
+            float width = jb_clamp(x->sine_width, 0.f, 1.f);
+            float skew  = jb_clamp(x->sine_skew, -1.f, 1.f);
 
             // map harmonic position into 0..1 based on current spectrum
             float h_norm = 0.f;
@@ -922,9 +928,23 @@ static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
 
             float theta = 2.f * (float)M_PI * (cycles * h_norm + phase);
 
-            // pure sine in -1..+1, mapped to 0..1 for gain mask
-            float s = sinf(theta);
+            // base sine + optional 2nd-harmonic skew, then normalise back to approx -1..+1
+            float s1 = sinf(theta);
+            float s2 = sinf(2.f * theta);
+            float s  = s1 + skew * s2;
+            float norm = 1.f + fabsf(skew);
+            if (norm > 0.f) s /= norm;
+
+            // map to 0..1 for gain mask
             float pattern = 0.5f * (1.f + s); // 0 at troughs, 1 at peaks
+            if (pattern < 0.f) pattern = 0.f;
+            if (pattern > 1.f) pattern = 1.f;
+
+            // apply peak-width shaping: width=0 => softer, width=1 => sharper
+            if (width > 0.f && pattern > 0.f && pattern < 1.f){
+                float gamma = 0.5f + 3.0f * width; // moderate range: 0.5..3.5
+                pattern = powf(pattern, gamma);
+            }
 
             // bipolar amount:
             //   depth > 0: attenuate pattern partials
@@ -939,6 +959,7 @@ static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
             if (weight < 0.f) weight = 0.f;
             gn *= weight;
         }
+
 
         v->m[i].gain_now = (gn<0.f)?0.f:gn;
     }
@@ -1401,6 +1422,14 @@ static void juicy_bank_tilde_sine_phase(t_juicy_bank_tilde *x, t_floatarg f){
     if (p < 0.f) p += 1.f;
     x->sine_phase = p;
 }
+static void juicy_bank_tilde_sine_width(t_juicy_bank_tilde *x, t_floatarg f){
+    // 0..1: 0 = very soft / broad peaks, 1 = sharper / narrower peaks
+    x->sine_width = jb_clamp(f, 0.f, 1.f);
+}
+static void juicy_bank_tilde_sine_skew(t_juicy_bank_tilde *x, t_floatarg f){
+    // -1..1: 0 = symmetric; +/-1 = maximum asymmetry via 2nd harmonic
+    x->sine_skew = jb_clamp(f, -1.f, 1.f);
+}
 
 // --- LFO + ADSR param setters (for modulation matrix) ---
 static void juicy_bank_tilde_lfo_shape(t_juicy_bank_tilde *x, t_floatarg f){
@@ -1669,7 +1698,7 @@ static void *juicy_bank_tilde_new(void){
 // realism defaults
     x->phase_rand=1.f; x->phase_debug=0;
     x->bandwidth=0.1f; x->micro_detune=0.1f;
-    x->sine_pitch=0.f; x->sine_depth=0.f; x->sine_phase=0.f;
+    x->sine_pitch=0.f; x->sine_depth=0.f; x->sine_width=0.f; x->sine_skew=0.f; x->sine_phase=0.f;
 
     // LFO + ADSR defaults
     x->lfo_shape = 1.f;   // default: shape 1 (for currently selected LFO)
@@ -1747,6 +1776,8 @@ static void *juicy_bank_tilde_new(void){
 // SINE controls
     x->in_sine_pitch = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_pitch"));
     x->in_sine_depth = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_depth"));
+    x->in_sine_width = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_width"));
+    x->in_sine_skew  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_skew"));
     x->in_sine_phase = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_phase"));
 
     // FEEDBACK controls (placed after sine_phase, before partials)
@@ -2055,6 +2086,8 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gens
 // SINE methods
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_sine_pitch, gensym("sine_pitch"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_sine_depth, gensym("sine_depth"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_sine_width, gensym("sine_width"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_sine_skew,  gensym("sine_skew"),  A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_sine_phase, gensym("sine_phase"), A_DEFFLOAT, 0);
 
     // LFO + ADSR methods
