@@ -160,6 +160,7 @@ float damping, brightness, position; float damp_broad, damp_point;
     float density_amt; jb_density_mode density_mode;
     float dispersion, dispersion_last;
     float offset_amt;
+    float collision_amt;
     float aniso, aniso_eps;
 
     // realism/misc
@@ -214,7 +215,7 @@ float damping, brightness, position; float damp_broad, damp_point;
     
         t_inlet *in_release;
 // Body controls (damping, brightness, position, density, dispersion, anisotropy)
-    t_inlet *in_damping, *in_damp_broad, *in_damp_point, *in_brightness, *in_position, *in_density, *in_stretch, *in_warp, *in_dispersion, *in_offset, *in_aniso;
+    t_inlet *in_damping, *in_damp_broad, *in_damp_point, *in_brightness, *in_position, *in_density, *in_stretch, *in_warp, *in_dispersion, *in_offset, *in_collision, *in_aniso;
     // Individual
     t_inlet *in_index, *in_ratio, *in_gain, *in_attack, *in_decay, *in_curve, *in_pan, *in_keytrack;
 
@@ -617,6 +618,56 @@ static void jb_apply_offset(const t_juicy_bank_tilde *x, jb_voice_t *v){
 }
 
 
+
+static void jb_apply_collision(const t_juicy_bank_tilde *x, jb_voice_t *v){
+    float c = jb_clamp(x->collision_amt, 0.f, 1.f);
+    if (c <= 0.f || x->n_modes <= 2)
+        return;
+
+    float tmp[JB_MAX_MODES];
+    for (int i = 0; i < x->n_modes; ++i){
+        tmp[i] = v->m[i].ratio_now;
+    }
+
+    int any_key = 0;
+    for (int i = 0; i < x->n_modes; ++i){
+        if (!x->base[i].active) continue;
+        if (!x->base[i].keytrack) continue;
+        any_key = 1;
+
+        int left = i;
+        int right = i;
+
+        for (int j = i - 1; j >= 0; --j){
+            if (x->base[j].active && x->base[j].keytrack){
+                left = j;
+                break;
+            }
+        }
+        for (int j = i + 1; j < x->n_modes; ++j){
+            if (x->base[j].active && x->base[j].keytrack){
+                right = j;
+                break;
+            }
+        }
+
+        float r_i = v->m[i].ratio_now;
+        float rL = v->m[left].ratio_now;
+        float rR = v->m[right].ratio_now;
+        float avg = 0.5f * (rL + rR);
+        tmp[i] = r_i + c * (avg - r_i);
+    }
+
+    if (!any_key)
+        return;
+
+    for (int i = 0; i < x->n_modes; ++i){
+        if (!x->base[i].active) continue;
+        if (!x->base[i].keytrack) continue;
+        v->m[i].ratio_now = tmp[i];
+    }
+}
+
 static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
     for(int i=0;i<x->n_modes;i++){ v->disp_offset[i] = v->disp_target[i]; }
 
@@ -625,6 +676,7 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
     jb_lock_fundamental_after_density(x, v);
     jb_apply_stretch(x, v);
     jb_apply_offset(x, v);
+    jb_apply_collision(x, v);
 
     // --- pitch modulation via modulation matrix (currently: LFO1/LFO2 -> pitch) ---
     float f0_eff = v->f0;
@@ -1384,6 +1436,10 @@ static void juicy_bank_tilde_adsr_ms(t_juicy_bank_tilde *x, t_floatarg f){
 static void juicy_bank_tilde_offset(t_juicy_bank_tilde *x, t_floatarg f){
     x->offset_amt = jb_clamp(f, -1.f, 1.f);
 }
+static void juicy_bank_tilde_collision(t_juicy_bank_tilde *x, t_floatarg f){
+    x->collision_amt = jb_clamp(f, 0.f, 1.f);
+}
+
 
 // dispersion & seeds
 
@@ -1493,6 +1549,7 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
     inlet_free(x->in_density);
     inlet_free(x->in_warp); inlet_free(x->in_dispersion);
     inlet_free(x->in_offset);
+    inlet_free(x->in_collision);
     inlet_free(x->in_aniso);
 
             inlet_free(x->in_stretch);
@@ -1579,6 +1636,7 @@ static void *juicy_bank_tilde_new(void){
     x->density_amt=0.f; x->density_mode=DENSITY_PIVOT;
     x->dispersion=0.f; x->dispersion_last=-1.f;
     x->offset_amt=0.f;
+    x->collision_amt=0.f;
     x->aniso=0.f; x->aniso_eps=0.02f;
 
     // Stretch default
@@ -1650,7 +1708,7 @@ static void *juicy_bank_tilde_new(void){
     x->in_crossring  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("crossring"));
     x->in_release    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("release")); // release 0..1
 
-    // Body (order: damping, brightness, position, density, dispersion, offset, anisotropy)
+    // Body (order: damping, brightness, position, density, dispersion, offset, collision, anisotropy)
     x->in_damping    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("damping"));
     x->in_damp_broad = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("damp_broad"));
     x->in_damp_point = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("damp_point"));
@@ -1661,6 +1719,7 @@ static void *juicy_bank_tilde_new(void){
     x->in_warp       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("warp"));
     x->in_dispersion = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("dispersion"));
     x->in_offset     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("offset"));
+    x->in_collision  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("collision"));
     x->in_aniso      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("anisotropy"));
 // SINE controls
     x->in_sine_pitch = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_pitch"));
@@ -1960,6 +2019,7 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_snapshot_undo
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_density_individual, gensym("density_individual"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_dispersion, gensym("dispersion"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_offset, gensym("offset"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_collision, gensym("collision"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_anisotropy, gensym("anisotropy"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_aniso_eps, gensym("aniso_epsilon"), A_DEFFLOAT, 0);
 
