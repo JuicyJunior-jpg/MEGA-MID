@@ -577,6 +577,45 @@ static void juicy_bank_tilde_warp(t_juicy_bank_tilde *x, t_floatarg f){
     if (f >  1.f) f =  1.f;
     x->warp = f;
 }
+static float jb_stretch_warp_coord(float t_raw, float s, float w){
+    // Helper for symmetric stretch + warp shaping on a 0..1 coordinate.
+    //  • t_raw: linear 0..1 position from pivot to edge on one side
+    //  • s    : stretch amount (-1..1)
+    //  • w    : warp amount (-1..1)
+    float t = jb_clamp(t_raw, 0.f, 1.f);
+
+    // --- symmetric stretch ---
+    if (s != 0.f){
+        float s_abs = fabsf(s);
+        float gamma = 1.f + 2.f * s_abs; // 1..3
+        if (s > 0.f){
+            // positive stretch: make far edge sparser (more distance between high modes)
+            t = powf(t, gamma);
+        } else {
+            // negative stretch: pull modes toward pivot (denser upper region)
+            t = 1.f - powf(1.f - t, gamma);
+        }
+    }
+
+    // --- warp: bias where curvature is focused ---
+    if (w != 0.f){
+        float w_abs = fabsf(w);
+        float alpha = 2.5f; // curvature strength
+        float gamma_w = 1.f + alpha * w_abs;
+        if (w > 0.f){
+            // warp > 0: emphasise the edge (more action near outer harmonics)
+            t = powf(t, gamma_w);
+        } else {
+            // warp < 0: emphasise region closer to pivot
+            t = 1.f - powf(1.f - t, gamma_w);
+        }
+    }
+
+    if (t < 0.f) t = 0.f;
+    if (t > 1.f) t = 1.f;
+    return t;
+}
+
 static void jb_apply_stretch(const t_juicy_bank_tilde *x, jb_voice_t *v){
     // Density defines the global low/high bounds of the harmonic spacing.
     // Stretch + warp only reshape how modes are distributed *within* that range,
@@ -622,8 +661,8 @@ static void jb_apply_stretch(const t_juicy_bank_tilde *x, jb_voice_t *v){
         }
     }
 
-    int steps_neg = pivot_j;           // modes below pivot
-    int steps_pos = count - 1 - pivot_j; // modes above pivot
+    int steps_neg = pivot_j;              // modes below pivot
+    int steps_pos = count - 1 - pivot_j;  // modes above pivot
     if (steps_neg == 0 && steps_pos == 0)
         return;
 
@@ -635,44 +674,6 @@ static void jb_apply_stretch(const t_juicy_bank_tilde *x, jb_voice_t *v){
     float r_max = v->m[idxs[count - 1]].ratio_now;
     if (r_max <= r_min + 1e-6f)
         return;
-
-    // Helper lambda-style macros for symmetric stretch + warp on a 0..1 coordinate.
-    //  t_raw  : linear 0..1 distance from pivot to edge on one side
-    //  returns: warped 0..1, staying inside [0,1].
-    auto apply_stretch_warp = [&](float t_raw)->float {
-        float t = jb_clamp(t_raw, 0.f, 1.f);
-
-        // --- symmetric stretch ---
-        if (s != 0.f){
-            float s_abs = fabsf(s);
-            float gamma = 1.f + 2.f * s_abs; // 1..3
-            if (s > 0.f){
-                // positive stretch: make far edge sparser (more distance between high modes)
-                t = powf(t, gamma);
-            } else {
-                // negative stretch: pull modes toward pivot (denser upper region)
-                t = 1.f - powf(1.f - t, gamma);
-            }
-        }
-
-        // --- warp: bias where curvature is focused ---
-        if (w != 0.f){
-            float w_abs = fabsf(w);
-            float alpha = 2.5f; // curvature strength
-            float gamma_w = 1.f + alpha * w_abs;
-            if (w > 0.f){
-                // warp > 0: emphasise the edge (more action near outer harmonics)
-                t = powf(t, gamma_w);
-            } else {
-                // warp < 0: emphasise region closer to pivot
-                t = 1.f - powf(1.f - t, gamma_w);
-            }
-        }
-
-        if (t < 0.f) t = 0.f;
-        if (t > 1.f) t = 1.f;
-        return t;
-    };
 
     // Apply stretch+warp separately on each side of the pivot,
     // remapping ratios but keeping r_min, r_pivot and r_max fixed.
@@ -687,7 +688,7 @@ static void jb_apply_stretch(const t_juicy_bank_tilde *x, jb_voice_t *v){
             // Upper side: map from pivot -> r_max
             if (steps_pos > 0){
                 float d = (float)(j - pivot_j) / (float)steps_pos; // 0..1
-                float t = apply_stretch_warp(d);
+                float t = jb_stretch_warp_coord(d, s, w);
                 float local_min = r_pivot;
                 float local_max = r_max;
                 r_new = local_min + t * (local_max - local_min);
@@ -696,7 +697,7 @@ static void jb_apply_stretch(const t_juicy_bank_tilde *x, jb_voice_t *v){
             // Lower side: map from r_min -> pivot
             if (steps_neg > 0){
                 float d = (float)(pivot_j - j) / (float)steps_neg; // 0..1
-                float t = apply_stretch_warp(d);
+                float t = jb_stretch_warp_coord(d, s, w);
                 float local_min = r_min;
                 float local_max = r_pivot;
                 r_new = local_max - t * (local_max - local_min);
