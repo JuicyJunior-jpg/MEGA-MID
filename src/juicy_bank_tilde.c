@@ -837,11 +837,24 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
 
 // ---------- update voice gains ----------
 static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
+    // First pass: find maximum relative ratio across active modes (after density/warp/offset/collision/dispersion)
+    float max_ratio_rel = 0.f;
+    for (int i = 0; i < x->n_modes; ++i){
+        if (!x->base[i].active) continue;
+        float ratio = v->m[i].ratio_now + v->disp_offset[i];
+        // ratio_rel is harmonic "position": 1=fundamental, 2=2nd harmonic, etc.
+        float ratio_rel = x->base[i].keytrack ? ratio : ((v->f0 > 0.f) ? (ratio / v->f0) : ratio);
+        if (ratio_rel > max_ratio_rel)
+            max_ratio_rel = ratio_rel;
+    }
+    if (max_ratio_rel <= 0.f)
+        max_ratio_rel = 1.f;
+
     for(int i=0;i<x->n_modes;i++){
         if(!x->base[i].active){ v->m[i].gain_now=0.f; continue; }
 
         float ratio = v->m[i].ratio_now + v->disp_offset[i];
-        // ratio_rel here only for weighting functions (brightness, anisotropy, etc.):
+        // ratio_rel here for weighting functions (brightness, anisotropy, position, and sine pattern):
         float ratio_rel = x->base[i].keytrack ? ratio : ((v->f0>0.f)? (ratio / v->f0) : ratio);
 
         float g = x->base[i].base_gain * jb_bright_gain(ratio_rel, v->brightness_v);
@@ -865,41 +878,49 @@ static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
 
         g *= v->cr_gain_mul[i];
 
-        
-float gn = g * w * wp;
+        float gn = g * w * wp;
         if (v->m[i].nyq_kill) gn = 0.f;
-            // smooth partial-count taper: fade out modes above active_modes instead of hard mute
-            if (x->active_modes <= 0){
-                gn = 0.f;
-            } else if (x->active_modes < x->n_modes){
-                int K = x->active_modes;
-                if (i >= K){
-                    // fade over a small number of partials (not too smooth, not brickwall)
-                    float fade_width = 3.f; // number of partial steps for the taper
-                    float u = ((float)i - (float)K) / fade_width;
-                    if (u >= 1.f){
-                        gn = 0.f;
-                    } else if (u > 0.f){
-                        float w_fade = 0.5f * (1.f + cosf((float)M_PI * u));
-                        gn *= w_fade;
-                    }
+
+        // smooth partial-count taper: fade out modes above active_modes instead of hard mute
+        if (x->active_modes <= 0){
+            gn = 0.f;
+        } else if (x->active_modes < x->n_modes){
+            int K = x->active_modes;
+            if (i >= K){
+                // fade over a small number of partials (not too smooth, not brickwall)
+                float fade_width = 3.f; // number of partial steps for the taper
+                float u = ((float)i - (float)K) / fade_width;
+                if (u >= 1.f){
+                    gn = 0.f;
+                } else if (u > 0.f){
+                    float w_fade = 0.5f * (1.f + cosf((float)M_PI * u));
+                    gn *= w_fade;
                 }
             }
-        // --- SINE AM mask (bipolar focus vs complement, applied after gn is computed) ---
+        }
+
+        // --- SINE AM mask (harmonic-domain, ratio-based, normalised 0..1) ---
         {
             int N = x->n_modes;
             float pitch = jb_clamp(x->sine_pitch, 0.f, 1.f);
             float depth = jb_clamp(x->sine_depth, -1.f, 1.f);
             float phase = x->sine_phase;
 
-            // build a genuine sine-shaped 0..1 pattern mask along modes
+            // map harmonic position into 0..1 based on current spectrum
+            float h_norm = 0.f;
+            if (max_ratio_rel > 0.f){
+                h_norm = ratio_rel / max_ratio_rel;
+                if (h_norm < 0.f) h_norm = 0.f;
+                if (h_norm > 1.f) h_norm = 1.f;
+            }
+
+            // keep similar "cycles" mapping as before, but along harmonic-normalised axis
             float cycles_min = 0.25f;
             float cycles_max = floorf((float)N * 0.5f);
             if (cycles_max < cycles_min) cycles_max = cycles_min;
             float cycles = cycles_min + pitch * (cycles_max - cycles_min);
 
-            float k_norm = (N>1) ? ((float)i / (float)(N-1)) : 0.f;
-            float theta = 2.f * (float)M_PI * (cycles * k_norm + phase);
+            float theta = 2.f * (float)M_PI * (cycles * h_norm + phase);
 
             // pure sine in -1..+1, mapped to 0..1 for gain mask
             float s = sinf(theta);
@@ -918,9 +939,11 @@ float gn = g * w * wp;
             if (weight < 0.f) weight = 0.f;
             gn *= weight;
         }
+
         v->m[i].gain_now = (gn<0.f)?0.f:gn;
     }
 }
+
 
 // ---------- allocator helpers ----------
 static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb_rng_t *rng){
