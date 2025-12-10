@@ -886,13 +886,13 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
         T60 *= v->cr_decay_mul[i];
         {
             
-            /* Per-mode damping focus: weight along modes with wrap */
+            /* Per-mode damping focus: linear along modes, no wrap (0=lowest,1=highest) */
             float b = broad_total;
             float p = x->damp_point;
             if (p < 0.f) p = 0.f;
             if (p > 1.f) p = 1.f;
             float k_norm = (x->n_modes>1)? ((float)i/(float)(x->n_modes-1)) : 0.f;
-            float dx = fabsf(k_norm - p); if (dx > 0.5f) dx = 1.f - dx; /* circular distance */
+            float dx = fabsf(k_norm - p); /* purely linear distance in 0..1, no circular wrap */
             float n = (float)((x->n_modes>0)?x->n_modes:1);
             float sigma_min = 0.5f / n;            /* ~single-mode width */
             float sigma_max = 0.5f;                /* whole bank */
