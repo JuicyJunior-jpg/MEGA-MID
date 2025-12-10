@@ -945,24 +945,66 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
 
 // ---------- update voice gains ----------
 static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
-    // First pass: find maximum relative ratio across active modes (after density/warp/offset/collision/dispersion)
-    float max_ratio_rel = 0.f;
+    // Precompute an ordering of active modes from lowest to highest "harmonic" position,
+    // then map that ordering linearly to 0..1 so the sine pattern scans linearly across
+    // the active partials, independent of their exact spacing in Hz.
+    float ratio_rel_sorted[JB_MAX_MODES];
+    int   idx_sorted[JB_MAX_MODES];
+    float order_t[JB_MAX_MODES];
+    int   active_count = 0;
+
     for (int i = 0; i < x->n_modes; ++i){
+        order_t[i] = 0.f;
         if (!x->base[i].active) continue;
+
+        float ratio = v->m[i].ratio_now + v->disp_offset[i];
+        float ratio_rel = x->base[i].keytrack ? ratio : ((v->f0 > 0.f) ? (ratio / v->f0) : ratio);
+        if (ratio_rel < 0.f) ratio_rel = 0.f;
+
+        ratio_rel_sorted[active_count] = ratio_rel;
+        idx_sorted[active_count]      = i;
+        active_count++;
+    }
+
+    // Sort active modes by ratio_rel ascending so 0..1 runs from lowest to highest partial
+    for (int a = 0; a < active_count - 1; ++a){
+        int   min_j   = a;
+        float min_val = ratio_rel_sorted[a];
+        for (int b = a + 1; b < active_count; ++b){
+            if (ratio_rel_sorted[b] < min_val){
+                min_val = ratio_rel_sorted[b];
+                min_j   = b;
+            }
+        }
+        if (min_j != a){
+            float tmpv              = ratio_rel_sorted[a];
+            ratio_rel_sorted[a]     = ratio_rel_sorted[min_j];
+            ratio_rel_sorted[min_j] = tmpv;
+
+            int tmpi         = idx_sorted[a];
+            idx_sorted[a]    = idx_sorted[min_j];
+            idx_sorted[min_j]= tmpi;
+        }
+    }
+
+    if (active_count > 1){
+        float denom = (float)(active_count - 1);
+        for (int rank = 0; rank < active_count; ++rank){
+            int i = idx_sorted[rank];
+            order_t[i] = (float)rank / denom; // 0..1 across active modes
+        }
+    } else if (active_count == 1){
+        order_t[idx_sorted[0]] = 0.f;
+    }
+
+    for(int i = 0; i < x->n_modes; ++i){
+        if(!x->base[i].active){
+            v->m[i].gain_now = 0.f;
+            continue;
+        }
+
         float ratio = v->m[i].ratio_now + v->disp_offset[i];
         // ratio_rel is harmonic "position": 1=fundamental, 2=2nd harmonic, etc.
-        float ratio_rel = x->base[i].keytrack ? ratio : ((v->f0 > 0.f) ? (ratio / v->f0) : ratio);
-        if (ratio_rel > max_ratio_rel)
-            max_ratio_rel = ratio_rel;
-    }
-    if (max_ratio_rel <= 0.f)
-        max_ratio_rel = 1.f;
-
-    for(int i=0;i<x->n_modes;i++){
-        if(!x->base[i].active){ v->m[i].gain_now=0.f; continue; }
-
-        float ratio = v->m[i].ratio_now + v->disp_offset[i];
-        // ratio_rel here for weighting functions (brightness, anisotropy, position, and sine pattern):
         float ratio_rel = x->base[i].keytrack ? ratio : ((v->f0>0.f)? (ratio / v->f0) : ratio);
 
         float g = x->base[i].base_gain * jb_bright_gain(ratio_rel, v->brightness_v);
@@ -1007,70 +1049,64 @@ static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
             }
         }
 
-        // --- SINE AM mask (harmonic-domain, ratio-based, normalised 0..1) ---
+        // --- SINE AM mask (index-linear, lowest->highest, normalised 0..1) ---
         {
-            int N = x->n_modes;
-            float pitch = jb_clamp(x->sine_pitch, 0.f, 1.f);
             float depth = jb_clamp(x->sine_depth, -1.f, 1.f);
-            float phase = x->sine_phase;
-            float width = jb_clamp(x->sine_width, 0.f, 1.f);
-            float skew  = jb_clamp(x->sine_skew, -1.f, 1.f);
+            if (depth != 0.f){
+                int   N      = (active_count > 0) ? active_count : x->n_modes;
+                if (N < 1) N = 1;
+                float pitch  = jb_clamp(x->sine_pitch, 0.f, 1.f);
+                float phase  = x->sine_phase;
+                float width  = jb_clamp(x->sine_width, 0.f, 1.f);
+                float skew   = jb_clamp(x->sine_skew, -1.f, 1.f);
 
-            // map harmonic position into 0..1 based on current spectrum
-            float h_norm = 0.f;
-            if (max_ratio_rel > 0.f){
-                h_norm = ratio_rel / max_ratio_rel;
-                if (h_norm < 0.f) h_norm = 0.f;
-                if (h_norm > 1.f) h_norm = 1.f;
+                float t = order_t[i];
+                if (t < 0.f) t = 0.f;
+                if (t > 1.f) t = 1.f;
+
+                float cycles_min = 0.25f;
+                float cycles_max = floorf((float)N * 0.5f);
+                if (cycles_max < cycles_min) cycles_max = cycles_min;
+                float cycles = cycles_min + pitch * (cycles_max - cycles_min);
+
+                float theta = 2.f * (float)M_PI * (cycles * t + phase);
+
+                // base sine + optional 2nd-harmonic skew, then normalise back to approx -1..+1
+                float s1 = sinf(theta);
+                float s2 = sinf(2.f * theta);
+                float s  = s1 + skew * s2;
+                float norm = 1.f + fabsf(skew);
+                if (norm > 0.f) s /= norm;
+
+                // map to 0..1 for gain mask
+                float pattern = 0.5f * (1.f + s); // 0 at troughs, 1 at peaks
+                if (pattern < 0.f) pattern = 0.f;
+                if (pattern > 1.f) pattern = 1.f;
+
+                // apply peak-width shaping: width=0 => softer, width=1 => sharper
+                if (width > 0.f && pattern > 0.f && pattern < 1.f){
+                    float gamma = 0.5f + 3.0f * width; // moderate range: 0.5..3.5
+                    pattern = powf(pattern, gamma);
+                }
+
+                // bipolar amount:
+                //   depth > 0: attenuate pattern partials
+                //   depth < 0: attenuate non-pattern partials
+                float a_pos = (depth > 0.f) ? depth : 0.f;
+                float a_neg = (depth < 0.f) ? -depth : 0.f;
+
+                float weight = 1.f
+                               - a_pos * pattern          // turn down pattern when depth > 0
+                               - a_neg * (1.f - pattern); // turn down complement when depth < 0
+
+                if (weight < 0.f) weight = 0.f;
+                gn *= weight;
             }
-
-            // keep similar "cycles" mapping as before, but along harmonic-normalised axis
-            float cycles_min = 0.25f;
-            float cycles_max = floorf((float)N * 0.5f);
-            if (cycles_max < cycles_min) cycles_max = cycles_min;
-            float cycles = cycles_min + pitch * (cycles_max - cycles_min);
-
-            float theta = 2.f * (float)M_PI * (cycles * h_norm + phase);
-
-            // base sine + optional 2nd-harmonic skew, then normalise back to approx -1..+1
-            float s1 = sinf(theta);
-            float s2 = sinf(2.f * theta);
-            float s  = s1 + skew * s2;
-            float norm = 1.f + fabsf(skew);
-            if (norm > 0.f) s /= norm;
-
-            // map to 0..1 for gain mask
-            float pattern = 0.5f * (1.f + s); // 0 at troughs, 1 at peaks
-            if (pattern < 0.f) pattern = 0.f;
-            if (pattern > 1.f) pattern = 1.f;
-
-            // apply peak-width shaping: width=0 => softer, width=1 => sharper
-            if (width > 0.f && pattern > 0.f && pattern < 1.f){
-                float gamma = 0.5f + 3.0f * width; // moderate range: 0.5..3.5
-                pattern = powf(pattern, gamma);
-            }
-
-            // bipolar amount:
-            //   depth > 0: attenuate pattern partials
-            //   depth < 0: attenuate non-pattern partials
-            float a_pos = (depth > 0.f) ? depth : 0.f;
-            float a_neg = (depth < 0.f) ? -depth : 0.f;
-
-            float weight = 1.f
-                           - a_pos * pattern          // turn down pattern when depth > 0
-                           - a_neg * (1.f - pattern); // turn down complement when depth < 0
-
-            if (weight < 0.f) weight = 0.f;
-            gn *= weight;
         }
 
-
-        v->m[i].gain_now = (gn<0.f)?0.f:gn;
+        v->m[i].gain_now = (gn < 0.f) ? 0.f : gn;
     }
 }
-
-
-// ---------- allocator helpers ----------
 static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb_rng_t *rng){
         v->rel_env = 1.f;
 v->energy = 0.f;
