@@ -9,15 +9,15 @@
 //     without artificially forcing per-mode gains.
 //
 // Build (macOS):
-//   cc -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type \
-//     -I"/Applications/Pd-0.56-1.app/Contents/Resources/src" \
-//     -arch arm64 -arch x86_64 -mmacosx-version-min=10.13 \
-//     -bundle -undefined dynamic_lookup \
+//   cc -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type 
+//     -I"/Applications/Pd-0.56-1.app/Contents/Resources/src" 
+//     -arch arm64 -arch x86_64 -mmacosx-version-min=10.13 
+//     -bundle -undefined dynamic_lookup 
 //     -o juicy_bank~.pd_darwin juicy_bank_tilde.c
 //
 // Build (Linux):
-//   cc -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type \
-//     -I"/usr/include/pd" -shared -fPIC -Wl,-export-dynamic -lm \
+//   cc -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type 
+//     -I"/usr/include/pd" -shared -fPIC -Wl,-export-dynamic -lm 
 //     -o juicy_bank~.pd_linux juicy_bank_tilde.c
 
 #include "m_pd.h"
@@ -1258,8 +1258,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
         for(int i=0;i<n;i++){
             // Feedback disabled
-            float fbL = 0.f;
-            float fbR = 0.f;
 
             // Per-mode one-sample step
             for(int m=0;m<x->n_modes;m++){
@@ -1317,9 +1315,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 float voiceR = y_totalR * wR * bank_gain;
                 outL[i] += voiceL;
                 outR[i] += voiceR;
-                vsumL += voiceL;
-                vsumR += voiceR;
-
                 // write back small subset (leave other slow vars unchanged)
                 md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
                 md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;
