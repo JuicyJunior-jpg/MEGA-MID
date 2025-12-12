@@ -98,7 +98,7 @@ typedef struct {
     jb_vstate state;
     float f0, vel, energy;
 
-    // projected behavior (per voice)
+    // projected behavior (per voice) — BANK 1
     float pitch_x;
     float brightness_v;
     float bandwidth_v;
@@ -106,19 +106,36 @@ typedef struct {
     float decay_vel_mul;
     float stiffen_add;
 
-    // sympathetic multipliers
+    // projected behavior — BANK 2
+    float brightness_v2;
+    float bandwidth_v2;
+    float decay_pitch_mul2;
+    float decay_vel_mul2;
+    float stiffen_add2;
+
+    // sympathetic multipliers — BANK 1
     float cr_gain_mul[JB_MAX_MODES];
     float cr_decay_mul[JB_MAX_MODES];
 
-    // dispersion morph targets
+    // sympathetic multipliers — BANK 2
+    float cr_gain_mul2[JB_MAX_MODES];
+    float cr_decay_mul2[JB_MAX_MODES];
+
+    // dispersion morph targets — BANK 1
     float disp_offset[JB_MAX_MODES];
     float disp_target[JB_MAX_MODES];
 
-    
-    // release envelope (global per-voice)
+    // dispersion morph targets — BANK 2
+    float disp_offset2[JB_MAX_MODES];
+    float disp_target2[JB_MAX_MODES];
+
+    // release envelopes (per-voice) — BANK 1/2
     float rel_env;
-    // runtime per-mode
+    float rel_env2;
+
+    // runtime per-mode — BANK 1/2
     jb_mode_rt_t m[JB_MAX_MODES];
+    jb_mode_rt_t m2[JB_MAX_MODES];
 } jb_voice_t;
 
 // ---------- the object ----------
@@ -250,6 +267,7 @@ float damping, brightness, position; float damp_broad, damp_point;
 
     // modulation matrix [modsource][target] amounts, -1..+1
     float mod_matrix[JB_N_MODSRC][JB_N_MODTGT];
+    float mod_matrix2[JB_N_MODSRC][JB_N_MODTGT];
 
     float adsr_ms;     // ADSR envelope (0..1) from exciter (legacy name)
 
@@ -502,52 +520,359 @@ static void jb_lock_fundamental_after_density(const t_juicy_bank_tilde *x, jb_vo
 
 }
 
+
+// ---------- bank-aware helper accessors ----------
+static inline int jb_bank_nmodes(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->n_modes2 : x->n_modes;
+}
+static inline int jb_bank_active_modes(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->active_modes2 : x->active_modes;
+}
+static inline const jb_mode_base_t *jb_bank_base(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->base2 : x->base;
+}
+static inline float jb_bank_dispersion(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->dispersion2 : x->dispersion;
+}
+static inline float *jb_bank_dispersion_last(t_juicy_bank_tilde *x, int bank){
+    return bank ? &x->dispersion_last2 : &x->dispersion_last;
+}
+static inline float jb_bank_offset_amt(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->offset_amt2 : x->offset_amt;
+}
+static inline float jb_bank_collision_amt(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->collision_amt2 : x->collision_amt;
+}
+static inline float jb_bank_density_amt(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->density_amt2 : x->density_amt;
+}
+static inline float jb_bank_stretch_amt(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->stretch2 : x->stretch;
+}
+static inline float jb_bank_warp_amt(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->warp2 : x->warp;
+}
+static inline float jb_bank_damping(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->damping2 : x->damping;
+}
+static inline float jb_bank_damp_broad(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->damp_broad2 : x->damp_broad;
+}
+static inline float jb_bank_damp_point(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->damp_point2 : x->damp_point;
+}
+static inline float jb_bank_brightness(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->brightness2 : x->brightness;
+}
+static inline float jb_bank_position(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->position2 : x->position;
+}
+static inline float jb_bank_aniso(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->aniso2 : x->aniso;
+}
+static inline float jb_bank_bandwidth_base(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->bandwidth2 : x->bandwidth;
+}
+static inline float jb_bank_micro_detune(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->micro_detune2 : x->micro_detune;
+}
+static inline float jb_bank_release_amt(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->release_amt2 : x->release_amt;
+}
+static inline float jb_bank_stiffen_amt(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->stiffen_amt2 : x->stiffen_amt;
+}
+static inline float jb_bank_shortscale_amt(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->shortscale_amt2 : x->shortscale_amt;
+}
+static inline float jb_bank_linger_amt(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->linger_amt2 : x->linger_amt;
+}
+static inline float jb_bank_bloom_amt(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->bloom_amt2 : x->bloom_amt;
+}
+static inline float jb_bank_crossring_amt(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->crossring_amt2 : x->crossring_amt;
+}
+static inline float jb_bank_sine_pitch(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->sine_pitch2 : x->sine_pitch;
+}
+static inline float jb_bank_sine_depth(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->sine_depth2 : x->sine_depth;
+}
+static inline float jb_bank_sine_width(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->sine_width2 : x->sine_width;
+}
+static inline float jb_bank_sine_skew(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->sine_skew2 : x->sine_skew;
+}
+static inline float jb_bank_sine_phase(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->sine_phase2 : x->sine_phase;
+}
+static inline float (*jb_bank_mod_matrix(t_juicy_bank_tilde *x, int bank))[JB_N_MODTGT]{
+    return bank ? x->mod_matrix2 : x->mod_matrix;
+}
+
+// ---------- generic bank-safe transforms on ratio_now ----------
+static void jb_apply_density_generic(int n_modes, const jb_mode_base_t *base, float density_amt, jb_mode_rt_t *m){
+    float dens = density_amt;
+    if (dens < -1.f) dens = -1.f;
+
+    int idxs[JB_MAX_MODES];
+    int count = 0;
+
+    for (int i = 0; i < n_modes; ++i){
+        if (base[i].active && base[i].keytrack){
+            idxs[count++] = i;
+        } else {
+            m[i].ratio_now = base[i].base_ratio;
+        }
+    }
+    if (count == 0) return;
+
+    // sort by base ratio
+    for (int k = 1; k < count; ++k){
+        int id = idxs[k];
+        int j  = k;
+        while (j > 0 && base[idxs[j-1]].base_ratio > base[id].base_ratio){
+            idxs[j] = idxs[j-1];
+            --j;
+        }
+        idxs[j] = id;
+    }
+
+    // pivot nearest ratio=1
+    int pivot_j = 0;
+    float best = 1e9f;
+    for (int j = 0; j < count; ++j){
+        int id = idxs[j];
+        float d = fabsf(base[id].base_ratio - 1.f);
+        if (d < best){ best = d; pivot_j = j; }
+    }
+    int pivot_id = idxs[pivot_j];
+    float r_pivot = base[pivot_id].base_ratio;
+
+    float gap = 1.f + dens;
+    if (gap < 0.f) gap = 0.f;
+
+    for (int j = 0; j < count; ++j){
+        int id = idxs[j];
+        int step = j - pivot_j;
+        float r = r_pivot + gap * (float)step;
+        if (r < 0.01f) r = 0.01f;
+        m[id].ratio_now = r;
+    }
+}
+
+static void jb_lock_fundamental_generic(int n_modes, const jb_mode_base_t *base, jb_mode_rt_t *m){
+    if (n_modes > 0 && base[0].keytrack){
+        m[0].ratio_now = 1.f;
+    }
+}
+
+static void jb_apply_stretch_generic(int n_modes, const jb_mode_base_t *base, float stretch, float warp, jb_mode_rt_t *m){
+    float s = jb_clamp(stretch, -1.f, 1.f);
+    float w = jb_clamp(warp,   -1.f, 1.f);
+    if (s == 0.f && w == 0.f) return;
+
+    int idxs[JB_MAX_MODES];
+    int count = 0;
+    for (int i = 0; i < n_modes; ++i){
+        if (base[i].active && base[i].keytrack){
+            idxs[count++] = i;
+        }
+    }
+    if (count <= 1) return;
+
+    // sort by current ratio (post-density)
+    for (int k = 1; k < count; ++k){
+        int id = idxs[k];
+        float r = m[id].ratio_now;
+        int j = k;
+        while (j > 0 && m[idxs[j-1]].ratio_now > r){
+            idxs[j] = idxs[j-1];
+            --j;
+        }
+        idxs[j] = id;
+    }
+
+    // pivot
+    int pivot_j = 0;
+    float best = 1e9f;
+    for (int j = 0; j < count; ++j){
+        int id = idxs[j];
+        float r = m[id].ratio_now;
+        float d = fabsf(r - 1.f);
+        if (d < best){ best = d; pivot_j = j; }
+    }
+
+    int steps_neg = pivot_j;
+    int steps_pos = count - 1 - pivot_j;
+    if (steps_neg == 0 && steps_pos == 0) return;
+
+    int pivot_id = idxs[pivot_j];
+    float r_pivot = m[pivot_id].ratio_now;
+
+    float r_min = m[idxs[0]].ratio_now;
+    float r_max = m[idxs[count - 1]].ratio_now;
+    if (r_max <= r_min + 1e-6f) return;
+
+    for (int j = 0; j < count; ++j){
+        int id = idxs[j];
+        if (j == pivot_j) continue;
+
+        float r_new = m[id].ratio_now;
+
+        if (j > pivot_j){
+            if (steps_pos > 0){
+                float d = (float)(j - pivot_j) / (float)steps_pos;
+                float t = jb_stretch_warp_coord(d, s, w);
+                r_new = r_pivot + t * (r_max - r_pivot);
+            }
+        } else {
+            if (steps_neg > 0){
+                float d = (float)(pivot_j - j) / (float)steps_neg;
+                float t = jb_stretch_warp_coord(d, s, w);
+                r_new = r_pivot - t * (r_pivot - r_min);
+            }
+        }
+
+        if (r_new < 0.01f) r_new = 0.01f;
+        m[id].ratio_now = r_new;
+    }
+}
+
+static void jb_apply_offset_generic(int n_modes, const jb_mode_base_t *base, float offset_amt, jb_mode_rt_t *m){
+    float amt = jb_clamp(offset_amt, -1.f, 1.f);
+    if (amt == 0.f) return;
+    float ratio = powf(2.f, amt);
+    for (int i = 0; i < n_modes; ++i){
+        if (!base[i].active) continue;
+        if (!base[i].keytrack) continue;
+        if (i % 2 == 1){
+            m[i].ratio_now *= ratio;
+        }
+    }
+}
+
+static void jb_apply_collision_generic(int n_modes, const jb_mode_base_t *base, float collision_amt, jb_mode_rt_t *m){
+    float c = jb_clamp(collision_amt, 0.f, 1.f);
+    if (c <= 0.f || n_modes <= 2) return;
+
+    float tmp[JB_MAX_MODES];
+    for (int i = 0; i < n_modes; ++i){
+        tmp[i] = m[i].ratio_now;
+    }
+
+    int any_key = 0;
+    for (int i = 0; i < n_modes; ++i){
+        if (!base[i].active) continue;
+        if (!base[i].keytrack) continue;
+        any_key = 1;
+
+        int left = i;
+        int right = i;
+
+        for (int j = i - 1; j >= 0; --j){
+            if (base[j].active && base[j].keytrack){ left = j; break; }
+        }
+        for (int j = i + 1; j < n_modes; ++j){
+            if (base[j].active && base[j].keytrack){ right = j; break; }
+        }
+
+        float r_i = m[i].ratio_now;
+        float rL = m[left].ratio_now;
+        float rR = m[right].ratio_now;
+        float avg = 0.5f * (rL + rR);
+        tmp[i] = r_i + c * (avg - r_i);
+    }
+
+    if (!any_key) return;
+
+    for (int i = 0; i < n_modes; ++i){
+        if (!base[i].active) continue;
+        if (!base[i].keytrack) continue;
+        m[i].ratio_now = tmp[i];
+    }
+}
+
 // ---------- behavior projection ----------
-static void jb_project_behavior_into_voice(t_juicy_bank_tilde *x, jb_voice_t *v){
+static void jb_project_behavior_into_voice_bank(t_juicy_bank_tilde *x, jb_voice_t *v, int bank){
     float xfac = (x->basef0_ref>0.f)? (v->f0 / x->basef0_ref) : 1.f;
     if (xfac < 1e-6f) xfac = 1e-6f;
     v->pitch_x = xfac;
 
+    const jb_mode_base_t *base = jb_bank_base(x, bank);
+    int n_modes = jb_bank_nmodes(x, bank);
+
+    float stiffen_amt = jb_bank_stiffen_amt(x, bank);
+    float shortscale_amt = jb_bank_shortscale_amt(x, bank);
+    float linger_amt = jb_bank_linger_amt(x, bank);
+    float bloom_amt = jb_bank_bloom_amt(x, bank);
+
+    float *stiffen_add_p      = bank ? &v->stiffen_add2      : &v->stiffen_add;
+    float *decay_pitch_mul_p  = bank ? &v->decay_pitch_mul2  : &v->decay_pitch_mul;
+    float *decay_vel_mul_p    = bank ? &v->decay_vel_mul2    : &v->decay_vel_mul;
+    float *brightness_v_p     = bank ? &v->brightness_v2     : &v->brightness_v;
+    float *bandwidth_v_p      = bank ? &v->bandwidth_v2      : &v->bandwidth_v;
+    float *disp_target_p      = bank ? v->disp_target2       : v->disp_target;
+
     // Stiffen → extra dispersion depth
-    float k_disp = (0.02f + 0.10f * jb_clamp(x->stiffen_amt,0.f,1.f));
-    float alpha  = 0.60f + 0.20f * x->stiffen_amt;
-    v->stiffen_add = k_disp * powf(xfac, alpha);
+    float k_disp = (0.02f + 0.10f * jb_clamp(stiffen_amt,0.f,1.f));
+    float alpha  = 0.60f + 0.20f * stiffen_amt;
+    *stiffen_add_p = k_disp * powf(xfac, alpha);
 
     // Shortscale → decays shorten with pitch
-    float beta = 0.40f + 0.50f * x->shortscale_amt;
-    v->decay_pitch_mul = powf(xfac, -beta);
+    float beta = 0.40f + 0.50f * shortscale_amt;
+    *decay_pitch_mul_p = powf(xfac, -beta);
 
     // Linger → velocity extends decays
-    v->decay_vel_mul = (1.f + (0.30f + 1.20f * x->linger_amt) * jb_clamp(v->vel,0.f,1.f));
+    *decay_vel_mul_p = (1.f + (0.30f + 1.20f * linger_amt) * jb_clamp(v->vel,0.f,1.f));
 
-    // Brightness: purely user-controlled, no pitch/velocity dependence
-    v->brightness_v = jb_clamp(x->brightness, -1.f, 1.f);
+    // Brightness: user-controlled
+    *brightness_v_p = jb_clamp(jb_bank_brightness(x, bank), -1.f, 1.f);
 
     // Bloom → bandwidth
-    float baseBW = x->bandwidth;
-    float addBW  = (0.15f + 0.45f * x->bloom_amt) * jb_clamp(v->vel,0.f,1.f);
-    v->bandwidth_v = jb_clamp(baseBW + addBW, 0.f, 1.f);
+    float baseBW = jb_bank_bandwidth_base(x, bank);
+    float addBW  = (0.15f + 0.45f * bloom_amt) * jb_clamp(v->vel,0.f,1.f);
+    *bandwidth_v_p = jb_clamp(baseBW + addBW, 0.f, 1.f);
 
     // per-mode dispersion targets (ignore fundamental)
-    float total_disp = jb_clamp(x->dispersion + v->stiffen_add, 0.f, 1.f);
-    if (x->dispersion_last<0.f){ x->dispersion_last = -1.f; }
-    for(int i=0;i<x->n_modes;i++){
-        if (!x->base[i].active || i==0){ v->disp_target[i]=0.f; continue; }
-        float sig = x->base[i].disp_signature;
-        v->disp_target[i] = jb_clamp(sig * total_disp, -1.f, 1.f);
+    float total_disp = jb_clamp(jb_bank_dispersion(x, bank) + *stiffen_add_p, 0.f, 1.f);
+    float *disp_last_p = jb_bank_dispersion_last(x, bank);
+    if (*disp_last_p < 0.f){ *disp_last_p = -1.f; }
+
+    for(int i=0;i<n_modes;i++){
+        if (!base[i].active || i==0){ disp_target_p[i]=0.f; continue; }
+        float sig = base[i].disp_signature;
+        disp_target_p[i] = jb_clamp(sig * total_disp, -1.f, 1.f);
     }
 }
-static void jb_update_crossring(t_juicy_bank_tilde *x, int self_idx){
-    const float eps = 0.015f + 0.030f * x->crossring_amt;
-    const float gmul = 1.f + (0.05f + 0.15f * x->crossring_amt);
-    const float dmul = 1.f + (0.08f + 0.22f * x->crossring_amt);
+static void jb_project_behavior_into_voice(t_juicy_bank_tilde *x, jb_voice_t *v){
+    jb_project_behavior_into_voice_bank(x, v, 0);
+}
+static void jb_project_behavior_into_voice2(t_juicy_bank_tilde *x, jb_voice_t *v){
+    jb_project_behavior_into_voice_bank(x, v, 1);
+}
+static void jb_update_crossring_bank(t_juicy_bank_tilde *x, int self_idx, int bank){
+    float cr_amt = jb_bank_crossring_amt(x, bank);
+    const float eps = 0.015f + 0.030f * cr_amt;
+    const float gmul = 1.f + (0.05f + 0.15f * cr_amt);
+    const float dmul = 1.f + (0.08f + 0.22f * cr_amt);
+
+    jb_voice_t *vs = &x->v[self_idx];
+    float *crg = bank ? vs->cr_gain_mul2  : vs->cr_gain_mul;
+    float *crd = bank ? vs->cr_decay_mul2 : vs->cr_decay_mul;
+
+    int n_modes = jb_bank_nmodes(x, bank);
+    const jb_mode_base_t *base = jb_bank_base(x, bank);
+    const jb_mode_rt_t *m_s = bank ? vs->m2 : vs->m;
 
     for(int m=0;m<JB_MAX_MODES;m++){
-        x->v[self_idx].cr_gain_mul[m]=1.f;
-        x->v[self_idx].cr_decay_mul[m]=1.f;
+        crg[m]=1.f;
+        crd[m]=1.f;
     }
-    if (x->crossring_amt<=0.f) return;
-    jb_voice_t *vs = &x->v[self_idx];
+    if (cr_amt<=0.f) return;
     if (vs->state==V_IDLE) return;
 
     for(int u=0; u<x->max_voices; ++u){
@@ -555,16 +880,24 @@ static void jb_update_crossring(t_juicy_bank_tilde *x, int self_idx){
         const jb_voice_t *vu = &x->v[u];
         if (vu->state==V_IDLE) continue;
 
-        for(int m=0;m<x->n_modes;m++){
-            if (!x->base[m].active) continue;
-            float rm = vs->m[m].ratio_now;
+        const jb_mode_rt_t *m_u = bank ? vu->m2 : vu->m;
+
+        for(int mi=0; mi<n_modes; ++mi){
+            if (!base[mi].active) continue;
+            float rm = m_s[mi].ratio_now;
             float rel = (vu->f0>0.f) ? (rm * vs->f0 / vu->f0) : rm;
             if (jb_is_near_integer(rel, eps)){
-                x->v[self_idx].cr_gain_mul[m]  *= gmul;
-                x->v[self_idx].cr_decay_mul[m] *= dmul;
+                crg[mi]  *= gmul;
+                crd[mi]  *= dmul;
             }
         }
     }
+}
+static void jb_update_crossring(t_juicy_bank_tilde *x, int self_idx){
+    jb_update_crossring_bank(x, self_idx, 0);
+}
+static void jb_update_crossring2(t_juicy_bank_tilde *x, int self_idx){
+    jb_update_crossring_bank(x, self_idx, 1);
 }
 
 // ---------- update voice coeffs ----------
@@ -780,52 +1113,60 @@ static void jb_apply_collision(const t_juicy_bank_tilde *x, jb_voice_t *v){
     }
 }
 
-static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
-    for(int i=0;i<x->n_modes;i++){ v->disp_offset[i] = v->disp_target[i]; }
+static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, int bank){
+    int n_modes = jb_bank_nmodes(x, bank);
+    const jb_mode_base_t *base = jb_bank_base(x, bank);
+    jb_mode_rt_t *m = bank ? v->m2 : v->m;
+    float *disp_offset = bank ? v->disp_offset2 : v->disp_offset;
+    float *disp_target = bank ? v->disp_target2 : v->disp_target;
+    float *cr_decay_mul = bank ? v->cr_decay_mul2 : v->cr_decay_mul;
 
-    jb_apply_density(x, v);
+    // copy targets to offsets (instant morph for now)
+    for(int i=0;i<n_modes;i++){ disp_offset[i] = disp_target[i]; }
 
-    jb_lock_fundamental_after_density(x, v);
-    jb_apply_stretch(x, v);
-    jb_apply_offset(x, v);
-    jb_apply_collision(x, v);
+    // ratio transforms
+    jb_apply_density_generic(n_modes, base, jb_bank_density_amt(x, bank), m);
+    jb_lock_fundamental_generic(n_modes, base, m);
+    jb_apply_stretch_generic(n_modes, base, jb_bank_stretch_amt(x, bank), jb_bank_warp_amt(x, bank), m);
+    jb_apply_offset_generic(n_modes, base, jb_bank_offset_amt(x, bank), m);
+    jb_apply_collision_generic(n_modes, base, jb_bank_collision_amt(x, bank), m);
 
-    // --- pitch modulation via modulation matrix (currently: LFO1/LFO2 -> pitch) ---
+    // --- pitch base (bank semitone + pitch-mod from matrix) ---
     float f0_eff = v->f0;
     if (f0_eff <= 0.f) f0_eff = x->basef0_ref;
     if (f0_eff <= 0.f) f0_eff = 1.f;
 
-    // pitch_mod is in -1..+1 roughly when only one source is active,
-    // summed if multiple sources are used.
+    // apply per-bank semitone transpose
+    float semi = (float)x->bank_semitone[bank];
+    if (semi != 0.f){
+        f0_eff *= powf(2.f, semi / 12.f);
+    }
+
+    float (*mm)[JB_N_MODTGT] = jb_bank_mod_matrix(x, bank);
+
     float pitch_mod = 0.f;
-
-    // source index 3 = lfo1, source index 4 = lfo2, target index 12 = pitch
-    pitch_mod += x->lfo_val[0] * x->mod_matrix[3][12];
-    pitch_mod += x->lfo_val[1] * x->mod_matrix[4][12];
-
+    pitch_mod += x->lfo_val[0] * mm[3][12];
+    pitch_mod += x->lfo_val[1] * mm[4][12];
     if (pitch_mod != 0.f){
-        float semis = pitch_mod * JB_PITCH_MOD_SEMITONES; // +/- range in semitones
+        float semis = pitch_mod * JB_PITCH_MOD_SEMITONES;
         float ratio = powf(2.f, semis / 12.f);
         f0_eff *= ratio;
     }
 
-    // --- Per-voice modulation for damping (target 0) and broadness (target 1) ---
-    // Base GUI values:
-    float damping_base = x->damping;           // expected in -1..1
-    float broad_base   = jb_clamp(x->damp_broad, 0.f, 1.f);
+    // --- damping + broadness mod (targets 0 and 1) ---
+    float damping_base = jb_bank_damping(x, bank);
+    float broad_base   = jb_clamp(jb_bank_damp_broad(x, bank), 0.f, 1.f);
 
-    // Accumulate modulation from all sources for these two targets.
     float damping_mod = 0.f;
     float broad_mod   = 0.f;
     for (int src = 0; src < JB_N_MODSRC; ++src){
         float src_v = jb_mod_source_value(x, v, src);
         if (src_v == 0.f) continue;
-        float amt_d = x->mod_matrix[src][0]; // damping target index 0
-        float amt_b = x->mod_matrix[src][1]; // broadness target index 1
+        float amt_d = mm[src][0];
+        float amt_b = mm[src][1];
         if (amt_d != 0.f) damping_mod += amt_d * src_v;
         if (amt_b != 0.f) broad_mod   += amt_b * src_v;
     }
-    // Clamp summed modulation to keep it sane.
     if (damping_mod > 1.f) damping_mod = 1.f;
     else if (damping_mod < -1.f) damping_mod = -1.f;
     if (broad_mod > 1.f) broad_mod = 1.f;
@@ -839,12 +1180,14 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
     if (broad_total < 0.f) broad_total = 0.f;
     else if (broad_total > 1.f) broad_total = 1.f;
 
-    float md_amt = jb_clamp(x->micro_detune,0.f,1.f);
-    float bw_amt = jb_clamp(v->bandwidth_v, 0.f, 1.f);
+    float md_amt = jb_clamp(jb_bank_micro_detune(x, bank),0.f,1.f);
+    float bw_amt = bank ? jb_clamp(v->bandwidth_v2, 0.f, 1.f) : jb_clamp(v->bandwidth_v, 0.f, 1.f);
 
-    for(int i=0;i<x->n_modes;i++){
-        jb_mode_rt_t *md=&v->m[i];
-        if(!x->base[i].active){
+    float disp = jb_bank_dispersion(x, bank);
+
+    for(int i=0;i<n_modes;i++){
+        jb_mode_rt_t *md=&m[i];
+        if(!base[i].active){
             md->a1L=md->a2L=md->a1bL=md->a2bL=0.f;
             md->a1R=md->a2R=md->a1bR=md->a2bR=0.f;
             md->t60_s=0.f;
@@ -852,20 +1195,21 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
             continue;
         }
 
-        // base ratio including dispersion
-        float ratio_base = md->ratio_now + v->disp_offset[i];
-        if (x->dispersion < 0.f){ float a = jb_clamp(-x->dispersion, 0.f, 1.f); float nearest = roundf(ratio_base); ratio_base = (1.f - a)*ratio_base + a*nearest; }
+        float ratio_base = md->ratio_now + disp_offset[i];
+        if (disp < 0.f){
+            float a = jb_clamp(-disp, 0.f, 1.f);
+            float nearest = roundf(ratio_base);
+            ratio_base = (1.f - a)*ratio_base + a*nearest;
+        }
 
-        // density pivot bias now fixed to neighbor mapping (per-resonator); no harmonic stepping here.
-// micro detune per-ear (except fundamental)
         float ratioL = ratio_base;
         float ratioR = ratio_base;
         if(i!=0){ ratioL += md_amt * md->md_hit_offsetL; ratioR += md_amt * md->md_hit_offsetR; }
         if (ratioL < 0.01f) ratioL = 0.01f;
         if (ratioR < 0.01f) ratioR = 0.01f;
 
-        float HzL = x->base[i].keytrack ? (f0_eff * ratioL) : ratioL;
-        float HzR = x->base[i].keytrack ? (f0_eff * ratioR) : ratioR;
+        float HzL = base[i].keytrack ? (f0_eff * ratioL) : ratioL;
+        float HzR = base[i].keytrack ? (f0_eff * ratioR) : ratioR;
         md->nyq_kill = 0;
         if (HzL >= 0.5f * x->sr || HzR >= 0.5f * x->sr){
             md->nyq_kill = 1;
@@ -877,32 +1221,34 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
         float wL = 2.f * (float)M_PI * HzL / x->sr;
         float wR = 2.f * (float)M_PI * HzR / x->sr;
 
-        
         if (md->nyq_kill){
             md->a1L=md->a2L=md->a1bL=md->a2bL=0.f;
             md->a1R=md->a2R=md->a1bR=md->a2bR=0.f;
             md->normL = md->normR = 1.f;
-        }float base_ms = x->base[i].base_decay_ms;
-        // T60 & radius
+        }
+
+        float base_ms = base[i].base_decay_ms;
         float T60 = jb_clamp(base_ms, 0.f, 1e7f) * 0.001f;
-        T60 *= v->decay_pitch_mul;
-        T60 *= v->decay_vel_mul;
-        T60 *= v->cr_decay_mul[i];
+
+        float decay_pitch_mul = bank ? v->decay_pitch_mul2 : v->decay_pitch_mul;
+        float decay_vel_mul   = bank ? v->decay_vel_mul2   : v->decay_vel_mul;
+
+        T60 *= decay_pitch_mul;
+        T60 *= decay_vel_mul;
+        T60 *= cr_decay_mul[i];
+
         {
-            
-            /* Per-mode damping focus: linear along modes, no wrap (0=lowest,1=highest) */
             float b = broad_total;
-            float p = x->damp_point;
+            float p = jb_bank_damp_point(x, bank);
             if (p < 0.f) p = 0.f;
             if (p > 1.f) p = 1.f;
-            float k_norm = (x->n_modes>1)? ((float)i/(float)(x->n_modes-1)) : 0.f;
-            float dx = fabsf(k_norm - p); /* purely linear distance in 0..1, no circular wrap */
-            float n = (float)((x->n_modes>0)?x->n_modes:1);
-            float sigma_min = 0.5f / n;            /* ~single-mode width */
-            float sigma_max = 0.5f;                /* whole bank */
+            float k_norm = (n_modes>1)? ((float)i/(float)(n_modes-1)) : 0.f;
+            float dx = fabsf(k_norm - p);
+            float n = (float)((n_modes>0)?n_modes:1);
+            float sigma_min = 0.5f / n;
+            float sigma_max = 0.5f;
             float sigma = (1.f - b)*sigma_max + b*sigma_min;
-            float wloc = expf(-0.5f * (dx*dx) / (sigma*sigma)); /* 0..1 */
-            /*/* apply local weighting to global damping amount */
+            float wloc = expf(-0.5f * (dx*dx) / (sigma*sigma));
             float d_amt = jb_clamp(damping_total, -1.f, 1.f) * wloc;
             if (d_amt >= 0.f){
                 T60 *= (1.f - d_amt);
@@ -912,7 +1258,6 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
                 T60 = T60 + Dneg * (ceiling - T60);
                 if (T60 > ceiling) T60 = ceiling;
             }
-
         }
         md->t60_s = T60;
 
@@ -922,7 +1267,6 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
         md->a1L=2.f*r*cL; md->a2L=-r*r;
         md->a1R=2.f*r*cR; md->a2R=-r*r;
 
-        // --- NEW: frequency-normalized resonance drive factors ---
         float denomL = (1.f - 2.f*r*cL + r*r);
         float denomR = (1.f - 2.f*r*cR + r*r);
         if (denomL < 1e-6f) denomL = 1e-6f;
@@ -931,7 +1275,7 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
         md->normR = denomR;
 
         if (bw_amt > 0.f){
-            float mode_scale = (x->n_modes>1)? ((float)i/(float)(x->n_modes-1)) : 0.f;
+            float mode_scale = (n_modes>1)? ((float)i/(float)(n_modes-1)) : 0.f;
             float max_det = 0.0005f + 0.0015f * mode_scale;
             float detL = jb_clamp(md->bw_hit_ratioL, -max_det, max_det) * bw_amt;
             float detR = jb_clamp(md->bw_hit_ratioR, -max_det, max_det) * bw_amt;
@@ -946,23 +1290,33 @@ static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
         }
     }
 }
+static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
+    jb_update_voice_coeffs_bank(x, v, 0);
+}
+static void jb_update_voice_coeffs2(t_juicy_bank_tilde *x, jb_voice_t *v){
+    jb_update_voice_coeffs_bank(x, v, 1);
+}
 
 // ---------- update voice gains ----------
-static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
-    // Precompute an ordering of active modes from lowest to highest "harmonic" position,
-    // then map that ordering linearly to 0..1 so the sine pattern scans linearly across
-    // the active partials, independent of their exact spacing in Hz.
+static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *v, int bank){
+    int n_modes = jb_bank_nmodes(x, bank);
+    int active_modes = jb_bank_active_modes(x, bank);
+    const jb_mode_base_t *base = jb_bank_base(x, bank);
+    jb_mode_rt_t *m = bank ? v->m2 : v->m;
+    float *disp_offset = bank ? v->disp_offset2 : v->disp_offset;
+    float *cr_gain_mul = bank ? v->cr_gain_mul2 : v->cr_gain_mul;
+
     float ratio_rel_sorted[JB_MAX_MODES];
     int   idx_sorted[JB_MAX_MODES];
     float order_t[JB_MAX_MODES];
     int   active_count = 0;
 
-    for (int i = 0; i < x->n_modes; ++i){
+    for (int i = 0; i < n_modes; ++i){
         order_t[i] = 0.f;
-        if (!x->base[i].active) continue;
+        if (!base[i].active) continue;
 
-        float ratio = v->m[i].ratio_now + v->disp_offset[i];
-        float ratio_rel = x->base[i].keytrack ? ratio : ((v->f0 > 0.f) ? (ratio / v->f0) : ratio);
+        float ratio = m[i].ratio_now + disp_offset[i];
+        float ratio_rel = base[i].keytrack ? ratio : ((v->f0 > 0.f) ? (ratio / v->f0) : ratio);
         if (ratio_rel < 0.f) ratio_rel = 0.f;
 
         ratio_rel_sorted[active_count] = ratio_rel;
@@ -970,7 +1324,6 @@ static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
         active_count++;
     }
 
-    // Sort active modes by ratio_rel ascending so 0..1 runs from lowest to highest partial
     for (int a = 0; a < active_count - 1; ++a){
         int   min_j   = a;
         float min_val = ratio_rel_sorted[a];
@@ -985,9 +1338,9 @@ static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
             ratio_rel_sorted[a]     = ratio_rel_sorted[min_j];
             ratio_rel_sorted[min_j] = tmpv;
 
-            int tmpi         = idx_sorted[a];
-            idx_sorted[a]    = idx_sorted[min_j];
-            idx_sorted[min_j]= tmpi;
+            int tmpi          = idx_sorted[a];
+            idx_sorted[a]     = idx_sorted[min_j];
+            idx_sorted[min_j] = tmpi;
         }
     }
 
@@ -995,54 +1348,55 @@ static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
         float denom = (float)(active_count - 1);
         for (int rank = 0; rank < active_count; ++rank){
             int i = idx_sorted[rank];
-            order_t[i] = (float)rank / denom; // 0..1 across active modes
+            order_t[i] = (float)rank / denom;
         }
     } else if (active_count == 1){
         order_t[idx_sorted[0]] = 0.f;
     }
 
-    for(int i = 0; i < x->n_modes; ++i){
-        if(!x->base[i].active){
-            v->m[i].gain_now = 0.f;
+    float brightness_v = bank ? v->brightness_v2 : v->brightness_v;
+    float pos = jb_bank_position(x, bank);
+    float aniso = jb_bank_aniso(x, bank);
+
+    for(int i = 0; i < n_modes; ++i){
+        if(!base[i].active){
+            m[i].gain_now = 0.f;
             continue;
         }
 
-        float ratio = v->m[i].ratio_now + v->disp_offset[i];
-        // ratio_rel is harmonic "position": 1=fundamental, 2=2nd harmonic, etc.
-        float ratio_rel = x->base[i].keytrack ? ratio : ((v->f0>0.f)? (ratio / v->f0) : ratio);
+        float ratio = m[i].ratio_now + disp_offset[i];
+        float ratio_rel = base[i].keytrack ? ratio : ((v->f0>0.f)? (ratio / v->f0) : ratio);
 
-        float g = x->base[i].base_gain * jb_bright_gain(ratio_rel, v->brightness_v);
+        float g = base[i].base_gain * jb_bright_gain(ratio_rel, brightness_v);
 
         float w = 1.f;
-        if (i != 0 && x->aniso != 0.f){
+        if (i != 0 && aniso != 0.f){
             float r = ratio_rel;
             float kf = nearbyintf(r);
             int   k  = (int)kf; if (k < 1) k = 1;
             float d  = fabsf(r - kf);
-            float w0 = 0.25f;              /* fixed internal width */
-            float prox = expf(- (d/w0)*(d/w0)); /* 0..1 */
-            int parity = (k % 2 == 0) ? +1 : -1; /* +1 even, -1 odd */
-            float bias = x->aniso * parity * prox;
+            float w0 = 0.25f;
+            float prox = expf(- (d/w0)*(d/w0));
+            int parity = (k % 2 == 0) ? +1 : -1;
+            float bias = aniso * parity * prox;
             float ampMul = 1.f + bias;
             if (ampMul < 0.f) ampMul = 0.f;
             w *= ampMul;
         }
 
-        float wp = jb_position_weight(ratio_rel, x->position);
+        float wp = jb_position_weight(ratio_rel, pos);
 
-        g *= v->cr_gain_mul[i];
+        g *= cr_gain_mul[i];
 
         float gn = g * w * wp;
-        if (v->m[i].nyq_kill) gn = 0.f;
+        if (m[i].nyq_kill) gn = 0.f;
 
-        // smooth partial-count taper: fade out modes above active_modes instead of hard mute
-        if (x->active_modes <= 0){
+        if (active_modes <= 0){
             gn = 0.f;
-        } else if (x->active_modes < x->n_modes){
-            int K = x->active_modes;
+        } else if (active_modes < n_modes){
+            int K = active_modes;
             if (i >= K){
-                // fade over a small number of partials (not too smooth, not brickwall)
-                float fade_width = 3.f; // number of partial steps for the taper
+                float fade_width = 3.f;
                 float u = ((float)i - (float)K) / fade_width;
                 if (u >= 1.f){
                     gn = 0.f;
@@ -1053,16 +1407,16 @@ static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
             }
         }
 
-        // --- SINE AM mask (index-linear, lowest->highest, normalised 0..1) ---
+        // --- SINE AM mask (bank-specific) ---
         {
-            float depth = jb_clamp(x->sine_depth, -1.f, 1.f);
+            float depth = jb_clamp(jb_bank_sine_depth(x, bank), -1.f, 1.f);
             if (depth != 0.f){
-                int   N      = (active_count > 0) ? active_count : x->n_modes;
+                int   N      = (active_count > 0) ? active_count : n_modes;
                 if (N < 1) N = 1;
-                float pitch  = jb_clamp(x->sine_pitch, 0.f, 1.f);
-                float phase  = x->sine_phase;
-                float width  = jb_clamp(x->sine_width, 0.f, 1.f);
-                float skew   = jb_clamp(x->sine_skew, -1.f, 1.f);
+                float pitch  = jb_clamp(jb_bank_sine_pitch(x, bank), 0.f, 1.f);
+                float phase  = jb_bank_sine_phase(x, bank);
+                float width  = jb_clamp(jb_bank_sine_width(x, bank), 0.f, 1.f);
+                float skew   = jb_clamp(jb_bank_sine_skew(x, bank), -1.f, 1.f);
 
                 float t = order_t[i];
                 if (t < 0.f) t = 0.f;
@@ -1075,45 +1429,48 @@ static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
 
                 float theta = 2.f * (float)M_PI * (cycles * t + phase);
 
-                // base sine + optional 2nd-harmonic skew, then normalise back to approx -1..+1
                 float s1 = sinf(theta);
                 float s2 = sinf(2.f * theta);
                 float s  = s1 + skew * s2;
                 float norm = 1.f + fabsf(skew);
                 if (norm > 0.f) s /= norm;
 
-                // map to 0..1 for gain mask
-                float pattern = 0.5f * (1.f + s); // 0 at troughs, 1 at peaks
+                float pattern = 0.5f * (1.f + s);
                 if (pattern < 0.f) pattern = 0.f;
                 if (pattern > 1.f) pattern = 1.f;
 
-                // apply peak-width shaping: width=0 => softer, width=1 => sharper
                 if (width > 0.f && pattern > 0.f && pattern < 1.f){
-                    float gamma = 0.5f + 3.0f * width; // moderate range: 0.5..3.5
+                    float gamma = 0.5f + 3.0f * width;
                     pattern = powf(pattern, gamma);
                 }
 
-                // bipolar amount:
-                //   depth > 0: attenuate pattern partials
-                //   depth < 0: attenuate non-pattern partials
                 float a_pos = (depth > 0.f) ? depth : 0.f;
                 float a_neg = (depth < 0.f) ? -depth : 0.f;
 
                 float weight = 1.f
-                               - a_pos * pattern          // turn down pattern when depth > 0
-                               - a_neg * (1.f - pattern); // turn down complement when depth < 0
+                               - a_pos * pattern
+                               - a_neg * (1.f - pattern);
 
                 if (weight < 0.f) weight = 0.f;
                 gn *= weight;
             }
         }
 
-        v->m[i].gain_now = (gn < 0.f) ? 0.f : gn;
+        m[i].gain_now = (gn < 0.f) ? 0.f : gn;
     }
 }
+static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
+    jb_update_voice_gains_bank(x, v, 0);
+}
+static void jb_update_voice_gains2(const t_juicy_bank_tilde *x, jb_voice_t *v){
+    jb_update_voice_gains_bank(x, v, 1);
+}
 static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb_rng_t *rng){
-        v->rel_env = 1.f;
-v->energy = 0.f;
+    v->rel_env  = 1.f;
+    v->rel_env2 = 1.f;
+    v->energy = 0.f;
+
+    // BANK 1
     for(int i=0;i<x->n_modes;i++){
         jb_mode_rt_t *md=&v->m[i];
         md->ratio_now = x->base[i].base_ratio;
@@ -1129,9 +1486,31 @@ v->energy = 0.f;
         md->bw_hit_ratioL = 0.f;  md->bw_hit_ratioR = 0.f;
         md->normL = md->normR = 1.f;
         md->nyq_kill = 0;
+
         v->disp_offset[i]=0.f; v->disp_target[i]=0.f;
         v->cr_gain_mul[i]=1.f; v->cr_decay_mul[i]=1.f;
         (void)rng;
+    }
+
+    // BANK 2
+    for(int i=0;i<x->n_modes2;i++){
+        jb_mode_rt_t *md=&v->m2[i];
+        md->ratio_now = x->base2[i].base_ratio;
+        md->decay_ms_now = x->base2[i].base_decay_ms;
+        md->gain_now = x->base2[i].base_gain;
+        md->t60_s = md->decay_ms_now*0.001f; md->decay_u=0.f;
+        md->a1L=md->a2L=md->y1L=md->y2L=0.f; md->a1bL=md->a2bL=md->y1bL=md->y2bL=0.f;
+        md->a1R=md->a2R=md->y1R=md->y2R=0.f; md->a1bR=md->a2bR=md->y1bR=md->y2bR=0.f;
+        md->driveL=md->driveR=0.f; md->envL=md->envR=0.f;
+        md->y_pre_lastL=md->y_pre_lastR=0.f;
+        md->hit_gateL=md->hit_gateR=0; md->hit_coolL=md->hit_coolR=0;
+        md->md_hit_offsetL = 0.f; md->md_hit_offsetR = 0.f;
+        md->bw_hit_ratioL = 0.f;  md->bw_hit_ratioR = 0.f;
+        md->normL = md->normR = 1.f;
+        md->nyq_kill = 0;
+
+        v->disp_offset2[i]=0.f; v->disp_target2[i]=0.f;
+        v->cr_gain_mul2[i]=1.f; v->cr_decay_mul2[i]=1.f;
     }
 }
 
@@ -1151,6 +1530,7 @@ static void jb_note_on(t_juicy_bank_tilde *x, float f0, float vel){
     v->state = V_HELD; v->f0 = (f0<=0.f)?1.f:f0; v->vel = jb_clamp(vel,0.f,1.f);
     jb_voice_reset_states(x, v, &x->rng);
     jb_project_behavior_into_voice(x, v);
+    jb_project_behavior_into_voice2(x, v);
 }
 
 static void jb_note_off(t_juicy_bank_tilde *x, float f0){
@@ -1177,6 +1557,7 @@ static void jb_note_on_voice(t_juicy_bank_tilde *x, int vix1, float f0, float ve
     v->state = V_HELD; v->f0 = f0; v->vel = vel;
     jb_voice_reset_states(x, v, &x->rng);
     jb_project_behavior_into_voice(x, v);
+    jb_project_behavior_into_voice2(x, v);
 }
 
 static void jb_note_off_voice(t_juicy_bank_tilde *x, int vix1){
@@ -1235,6 +1616,11 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         jb_project_behavior_into_voice(x, v); // keep behavior up-to-date
         jb_update_voice_coeffs(x, v);
         jb_update_voice_gains(x, v);
+        // bank 2 runtime prep (render/mix happens in STEP 2B-2)
+        jb_update_crossring2(x, vix);
+        jb_project_behavior_into_voice2(x, v);
+        jb_update_voice_coeffs2(x, v);
+        jb_update_voice_gains2(x, v);
     }
 
 
@@ -1247,130 +1633,193 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         jb_voice_t *v = &x->v[vix];
         if (v->state==V_IDLE) continue;
 
-        const float bw_amt = jb_clamp(v->bandwidth_v, 0.f, 1.f);
+        const float bw_amt1 = jb_clamp(v->bandwidth_v, 0.f, 1.f);
+        const float bw_amt2 = jb_clamp(v->bandwidth_v2, 0.f, 1.f);
         const float use_gate = (x->exciter_mode==0) ? ((v->state==V_HELD)?1.f:0.f) : 1.f;
         t_sample *srcL = (x->exciter_mode==0) ? inL : vinL[vix];
         t_sample *srcR = (x->exciter_mode==0) ? inR : vinR[vix];
-        // global modal bank gain (fixed at 1.0; feedback removed),
-        // modulated per-voice by the modulation matrix target "master" (index 11).
-        float master_base = x->bank_master[0]; // STEP 1: bank 1 master inlet (bank 2 comes in STEP 2)
 
-        // master_mod accumulates contributions from all sources mapped to "master".
-        // For now we only use LFO1 (source 3) and LFO2 (source 4).
-        float master_mod = 0.f;
-        master_mod += x->lfo_val[0] * x->mod_matrix[3][11]; // lfo1_to_master
-        master_mod += x->lfo_val[1] * x->mod_matrix[4][11]; // lfo2_to_master
+        // Per-bank master gain (0..1) with modulation-matrix target "master" (index 11).
+        float (*mm1)[JB_N_MODTGT] = x->mod_matrix;
+        float (*mm2)[JB_N_MODTGT] = x->mod_matrix2;
 
-        // Clamp summed modulation to [-1,1] so it stays well-behaved even if multiple sources are active.
-        if (master_mod > 1.f) master_mod = 1.f;
-        else if (master_mod < -1.f) master_mod = -1.f;
+        float master_base1 = x->bank_master[0];
+        float master_base2 = x->bank_master[1];
 
-        // Map modulation into the 0..1 range around master_base without overshooting:
-        //   master_mod > 0  -> move towards 1
-        //   master_mod < 0  -> move towards 0
-        float bank_gain;
-        if (master_mod >= 0.f){
-            bank_gain = master_base + master_mod * (1.f - master_base);
-        } else {
-            bank_gain = master_base + master_mod * master_base;
+        float master_mod1 = 0.f;
+        float master_mod2 = 0.f;
+        for (int src = 0; src < JB_N_MODSRC; ++src){
+            float src_v = jb_mod_source_value(x, v, src);
+            if (src_v == 0.f) continue;
+            master_mod1 += mm1[src][11] * src_v;
+            master_mod2 += mm2[src][11] * src_v;
         }
+        if (master_mod1 > 1.f) master_mod1 = 1.f; else if (master_mod1 < -1.f) master_mod1 = -1.f;
+        if (master_mod2 > 1.f) master_mod2 = 1.f; else if (master_mod2 < -1.f) master_mod2 = -1.f;
+
+        float bank_gain1;
+        if (master_mod1 >= 0.f) bank_gain1 = master_base1 + master_mod1 * (1.f - master_base1);
+        else                    bank_gain1 = master_base1 + master_mod1 * master_base1;
+
+        float bank_gain2;
+        if (master_mod2 >= 0.f) bank_gain2 = master_base2 + master_mod2 * (1.f - master_base2);
+        else                    bank_gain2 = master_base2 + master_mod2 * master_base2;
 
         // --- pan modulation (target index 13 = "pan") ---
-        // Accumulate contributions from all modulation sources for this voice.
-        float pan_mod = 0.f;
+        float pan_mod1 = 0.f;
+        float pan_mod2 = 0.f;
         for (int src = 0; src < JB_N_MODSRC; ++src){
-            float amt = x->mod_matrix[src][13]; // matrix: [source][pan]
-            if (amt == 0.f) continue;
             float src_v = jb_mod_source_value(x, v, src);
-            pan_mod += amt * src_v;
+            if (src_v == 0.f) continue;
+            float a1 = mm1[src][13];
+            float a2 = mm2[src][13];
+            if (a1 != 0.f) pan_mod1 += a1 * src_v;
+            if (a2 != 0.f) pan_mod2 += a2 * src_v;
         }
-        if (pan_mod > 1.f) pan_mod = 1.f;
-        else if (pan_mod < -1.f) pan_mod = -1.f;
+        if (pan_mod1 > 1.f) pan_mod1 = 1.f; else if (pan_mod1 < -1.f) pan_mod1 = -1.f;
+        if (pan_mod2 > 1.f) pan_mod2 = 1.f; else if (pan_mod2 < -1.f) pan_mod2 = -1.f;
 
+        const jb_mode_base_t *base1 = x->base;
+        const jb_mode_base_t *base2 = x->base2;
 
         for(int i=0;i<n;i++){
-            // Feedback disabled
+            // -------- BANK 1 --------
+            if (bank_gain1 > 0.f && v->rel_env > 0.f){
+                for(int m=0;m<x->n_modes;m++){
+                    if(!base1[m].active) continue;
+                    jb_mode_rt_t *md=&v->m[m];
+                    if (md->gain_now<=0.f || md->nyq_kill) continue;
 
-            // Per-mode one-sample step
-            for(int m=0;m<x->n_modes;m++){
-                if(!x->base[m].active) continue;
-                jb_mode_rt_t *md=&v->m[m];
-                if (md->gain_now<=0.f || md->nyq_kill) continue;
+                    float y1L=md->y1L, y2L=md->y2L, y1bL=md->y1bL, y2bL=md->y2bL, driveL=md->driveL, envL=md->envL;
+                    float y1R=md->y1R, y2R=md->y2R, y1bR=md->y1bR, y2bR=md->y2bR, driveR=md->driveR, envR=md->envR;
+                    float u = md->decay_u;
+                    float att_ms = jb_clamp(base1[m].attack_ms,0.f,500.f);
+                    float att_a = (att_ms<=0.f)?1.f:(1.f-expf(-1.f/(0.001f*att_ms*x->sr)));
+                    float du = (md->t60_s > 1e-6f) ? (1.f / (md->t60_s * x->sr)) : 1.f;
 
-                // pull local copies
-                float y1L=md->y1L, y2L=md->y2L, y1bL=md->y1bL, y2bL=md->y2bL, driveL=md->driveL, envL=md->envL;
-                float y1R=md->y1R, y2R=md->y2R, y1bR=md->y1bR, y2bR=md->y2bR, driveR=md->driveR, envR=md->envR;
-                float u = md->decay_u;
-                float att_ms = jb_clamp(x->base[m].attack_ms,0.f,500.f);
-                float att_a = (att_ms<=0.f)?1.f:(1.f-expf(-1.f/(0.001f*att_ms*x->sr)));
-                float du = (md->t60_s > 1e-6f) ? (1.f / (md->t60_s * x->sr)) : 1.f;
+                    float excL = use_gate * (srcL[i]) * md->gain_now;
+                    float excR = use_gate * (srcR[i]) * md->gain_now;
 
-                // excitation: use current sample src + feedback for this sample
-                float excL = use_gate * (srcL[i]) * md->gain_now;
-                float excR = use_gate * (srcR[i]) * md->gain_now;
+                    driveL += att_a*(excL - driveL);
+                    float y_linL = (md->a1L*y1L + md->a2L*y2L) + driveL * md->normL;
+                    y2L=y1L; y1L=y_linL;
 
-                // modal integrators
-                driveL += att_a*(excL - driveL);
-                float y_linL = (md->a1L*y1L + md->a2L*y2L) + driveL * md->normL;
-                y2L=y1L; y1L=y_linL;
+                    driveR += att_a*(excR - driveR);
+                    float y_linR = (md->a1R*y1R + md->a2R*y2R) + driveR * md->normR;
+                    y2R=y1R; y1R=y_linR;
 
-                driveR += att_a*(excR - driveR);
-                float y_linR = (md->a1R*y1R + md->a2R*y2R) + driveR * md->normR;
-                y2R=y1R; y1R=y_linR;
+                    float y_totalL = y_linL;
+                    float y_totalR = y_linR;
+                    if (bw_amt1 > 0.f){
+                        float y_lin_bL = (md->a1bL*y1bL + md->a2bL*y2bL);
+                        y2bL=y1bL; y1bL=y_lin_bL;
+                        y_totalL += 0.12f * bw_amt1 * y_lin_bL;
 
-                float y_totalL = y_linL;
-                float y_totalR = y_linR;
-                if (bw_amt > 0.f){
-                    float y_lin_bL = (md->a1bL*y1bL + md->a2bL*y2bL);
-                    y2bL=y1bL; y1bL=y_lin_bL;
-                    y_totalL += 0.12f * bw_amt * y_lin_bL;
+                        float y_lin_bR = (md->a1bR*y1bR + md->a2bR*y2bR);
+                        y2bR=y1bR; y1bR=y_lin_bR;
+                        y_totalR += 0.12f * bw_amt1 * y_lin_bR;
+                    }
 
-                    float y_lin_bR = (md->a1bR*y1bR + md->a2bR*y2bR);
-                    y2bR=y1bR; y1bR=y_lin_bR;
-                    y_totalR += 0.12f * bw_amt * y_lin_bR;
+                    float S = jb_curve_shape_gain(u, base1[m].curve_amt);
+                    if (base1[m].curve_amt < 0.f){ if (S < 0.001f) S = 0.001f; }
+                    y_totalL *= S; y_totalR *= S;
+                    u += du; if(u>1.f){ u=1.f; }
+
+                    float base_pan = jb_clamp(base1[m].pan, -1.f, 1.f);
+                    float p = base_pan + pan_mod1;
+                    if (p > 1.f) p = 1.f;
+                    else if (p < -1.f) p = -1.f;
+                    float wL = sqrtf(0.5f*(1.f - p));
+                    float wR = sqrtf(0.5f*(1.f + p));
+                    y_totalL *= v->rel_env; y_totalR *= v->rel_env;
+                    outL[i] += y_totalL * wL * bank_gain1;
+                    outR[i] += y_totalR * wR * bank_gain1;
+
+                    md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
+                    md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;
+                    md->decay_u=u;
+                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
                 }
+            }
 
-                float S = jb_curve_shape_gain(u, x->base[m].curve_amt);
-                if (x->base[m].curve_amt < 0.f){ if (S < 0.001f) S = 0.001f; }
-                y_totalL *= S; y_totalR *= S;
-                u += du; if(u>1.f){ u=1.f; }
+            // -------- BANK 2 --------
+            if (bank_gain2 > 0.f && v->rel_env2 > 0.f){
+                for(int m=0;m<x->n_modes2;m++){
+                    if(!base2[m].active) continue;
+                    jb_mode_rt_t *md=&v->m2[m];
+                    if (md->gain_now<=0.f || md->nyq_kill) continue;
 
-                // equal-power pan and sum (scaled by global bank_gain)
-                float base_pan = jb_clamp(x->base[m].pan, -1.f, 1.f);
-                float p = base_pan + pan_mod;
-                if (p > 1.f) p = 1.f;
-                else if (p < -1.f) p = -1.f;
-                float wL = sqrtf(0.5f*(1.f - p));
-                float wR = sqrtf(0.5f*(1.f + p));
-                y_totalL *= v->rel_env; y_totalR *= v->rel_env;
-                float voiceL = y_totalL * wL * bank_gain;
-                float voiceR = y_totalR * wR * bank_gain;
-                outL[i] += voiceL;
-                outR[i] += voiceR;
-                // write back small subset (leave other slow vars unchanged)
-                md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
-                md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;
-                md->decay_u=u;
-                md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
-            } // end modes
+                    float y1L=md->y1L, y2L=md->y2L, y1bL=md->y1bL, y2bL=md->y2bL, driveL=md->driveL, envL=md->envL;
+                    float y1R=md->y1R, y2R=md->y2R, y1bR=md->y1bR, y2bR=md->y2bR, driveR=md->driveR, envR=md->envR;
+                    float u = md->decay_u;
+                    float att_ms = jb_clamp(base2[m].attack_ms,0.f,500.f);
+                    float att_a = (att_ms<=0.f)?1.f:(1.f-expf(-1.f/(0.001f*att_ms*x->sr)));
+                    float du = (md->t60_s > 1e-6f) ? (1.f / (md->t60_s * x->sr)) : 1.f;
 
-            // Update feedback filter/delay from this sample's voice sum so next sample sees it
+                    float excL = use_gate * (srcL[i]) * md->gain_now;
+                    float excR = use_gate * (srcR[i]) * md->gain_now;
+
+                    driveL += att_a*(excL - driveL);
+                    float y_linL = (md->a1L*y1L + md->a2L*y2L) + driveL * md->normL;
+                    y2L=y1L; y1L=y_linL;
+
+                    driveR += att_a*(excR - driveR);
+                    float y_linR = (md->a1R*y1R + md->a2R*y2R) + driveR * md->normR;
+                    y2R=y1R; y1R=y_linR;
+
+                    float y_totalL = y_linL;
+                    float y_totalR = y_linR;
+                    if (bw_amt2 > 0.f){
+                        float y_lin_bL = (md->a1bL*y1bL + md->a2bL*y2bL);
+                        y2bL=y1bL; y1bL=y_lin_bL;
+                        y_totalL += 0.12f * bw_amt2 * y_lin_bL;
+
+                        float y_lin_bR = (md->a1bR*y1bR + md->a2bR*y2bR);
+                        y2bR=y1bR; y1bR=y_lin_bR;
+                        y_totalR += 0.12f * bw_amt2 * y_lin_bR;
+                    }
+
+                    float S = jb_curve_shape_gain(u, base2[m].curve_amt);
+                    if (base2[m].curve_amt < 0.f){ if (S < 0.001f) S = 0.001f; }
+                    y_totalL *= S; y_totalR *= S;
+                    u += du; if(u>1.f){ u=1.f; }
+
+                    float base_pan = jb_clamp(base2[m].pan, -1.f, 1.f);
+                    float p = base_pan + pan_mod2;
+                    if (p > 1.f) p = 1.f;
+                    else if (p < -1.f) p = -1.f;
+                    float wL = sqrtf(0.5f*(1.f - p));
+                    float wR = sqrtf(0.5f*(1.f + p));
+                    y_totalL *= v->rel_env2; y_totalR *= v->rel_env2;
+                    outL[i] += y_totalL * wL * bank_gain2;
+                    outR[i] += y_totalR * wR * bank_gain2;
+
+                    md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
+                    md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;
+                    md->decay_u=u;
+                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
+                }
+            }
 
             // per-sample release envelope update (decays in V_RELEASE, 20ms..5s)
             if (v->state == V_RELEASE){
-                float tau = 0.02f + 4.98f * jb_clamp(x->release_amt, 0.f, 1.f);
-                float a_rel = expf(-1.0f / (x->sr * tau));
-                v->rel_env *= a_rel;
-                if (v->rel_env < 1e-5f) {
-                    v->rel_env = 0.f;
-                    v->state   = V_IDLE;
+                float tau1 = 0.02f + 4.98f * jb_clamp(x->release_amt,  0.f, 1.f);
+                float tau2 = 0.02f + 4.98f * jb_clamp(x->release_amt2, 0.f, 1.f);
+                float a_rel1 = expf(-1.0f / (x->sr * tau1));
+                float a_rel2 = expf(-1.0f / (x->sr * tau2));
+                v->rel_env  *= a_rel1;
+                v->rel_env2 *= a_rel2;
+                if (v->rel_env  < 1e-5f) v->rel_env  = 0.f;
+                if (v->rel_env2 < 1e-5f) v->rel_env2 = 0.f;
+                if (v->rel_env == 0.f && v->rel_env2 == 0.f){
+                    v->state = V_IDLE;
                 }
             } else if (v->state == V_HELD) {
-                // fully open envelope while key is held
-                v->rel_env = 1.f;
+                v->rel_env  = 1.f;
+                v->rel_env2 = 1.f;
             } else {
-                // idle voices stay at 0 to avoid re-opening residual ring
-                v->rel_env = 0.f;
+                v->rel_env  = 0.f;
+                v->rel_env2 = 0.f;
             }
 
         } // end samples
@@ -1815,10 +2264,12 @@ static void juicy_bank_tilde_exciter_mode(t_juicy_bank_tilde *x, t_floatarg on){
 // reset/restart
 static void juicy_bank_tilde_reset(t_juicy_bank_tilde *x){
     for(int v=0; v<JB_MAX_VOICES; ++v){
-        x->v[v].state = V_IDLE; x->v[v].f0 = x->basef0_ref; x->v[v].vel = 0.f; x->v[v].energy=0.f; x->v[v].rel_env = 1.f;
+        x->v[v].state = V_IDLE; x->v[v].f0 = x->basef0_ref; x->v[v].vel = 0.f; x->v[v].energy=0.f; x->v[v].rel_env = 1.f; x->v[v].rel_env2 = 1.f;
         for(int i=0;i<JB_MAX_MODES;i++){
             x->v[v].disp_offset[i]=x->v[v].disp_target[i]=0.f;
+            x->v[v].disp_offset2[i]=x->v[v].disp_target2[i]=0.f;
             x->v[v].cr_gain_mul[i]=x->v[v].cr_decay_mul[i]=1.f;
+            x->v[v].cr_gain_mul2[i]=x->v[v].cr_decay_mul2[i]=1.f;
         }
     }
 }
@@ -2000,19 +2451,23 @@ x->sine_phase2    = x->sine_phase;
         x->lfo_snh[li]          = 0.f;
     }
 
-    // clear modulation matrix
+    // clear modulation matrix (bank 1 + bank 2)
     for(int i=0;i<JB_N_MODSRC;i++)
-        for(int j=0;j<JB_N_MODTGT;j++)
-            x->mod_matrix[i][j] = 0.f;
+        for(int j=0;j<JB_N_MODTGT;j++){
+            x->mod_matrix[i][j]  = 0.f;
+            x->mod_matrix2[i][j] = 0.f;
+        }
     x->basef0_ref=261.626f; // C4
     x->stiffen_amt=x->shortscale_amt=x->linger_amt=x->tilt_amt=x->bite_amt=x->bloom_amt=x->crossring_amt=0.f;
 
     x->max_voices = JB_MAX_VOICES;
     for(int v=0; v<JB_MAX_VOICES; ++v){
-        x->v[v].state=V_IDLE; x->v[v].f0=x->basef0_ref; x->v[v].vel=0.f; x->v[v].energy=0.f;
+        x->v[v].state=V_IDLE; x->v[v].f0=x->basef0_ref; x->v[v].vel=0.f; x->v[v].energy=0.f; x->v[v].rel_env=0.f; x->v[v].rel_env2=0.f;
         for(int i=0;i<JB_MAX_MODES;i++){
             x->v[v].disp_offset[i]=x->v[v].disp_target[i]=0.f;
+            x->v[v].disp_offset2[i]=x->v[v].disp_target2[i]=0.f;
             x->v[v].cr_gain_mul[i]=x->v[v].cr_decay_mul[i]=1.f;
+            x->v[v].cr_gain_mul2[i]=x->v[v].cr_decay_mul2[i]=1.f;
         }
     }
 
@@ -2148,16 +2603,22 @@ static void juicy_bank_tilde_semitone(t_juicy_bank_tilde *x, t_floatarg f){
 }
 
 static void juicy_bank_tilde_index_forward(t_juicy_bank_tilde *x){
-    int K = (x->active_modes > 0) ? x->active_modes : 1;
-    x->edit_idx = (x->edit_idx + 1) % K;
-    if (x->out_index) outlet_float(x->out_index, (t_float)(x->edit_idx + 1));
+    int *active_p   = x->edit_bank ? &x->active_modes2 : &x->active_modes;
+    int *edit_idx_p = x->edit_bank ? &x->edit_idx2     : &x->edit_idx;
+    int K = (*active_p > 0) ? *active_p : 1;
+    *edit_idx_p = (*edit_idx_p + 1) % K;
+    if (x->out_index) outlet_float(x->out_index, (t_float)(*edit_idx_p + 1));
 }
 
+
 static void juicy_bank_tilde_index_backward(t_juicy_bank_tilde *x){
-    int K = (x->active_modes > 0) ? x->active_modes : 1;
-    x->edit_idx = (x->edit_idx - 1 + K) % K;
-    if (x->out_index) outlet_float(x->out_index, (t_float)(x->edit_idx + 1));
+    int *active_p   = x->edit_bank ? &x->active_modes2 : &x->active_modes;
+    int *edit_idx_p = x->edit_bank ? &x->edit_idx2     : &x->edit_idx;
+    int K = (*active_p > 0) ? *active_p : 1;
+    *edit_idx_p = (*edit_idx_p - 1 + K) % K;
+    if (x->out_index) outlet_float(x->out_index, (t_float)(*edit_idx_p + 1));
 }
+
 
 
 // ---------- SNAPSHOT: bake current SINE mask into base gains and DAMPER into base decays ----------
@@ -2295,22 +2756,37 @@ static void juicy_bank_tilde_anything(t_juicy_bank_tilde *x, t_symbol *s, int ar
 static void juicy_bank_tilde_matrix(t_juicy_bank_tilde *x, t_symbol *s, int argc, t_atom *argv){
     (void)s;
     if (argc < 2) return;
-    if (argv[0].a_type != A_SYMBOL) return;
 
-    t_symbol *route = atom_getsymbol(argv);
+    int bank = x->edit_bank; // default: selected bank
+    int a = 0;
+
+    // Optional bank prefix: "b1" or "b2"
+    if (argv[0].a_type == A_SYMBOL){
+        const char *sym0 = atom_getsymbol(argv)->s_name;
+        if (sym0 && (!strcmp(sym0, "b1") || !strcmp(sym0, "b2"))){
+            bank = (sym0[1] == '2') ? 1 : 0;
+            a = 1;
+            if (argc < 3) return; // need selector + amount
+        }
+    }
+
+    if (argv[a].a_type != A_SYMBOL) return;
+    t_symbol *route = atom_getsymbol(argv + a);
     if (!route) return;
 
     int src_idx = -1, tgt_idx = -1;
     if (!jb_modmatrix_parse_selector(route->s_name, &src_idx, &tgt_idx))
         return;
 
-    t_float amt = atom_getfloat(argv + 1);
+    t_float amt = atom_getfloat(argv + a + 1);
     if (amt < -1.f) amt = -1.f;
     else if (amt > 1.f) amt = 1.f;
 
+    float (*mm)[JB_N_MODTGT] = jb_bank_mod_matrix(x, bank);
+
     if (src_idx >= 0 && src_idx < JB_N_MODSRC &&
         tgt_idx >= 0 && tgt_idx < JB_N_MODTGT){
-        x->mod_matrix[src_idx][tgt_idx] = amt;
+        mm[src_idx][tgt_idx] = amt;
     }
 }
 
