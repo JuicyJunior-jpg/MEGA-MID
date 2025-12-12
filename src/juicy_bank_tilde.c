@@ -670,6 +670,8 @@ static void jb_lock_fundamental_generic(int n_modes, const jb_mode_base_t *base,
     }
 }
 
+static float jb_stretch_warp_coord(float t_raw, float s, float w);
+
 static void jb_apply_stretch_generic(int n_modes, const jb_mode_base_t *base, float stretch, float warp, jb_mode_rt_t *m){
     float s = jb_clamp(stretch, -1.f, 1.f);
     float w = jb_clamp(warp,   -1.f, 1.f);
@@ -879,8 +881,6 @@ static void jb_update_crossring_bank(t_juicy_bank_tilde *x, int self_idx, int ba
         if (u==self_idx) continue;
         const jb_voice_t *vu = &x->v[u];
         if (vu->state==V_IDLE) continue;
-
-        const jb_mode_rt_t *m_u = bank ? vu->m2 : vu->m;
 
         for(int mi=0; mi<n_modes; ++mi){
             if (!base[mi].active) continue;
