@@ -3,7 +3,7 @@
 // NEW (V5.0):
 //   • **Spacing** inlet (after dispersion, before anisotropy): nudges each mode toward the *next* harmonic
 //     ratio (ceil or +1 if already integer). 0 = no shift, 1 = fully at next ratio.
-//   • **64 modes by default**: startup ratios 1..64, gain=1.0, decay=1000 ms, attack=0, curve=0 (linear).
+//   • **32 modes by default**: startup ratios 1..32, gain=1.0, decay=1000 ms, attack=0, curve=0 (linear).
 //   • **Resonant loudness normalization**: per-mode drive is scaled by (1 - 2 r cos(w) + r^2) so low freqs
 //     are not inherently louder than highs for a fixed T60. This fixes the historical low-end bias
 //     without artificially forcing per-mode gains.
@@ -32,7 +32,7 @@
 // ---------- limits ----------
 #define JB_MAX_DECAY_S 5.0f  /* global opposite-damping ceiling in seconds */
 
-#define JB_MAX_MODES    64
+#define JB_MAX_MODES    32
 #define JB_MAX_VOICES    4
 #define JB_N_MODSRC    5
 #define JB_N_MODTGT    15
@@ -129,7 +129,16 @@ typedef struct _juicy_bank_tilde {
 
     int n_modes;
     int active_modes;              // number of currently active partials (0..n_modes)
+    // Bank editing focus (1-based UI: 1=bank1, 2=bank2)
+    int   edit_bank;              // 0..1
+    float bank_master[2];          // per-bank master (0..1)
+    int   bank_semitone[2];        // per-bank semitone transpose (-48..+48)
+
+    // Individual/global inlets
     t_inlet *in_partials;          // message inlet for 'partials' (float 0..n_modes)
+    t_inlet *in_master;            // per-bank master (selected bank)
+    t_inlet *in_semitone;          // per-bank semitone transpose (selected bank)
+    t_inlet *in_bank;              // bank selector (1 or 2)
     t_outlet *out_index;           // float outlet reporting current selected partial (1-based)
     jb_mode_base_t base[JB_MAX_MODES];
 
@@ -1221,7 +1230,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         t_sample *srcR = (x->exciter_mode==0) ? inR : vinR[vix];
         // global modal bank gain (fixed at 1.0; feedback removed),
         // modulated per-voice by the modulation matrix target "master" (index 11).
-        float master_base = 1.f; // feedback removed; base gain fixed at 1
+        float master_base = x->bank_master[0]; // STEP 1: bank 1 master inlet (bank 2 comes in STEP 2)
 
         // master_mod accumulates contributions from all sources mapped to "master".
         // For now we only use LFO1 (source 3) and LFO2 (source 4).
@@ -1668,7 +1677,7 @@ static void *juicy_bank_tilde_new(void){
     t_juicy_bank_tilde *x=(t_juicy_bank_tilde *)pd_new(juicy_bank_tilde_class);
     x->sr = sys_getsr(); if(x->sr<=0) x->sr=48000;
 
-    // --- Startup spec (64 modes, real saw amplitude 1/n) ---
+    // --- Startup spec (32 modes, real saw amplitude 1/n) ---
     jb_apply_default_saw(x);
 
     // body defaults
@@ -1726,6 +1735,13 @@ static void *juicy_bank_tilde_new(void){
 
     x->exciter_mode = 0; // default legacy
 
+    // Two-bank scaffolding (STEP 1): bank 1 selected; bank 2 silent by default
+    x->edit_bank = 0;
+    x->bank_master[0] = 1.f;
+    x->bank_master[1] = 0.f;
+    x->bank_semitone[0] = 0;
+    x->bank_semitone[1] = 0;
+
     // INLETS (Signal → Behavior → Body → Individual)
     // Signal:
     CLASS_MAINSIGNALIN(juicy_bank_tilde_class, t_juicy_bank_tilde, f_dummy); // leftmost signal is implicit
@@ -1762,6 +1778,9 @@ static void *juicy_bank_tilde_new(void){
 // Individual
 
     x->in_partials   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("partials"));
+    x->in_master     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("master"));
+    x->in_semitone   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("semitone"));
+    x->in_bank       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("bank"));
     x->in_index      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("index"));
     x->in_ratio      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("ratio"));
     x->in_gain       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("gain"));
@@ -1794,10 +1813,10 @@ for (int i=0;i<JB_MAX_MODES;i++){ x->_undo_base_gain[i]=0.f; x->_undo_base_decay
 
 // ---------- INIT (factory re-init) ----------
 static void juicy_bank_tilde_INIT(t_juicy_bank_tilde *x){
-    // Apply 64-mode saw defaults (1/n amplitude), then reset states
+    // Apply 32-mode saw defaults (1/n amplitude), then reset states
     jb_apply_default_saw(x);
     juicy_bank_tilde_restart(x);
-    post("juicy_bank~: INIT complete (64 modes, saw-like gains 1/n, decay=1s).");
+    post("juicy_bank~: INIT complete (32 modes, saw-like gains 1/n, decay=1s).");
 }
 static void juicy_bank_tilde_init_alias(t_juicy_bank_tilde *x){ juicy_bank_tilde_INIT(x); }
 
@@ -1814,6 +1833,27 @@ static void juicy_bank_tilde_partials(t_juicy_bank_tilde *x, t_floatarg f){
     } else if (x->edit_idx >= x->active_modes) {
         x->edit_idx = x->active_modes - 1;
     }
+}
+
+
+// --- Bank selection + per-bank master & semitone (STEP 1 scaffolding) ---
+// bank: 1 = modal bank 1, 2 = modal bank 2 (edit focus only; DSP for bank2 comes in STEP 2)
+static void juicy_bank_tilde_bank(t_juicy_bank_tilde *x, t_floatarg f){
+    int b = (int)floorf(f + 0.5f);
+    if (b < 1) b = 1;
+    if (b > 2) b = 2;
+    x->edit_bank = b - 1;
+}
+// master: per-bank output gain (0..1), written to selected bank
+static void juicy_bank_tilde_master(t_juicy_bank_tilde *x, t_floatarg f){
+    x->bank_master[x->edit_bank] = jb_clamp(f, 0.f, 1.f);
+}
+// semitone: per-bank transpose (-48..+48), written to selected bank
+static void juicy_bank_tilde_semitone(t_juicy_bank_tilde *x, t_floatarg f){
+    int s = (int)floorf(f + 0.5f);
+    if (s < -48) s = -48;
+    if (s >  48) s =  48;
+    x->bank_semitone[x->edit_bank] = s;
 }
 
 static void juicy_bank_tilde_index_forward(t_juicy_bank_tilde *x){
@@ -2091,6 +2131,9 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gens
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_INIT, gensym("INIT"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_init_alias, gensym("init"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_partials, gensym("partials"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_master,   gensym("master"),   A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_semitone, gensym("semitone"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bank,     gensym("bank"),     A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index_forward, gensym("forward"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index_backward, gensym("backward"), 0);
 
