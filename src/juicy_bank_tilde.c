@@ -152,11 +152,13 @@ typedef struct _juicy_bank_tilde {
     int   edit_bank;              // 0..1
     float bank_master[2];          // per-bank master (0..1)
     int   bank_semitone[2];        // per-bank semitone transpose (-48..+48)
+    float bank_tune_cents[2];     // per-bank cents detune (-100..+100)
 
     // Individual/global inlets
     t_inlet *in_partials;          // message inlet for 'partials' (float 0..n_modes)
     t_inlet *in_master;            // per-bank master (selected bank)
     t_inlet *in_semitone;          // per-bank semitone transpose (selected bank)
+    t_inlet *in_tune;              // per-bank cents detune (selected bank)
     t_inlet *in_bank;              // bank selector (1 or 2)
     t_outlet *out_index;           // float outlet reporting current selected partial (1-based)
     jb_mode_base_t base[JB_MAX_MODES];
@@ -1140,6 +1142,12 @@ static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, in
     float semi = (float)x->bank_semitone[bank];
     if (semi != 0.f){
         f0_eff *= powf(2.f, semi / 12.f);
+    }
+
+    // apply per-bank cents detune (100 cents = 1 semitone)
+    float cents = x->bank_tune_cents[bank];
+    if (cents != 0.f){
+        f0_eff *= powf(2.f, cents / 1200.f);
     }
 
     float (*mm)[JB_N_MODTGT] = jb_bank_mod_matrix(x, bank);
@@ -2482,6 +2490,8 @@ x->sine_phase2    = x->sine_phase;
     x->bank_master[1] = 0.f;
     x->bank_semitone[0] = 0;
     x->bank_semitone[1] = 0;
+    x->bank_tune_cents[0] = 0.f;
+    x->bank_tune_cents[1] = 0.f;
 
     // INLETS (Signal → Behavior → Body → Individual)
     // Signal:
@@ -2521,6 +2531,7 @@ x->sine_phase2    = x->sine_phase;
     x->in_partials   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("partials"));
     x->in_master     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("master"));
     x->in_semitone   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("semitone"));
+    x->in_tune       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("tune"));
     x->in_bank       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("bank"));
     x->in_index      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("index"));
     x->in_ratio      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("ratio"));
@@ -2600,6 +2611,12 @@ static void juicy_bank_tilde_semitone(t_juicy_bank_tilde *x, t_floatarg f){
     if (s < -48) s = -48;
     if (s >  48) s =  48;
     x->bank_semitone[x->edit_bank] = s;
+}
+
+
+// tune: per-bank cents detune (-100..+100), written to selected bank
+static void juicy_bank_tilde_tune(t_juicy_bank_tilde *x, t_floatarg f){
+    x->bank_tune_cents[x->edit_bank] = jb_clamp(f, -100.f, 100.f);
 }
 
 static void juicy_bank_tilde_index_forward(t_juicy_bank_tilde *x){
@@ -2900,6 +2917,7 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gens
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_partials, gensym("partials"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_master,   gensym("master"),   A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_semitone, gensym("semitone"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_tune,     gensym(\"tune\"),     A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bank,     gensym("bank"),     A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index_forward, gensym("forward"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index_backward, gensym("backward"), 0);
