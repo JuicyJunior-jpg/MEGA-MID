@@ -289,6 +289,7 @@ float damping, brightness, position; float damp_broad, damp_point;
     t_inlet *in_adsr_ms;
 // --- SNAPSHOT (bake) undo buffer ---
 int _undo_valid;
+int _undo_bank; // 0=bank1, 1=bank2
 float _undo_base_gain[JB_MAX_MODES];
 float _undo_base_decay_ms[JB_MAX_MODES];
 } t_juicy_bank_tilde;
@@ -1246,18 +1247,33 @@ static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, in
         T60 *= cr_decay_mul[i];
 
         {
-            float b = broad_total;
-            float p = jb_bank_damp_point(x, bank);
-            if (p < 0.f) p = 0.f;
-            if (p > 1.f) p = 1.f;
-            float k_norm = (n_modes>1)? ((float)i/(float)(n_modes-1)) : 0.f;
-            float dx = fabsf(k_norm - p);
-            float n = (float)((n_modes>0)?n_modes:1);
-            float sigma_min = 0.5f / n;
-            float sigma_max = 0.5f;
-            float sigma = (1.f - b)*sigma_max + b*sigma_min;
-            float wloc = expf(-0.5f * (dx*dx) / (sigma*sigma));
+            // Two-sided auto-stretched damper window:
+            //   - "point" is an anchor (0..1 along the bank)
+            //   - "wide" controls reach; wide=1 means full-span reach
+            //   - distance is normalised separately on each side, so the window never "clips" at edges
+            float p = jb_clamp(jb_bank_damp_point(x, bank), 0.f, 1.f);
+            float b = jb_clamp(broad_total, 0.f, 1.f);
+
+            float xk = (n_modes > 1) ? ((float)i / (float)(n_modes - 1)) : 0.f;
+
+            const float eps = 1e-6f;
+            float d;
+            if (xk <= p){
+                float denom = (p > eps) ? p : eps;
+                d = (p - xk) / denom;         // 0 at anchor, 1 at low edge
+            } else {
+                float denom = ((1.f - p) > eps) ? (1.f - p) : eps;
+                d = (xk - p) / denom;         // 0 at anchor, 1 at high edge
+            }
+
+            float step = (n_modes > 1) ? (1.f / (float)(n_modes - 1)) : 1.f;
+            float sigma_min = 0.5f * step;    // ~single-mode width
+            float sigma_max = 1.0f;           // full bank (in normalised distance)
+            float sigma = sigma_min + b * (sigma_max - sigma_min);
+
+            float wloc = expf(-0.5f * (d * d) / (sigma * sigma + 1e-20f));
             float d_amt = jb_clamp(damping_total, -1.f, 1.f) * wloc;
+
             if (d_amt >= 0.f){
                 T60 *= (1.f - d_amt);
             } else {
@@ -2556,6 +2572,7 @@ x->sine_phase2    = x->sine_phase;
     x->outR = outlet_new(&x->x_obj, &s_signal);
 // snapshot undo init
 x->_undo_valid = 0;
+x->_undo_bank = 0;
 for (int i=0;i<JB_MAX_MODES;i++){ x->_undo_base_gain[i]=0.f; x->_undo_base_decay_ms[i]=0.f; }
 
     x->out_index   = outlet_new(&x->x_obj, &s_float); // 1-based index reporter
@@ -2640,59 +2657,162 @@ static void juicy_bank_tilde_index_backward(t_juicy_bank_tilde *x){
 
 // ---------- SNAPSHOT: bake current SINE mask into base gains and DAMPER into base decays ----------
 static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
-    // Save undo of base fields so we can restore both gain and decay.
+    // Snapshot applies to the *selected* bank (x->edit_bank), and undo restores that same bank.
+    int bank = x->edit_bank ? 1 : 0;
+    jb_mode_base_t *base = bank ? x->base2 : x->base;
+    int n_modes = bank ? x->n_modes2 : x->n_modes;
+
+    // Save undo of base fields (gain + decay) for that bank.
     for (int i = 0; i < JB_MAX_MODES; ++i){
-        x->_undo_base_gain[i]     = x->base[i].base_gain;
-        x->_undo_base_decay_ms[i] = x->base[i].base_decay_ms;
+        x->_undo_base_gain[i]     = base[i].base_gain;
+        x->_undo_base_decay_ms[i] = base[i].base_decay_ms;
     }
     x->_undo_valid = 1;
+    x->_undo_bank  = bank;
 
-    // --- DAMPER bake into base_decay_ms (only damping is snapshotted) ---
-    // Mirror the runtime damping logic (jb_update_voice_coeffs) onto the stored
-    // T60 values, without touching the SINE pattern at all.
-    float b = jb_clamp(x->damp_broad, 0.f, 1.f);
-    float p = x->damp_point;
-    if (p < 0.f) p = 0.f;
-    if (p > 1.f) p = 1.f;
-    float n = (float)((x->n_modes > 0) ? x->n_modes : 1);
-    float sigma_min = 0.5f / n;      // ~single-mode width
-    float sigma_max = 0.5f;          // whole bank
-    float sigma = (1.f - b) * sigma_max + b * sigma_min;
-    float d_amt_global = jb_clamp(x->damping, -1.f, 1.f);
+    // --- SINE bake into base_gain (mirror runtime SINE AM mask) ---
+    {
+        float depth = jb_clamp(jb_bank_sine_depth(x, bank), -1.f, 1.f);
+        if (depth != 0.f){
+            // build a 0..1 coordinate per active mode, ordered by base_ratio
+            float order_t[JB_MAX_MODES];
+            for (int i = 0; i < JB_MAX_MODES; ++i) order_t[i] = 0.f;
 
-    for (int i = 0; i < x->n_modes; ++i){
-        if (!x->base[i].active) continue;
+            int idxs[JB_MAX_MODES];
+            int active_count = 0;
+            for (int i = 0; i < n_modes; ++i){
+                if (base[i].active) idxs[active_count++] = i;
+            }
 
-        // local weighting over modes (same Gaussian window as runtime)
-        float k_mode = (x->n_modes > 1) ? ((float)i / (float)(x->n_modes - 1)) : 0.f;
-        float dx = fabsf(k_mode - p);
-        if (dx > 0.5f) dx = 1.f - dx;        // circular distance
-        float wloc = expf(-0.5f * (dx * dx) / (sigma * sigma)); // 0..1
-        float d_amt = d_amt_global * wloc;                     // local -1..1
+            // insertion sort by base_ratio (stable, small N)
+            for (int k = 1; k < active_count; ++k){
+                int id = idxs[k];
+                float r = base[id].base_ratio;
+                int j = k;
+                while (j > 0 && base[idxs[j-1]].base_ratio > r){
+                    idxs[j] = idxs[j-1];
+                    --j;
+                }
+                idxs[j] = id;
+            }
 
-        // convert current base decay to seconds and apply same mapping as runtime
-        float T60 = jb_clamp(x->base[i].base_decay_ms, 0.f, 1e7f) * 0.001f;
-        if (d_amt >= 0.f){
-            T60 *= (1.f - d_amt);
-        } else {
-            float Dneg = -d_amt;
-            float ceiling = JB_MAX_DECAY_S;
-            T60 = T60 + Dneg * (ceiling - T60);
-            if (T60 > ceiling) T60 = ceiling;
+            if (active_count > 0){
+                for (int r = 0; r < active_count; ++r){
+                    int id = idxs[r];
+                    order_t[id] = (active_count > 1) ? ((float)r / (float)(active_count - 1)) : 0.f;
+                }
+            }
+
+            int   N      = (active_count > 0) ? active_count : n_modes;
+            if (N < 1) N = 1;
+
+            float pitch  = jb_clamp(jb_bank_sine_pitch(x, bank), 0.f, 1.f);
+            float phase  = jb_bank_sine_phase(x, bank);
+            float width  = jb_clamp(jb_bank_sine_width(x, bank), 0.f, 1.f);
+            float skew   = jb_clamp(jb_bank_sine_skew(x, bank), -1.f, 1.f);
+
+            float cycles_min = 0.25f;
+            float cycles_max = floorf((float)N * 0.5f);
+            if (cycles_max < cycles_min) cycles_max = cycles_min;
+            float cycles = cycles_min + pitch * (cycles_max - cycles_min);
+
+            for (int i = 0; i < n_modes; ++i){
+                if (!base[i].active) continue;
+
+                float t = order_t[i];
+                if (t < 0.f) t = 0.f;
+                if (t > 1.f) t = 1.f;
+
+                float theta = 2.f * (float)M_PI * (cycles * t + phase);
+
+                float s1 = sinf(theta);
+                float s2 = sinf(2.f * theta);
+                float s  = s1 + skew * s2;
+                float norm = 1.f + fabsf(skew);
+                if (norm > 0.f) s /= norm;
+
+                float pattern = 0.5f * (1.f + s);
+                if (pattern < 0.f) pattern = 0.f;
+                if (pattern > 1.f) pattern = 1.f;
+
+                if (width > 0.f && pattern > 0.f && pattern < 1.f){
+                    float gamma = 0.5f + 3.0f * width;
+                    pattern = powf(pattern, gamma);
+                }
+
+                float a_pos = (depth > 0.f) ? depth : 0.f;
+                float a_neg = (depth < 0.f) ? -depth : 0.f;
+
+                float weight = 1.f
+                               - a_pos * pattern
+                               - a_neg * (1.f - pattern);
+
+                if (weight < 0.f) weight = 0.f;
+
+                base[i].base_gain *= weight;
+                if (base[i].base_gain < 0.f) base[i].base_gain = 0.f;
+            }
         }
-        x->base[i].base_decay_ms = T60 * 1000.f;
-        if (x->base[i].base_decay_ms < 0.f)
-            x->base[i].base_decay_ms = 0.f;
     }
 
-    // Neutralise damping so it can be layered again on top of the baked shape.
-    x->damping = 0.f;
+    // --- DAMPER bake into base_decay_ms (mirror runtime damping logic + new window) ---
+    {
+        float damp = jb_clamp(jb_bank_damping(x, bank), -1.f, 1.f);
+        if (damp != 0.f && n_modes > 0){
+            float p = jb_clamp(jb_bank_damp_point(x, bank), 0.f, 1.f);
+            float b = jb_clamp(jb_bank_damp_broad(x, bank), 0.f, 1.f);
+
+            const float eps = 1e-6f;
+            float step = (n_modes > 1) ? (1.f / (float)(n_modes - 1)) : 1.f;
+            float sigma_min = 0.5f * step;
+            float sigma_max = 1.0f;
+            float sigma = sigma_min + b * (sigma_max - sigma_min);
+
+            for (int i = 0; i < n_modes; ++i){
+                if (!base[i].active) continue;
+
+                float xk = (n_modes > 1) ? ((float)i / (float)(n_modes - 1)) : 0.f;
+
+                float d;
+                if (xk <= p){
+                    float denom = (p > eps) ? p : eps;
+                    d = (p - xk) / denom;
+                } else {
+                    float denom = ((1.f - p) > eps) ? (1.f - p) : eps;
+                    d = (xk - p) / denom;
+                }
+
+                float wloc = expf(-0.5f * (d * d) / (sigma * sigma + 1e-20f));
+                float d_amt = damp * wloc;
+
+                float T60 = base[i].base_decay_ms * 0.001f;
+                if (T60 < 0.f) T60 = 0.f;
+
+                if (d_amt >= 0.f){
+                    T60 *= (1.f - d_amt);
+                } else {
+                    float Dneg = -d_amt;
+                    float ceiling = JB_MAX_DECAY_S;
+                    T60 = T60 + Dneg * (ceiling - T60);
+                    if (T60 > ceiling) T60 = ceiling;
+                }
+
+                float ms = T60 * 1000.f;
+                if (ms < 1.f) ms = 1.f;
+                base[i].base_decay_ms = ms;
+            }
+        }
+    }
 }
 static void juicy_bank_tilde_snapshot_undo(t_juicy_bank_tilde *x){
     if (!x->_undo_valid) return;
-    for (int i=0;i<JB_MAX_MODES;i++){
-        x->base[i].base_gain = x->_undo_base_gain[i];
-        x->base[i].base_decay_ms = x->_undo_base_decay_ms[i];
+
+    int bank = x->_undo_bank ? 1 : 0;
+    jb_mode_base_t *base = bank ? x->base2 : x->base;
+
+    for (int i = 0; i < JB_MAX_MODES; ++i){
+        base[i].base_gain     = x->_undo_base_gain[i];
+        base[i].base_decay_ms = x->_undo_base_decay_ms[i];
     }
     x->_undo_valid = 0;
 }
