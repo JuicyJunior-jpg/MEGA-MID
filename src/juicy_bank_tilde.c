@@ -326,7 +326,6 @@ static inline void jb_exc_voice_reset_runtime(jb_exc_voice_t *e){
     e->gainL = 1.f;
     e->gainR = 1.f;
 }
-}
 
 
 static int jb_is_near_integer(float x, float eps){ float n=roundf(x); return fabsf(x-n)<=eps; }
