@@ -289,6 +289,10 @@ static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long se
     v->gainL = 1.f;
     v->gainR = 1.f;
     v->diff_idx = 0;
+    v->particle_samples_left = 0;
+    memset(v->diff_bufL, 0, sizeof(v->diff_bufL));
+    memset(v->diff_bufR, 0, sizeof(v->diff_bufR));
+}
 
 // STEP 2 helpers (runtime reset)
 static inline void jb_exc_voice_reset_runtime(jb_exc_voice_t *e){
@@ -3537,8 +3541,8 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gens
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_basef0, gensym("basef0"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_base_alias, gensym("base"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_restart, gensym("restart"), 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_preset_recall, gensym(\"preset\"), 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_preset_recall, gensym(\"recall\"), 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_preset_recall, gensym("preset"), 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_preset_recall, gensym("recall"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_INIT, gensym("INIT"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_init_alias, gensym("init"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_partials, gensym("partials"), A_DEFFLOAT, 0);
