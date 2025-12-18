@@ -1734,12 +1734,9 @@ static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, in
         float denomR = (1.f - 2.f*r*cR + r*r);
         if (denomL < 1e-6f) denomL = 1e-6f;
         if (denomR < 1e-6f) denomR = 1e-6f;
-        // Energy-based (Q-only) normalization (pitch-independent)
-        // Replaces denom-based normalization that tilted loudness with frequency.
-        float norm = sqrtf(fmaxf(0.f, 1.f - r * r));
-        if (norm < 1e-6f) norm = 1e-6f;
-        md->normL = norm;
-        md->normR = norm;
+        // Neutral resonators: no pitch- or Q-dependent normalization
+        md->normL = 1.f;
+        md->normR = 1.f;
 
         if (bw_amt > 0.f){
             float mode_scale = (n_modes>1)? ((float)i/(float)(n_modes-1)) : 0.f;
