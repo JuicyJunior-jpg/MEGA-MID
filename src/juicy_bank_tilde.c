@@ -434,12 +434,18 @@ typedef struct _juicy_bank_tilde {
     int   bank_semitone[2];        // per-bank semitone transpose (-48..+48)
     float bank_tune_cents[2];     // per-bank cents detune (-100..+100)
 
+
+    // --- COUPLING TOPOLOGY (global test) ---
+    float topology;               // 0=normal, 1=B2 excites B1 (B1 has no direct exciter)
+    float coupling;               // 0..1 strength
     // Individual/global inlets
     t_inlet *in_partials;          // message inlet for 'partials' (float 0..n_modes)
     t_inlet *in_master;            // per-bank master (selected bank)
     t_inlet *in_semitone;          // per-bank semitone transpose (selected bank)
     t_inlet *in_tune;              // per-bank cents detune (selected bank)
     t_inlet *in_bank;              // bank selector (1 or 2)
+    t_inlet *in_topology;          // topology selector (0=normal, 1=B2->B1)
+    t_inlet *in_coupling;          // coupling strength (0..1)
     t_outlet *out_index;           // float outlet reporting current selected partial (1-based)
     jb_mode_base_t base[JB_MAX_MODES];
     jb_mode_base_t base2[JB_MAX_MODES];
@@ -2084,6 +2090,9 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     // Internal exciter: update shared params -> per-voice filters + ADSR times/curves
     jb_exc_update_block(x);
 
+
+    const int topo1 = (x->topology >= 0.5f);
+    const float coup = jb_clamp(x->coupling, 0.f, 1.f);
     // Internal exciter mix weights (computed once per block)
     float exc_f = jb_clamp(x->exc_fader, -1.f, 1.f);
     float exc_t = 0.5f * (exc_f + 1.f);
@@ -2167,7 +2176,76 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             float exL = 0.f, exR = 0.f;
             jb_exc_process_sample(x, v, exc_w_imp, exc_w_noise, exc_density, exc_diffusion, &exL, &exR);
 
-            // -------- BANK 1 --------
+
+            float b2sendL = 0.f, b2sendR = 0.f; // only used when topo1==1
+            // -------- BANK 2 --------
+            if (bank_gain2 > 0.f && v->rel_env2 > 0.f){
+                for(int m=0;m<x->n_modes2;m++){
+                    if(!base2[m].active) continue;
+                    jb_mode_rt_t *md=&v->m2[m];
+                    if (md->gain_now<=0.f || md->nyq_kill) continue;
+
+                    float y1L=md->y1L, y2L=md->y2L, y1bL=md->y1bL, y2bL=md->y2bL, driveL=md->driveL, envL=md->envL;
+                    float y1R=md->y1R, y2R=md->y2R, y1bR=md->y1bR, y2bR=md->y2bR, driveR=md->driveR, envR=md->envR;
+                    float u = md->decay_u;
+                    float att_ms = jb_clamp(base2[m].attack_ms,0.f,500.f);
+                    float att_a = (att_ms<=0.f)?1.f:(1.f-expf(-1.f/(0.001f*att_ms*x->sr)));
+                    float du = (md->t60_s > 1e-6f) ? (1.f / (md->t60_s * x->sr)) : 1.f;
+
+                    float excL = exL * md->gain_now;
+                    float excR = exR * md->gain_now;
+
+                    driveL += att_a*(excL - driveL);
+                    float y_linL = (md->a1L*y1L + md->a2L*y2L) + driveL * md->normL;
+                    y2L=y1L; y1L=y_linL;
+
+                    driveR += att_a*(excR - driveR);
+                    float y_linR = (md->a1R*y1R + md->a2R*y2R) + driveR * md->normR;
+                    y2R=y1R; y1R=y_linR;
+
+                    float y_totalL = y_linL;
+                    float y_totalR = y_linR;
+                    if (bw_amt2 > 0.f){
+                        float y_lin_bL = (md->a1bL*y1bL + md->a2bL*y2bL);
+                        y2bL=y1bL; y1bL=y_lin_bL;
+                        y_totalL += 0.12f * bw_amt2 * y_lin_bL;
+
+                        float y_lin_bR = (md->a1bR*y1bR + md->a2bR*y2bR);
+                        y2bR=y1bR; y1bR=y_lin_bR;
+                        y_totalR += 0.12f * bw_amt2 * y_lin_bR;
+                    }
+
+                    float S = jb_curve_shape_gain(u, base2[m].curve_amt);
+                    if (base2[m].curve_amt < 0.f){ if (S < 0.001f) S = 0.001f; }
+                    y_totalL *= S; y_totalR *= S;
+                    u += du; if(u>1.f){ u=1.f; }
+
+                    float base_pan = jb_clamp(base2[m].pan, -1.f, 1.f);
+                    float p = base_pan + pan_mod2;
+                    if (p > 1.f) p = 1.f;
+                    else if (p < -1.f) p = -1.f;
+                    float wL = sqrtf(0.5f*(1.f - p));
+                    float wR = sqrtf(0.5f*(1.f + p));
+                    if (topo1){ b2sendL += y_totalL * wL; b2sendR += y_totalR * wR; }
+                    y_totalL *= v->rel_env2; y_totalR *= v->rel_env2;
+                    outL[i] += y_totalL * wL * bank_gain2;
+                    outR[i] += y_totalR * wR * bank_gain2;
+
+                    md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
+                    md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;
+                    md->decay_u=u;
+                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
+                }
+            }
+            // topology selector:
+            // topo1==0: normal (both banks excited by internal exciter)
+            // topo1==1: Bank2 excites Bank1 (Bank1 gets NO direct exciter)
+            if (topo1){
+                exL = coup * b2sendL;
+                exR = coup * b2sendR;
+            }
+
+// -------- BANK 1 --------
             if (bank_gain1 > 0.f && v->rel_env > 0.f){
                 for(int m=0;m<x->n_modes;m++){
                     if(!base1[m].active) continue;
@@ -2218,65 +2296,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     y_totalL *= v->rel_env; y_totalR *= v->rel_env;
                     outL[i] += y_totalL * wL * bank_gain1;
                     outR[i] += y_totalR * wR * bank_gain1;
-
-                    md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
-                    md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;
-                    md->decay_u=u;
-                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
-                }
-            }
-
-            // -------- BANK 2 --------
-            if (bank_gain2 > 0.f && v->rel_env2 > 0.f){
-                for(int m=0;m<x->n_modes2;m++){
-                    if(!base2[m].active) continue;
-                    jb_mode_rt_t *md=&v->m2[m];
-                    if (md->gain_now<=0.f || md->nyq_kill) continue;
-
-                    float y1L=md->y1L, y2L=md->y2L, y1bL=md->y1bL, y2bL=md->y2bL, driveL=md->driveL, envL=md->envL;
-                    float y1R=md->y1R, y2R=md->y2R, y1bR=md->y1bR, y2bR=md->y2bR, driveR=md->driveR, envR=md->envR;
-                    float u = md->decay_u;
-                    float att_ms = jb_clamp(base2[m].attack_ms,0.f,500.f);
-                    float att_a = (att_ms<=0.f)?1.f:(1.f-expf(-1.f/(0.001f*att_ms*x->sr)));
-                    float du = (md->t60_s > 1e-6f) ? (1.f / (md->t60_s * x->sr)) : 1.f;
-
-                    float excL = exL * md->gain_now;
-                    float excR = exR * md->gain_now;
-
-                    driveL += att_a*(excL - driveL);
-                    float y_linL = (md->a1L*y1L + md->a2L*y2L) + driveL * md->normL;
-                    y2L=y1L; y1L=y_linL;
-
-                    driveR += att_a*(excR - driveR);
-                    float y_linR = (md->a1R*y1R + md->a2R*y2R) + driveR * md->normR;
-                    y2R=y1R; y1R=y_linR;
-
-                    float y_totalL = y_linL;
-                    float y_totalR = y_linR;
-                    if (bw_amt2 > 0.f){
-                        float y_lin_bL = (md->a1bL*y1bL + md->a2bL*y2bL);
-                        y2bL=y1bL; y1bL=y_lin_bL;
-                        y_totalL += 0.12f * bw_amt2 * y_lin_bL;
-
-                        float y_lin_bR = (md->a1bR*y1bR + md->a2bR*y2bR);
-                        y2bR=y1bR; y1bR=y_lin_bR;
-                        y_totalR += 0.12f * bw_amt2 * y_lin_bR;
-                    }
-
-                    float S = jb_curve_shape_gain(u, base2[m].curve_amt);
-                    if (base2[m].curve_amt < 0.f){ if (S < 0.001f) S = 0.001f; }
-                    y_totalL *= S; y_totalR *= S;
-                    u += du; if(u>1.f){ u=1.f; }
-
-                    float base_pan = jb_clamp(base2[m].pan, -1.f, 1.f);
-                    float p = base_pan + pan_mod2;
-                    if (p > 1.f) p = 1.f;
-                    else if (p < -1.f) p = -1.f;
-                    float wL = sqrtf(0.5f*(1.f - p));
-                    float wR = sqrtf(0.5f*(1.f + p));
-                    y_totalL *= v->rel_env2; y_totalR *= v->rel_env2;
-                    outL[i] += y_totalL * wL * bank_gain2;
-                    outR[i] += y_totalR * wR * bank_gain2;
 
                     md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
                     md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;
@@ -3035,11 +3054,17 @@ x->sine_phase2    = x->sine_phase;
     x->in_sine_phase = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_phase"));
 // Individual
 
+    // Coupling topology defaults
+    x->topology = 0.f;
+    x->coupling = 0.f;
+
     x->in_partials   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("partials"));
     x->in_master     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("master"));
     x->in_semitone   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("semitone"));
     x->in_tune       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("tune"));
     x->in_bank       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("bank"));
+    x->in_topology   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("topology"));
+    x->in_coupling   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("coupling"));
     x->in_index      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("index"));
     x->in_ratio      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("ratio"));
     x->in_gain       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("gain"));
@@ -3128,6 +3153,17 @@ static void juicy_bank_tilde_bank(t_juicy_bank_tilde *x, t_floatarg f){
     if (b > 2) b = 2;
     x->edit_bank = b - 1;
 }
+
+static void juicy_bank_tilde_topology(t_juicy_bank_tilde *x, t_floatarg f){
+    // selector: 0 = normal (both banks excited by internal exciter), 1 = Bank2 excites Bank1 (Bank1 gets no direct exciter)
+    x->topology = (f >= 0.5f) ? 1.f : 0.f;
+}
+
+static void juicy_bank_tilde_coupling(t_juicy_bank_tilde *x, t_floatarg f){
+    // 0..1 coupling strength (only used when topology==1)
+    x->coupling = jb_clamp(f, 0.f, 1.f);
+}
+
 // master: per-bank output gain (0..1), written to selected bank
 static void juicy_bank_tilde_master(t_juicy_bank_tilde *x, t_floatarg f){
     x->bank_master[x->edit_bank] = jb_clamp(f, 0.f, 1.f);
@@ -3549,6 +3585,8 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gens
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_semitone, gensym("semitone"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_tune,     gensym("tune"),     A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bank,     gensym("bank"),     A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_topology, gensym("topology"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_coupling, gensym("coupling"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index_forward, gensym("forward"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index_backward, gensym("backward"), 0);
 
