@@ -1725,14 +1725,17 @@ static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, in
         md->t60_s = T60;
 
         float r = (T60 <= 0.f) ? 0.f : powf(10.f, -3.f / (T60 * x->sr));
-        // Energy-based (Q-only) normalization: independent of pitch.
-        // This keeps excitation energy consistent across decay (r) without tilting loudness by frequency.
-        // Pitch-independent normalization proxy (removes pitch tilt, keeps level similar).
-        // Uses denom at cos(w)= -1 -> (1 + r)^2, range ~1..4 as r->1.
-        float norm = (1.f + r) * (1.f + r);
-        if (norm < 1e-6f) norm = 1e-6f;
-        md->normL = norm;
-        md->normR = norm;
+        float cL=cosf(wL), cR=cosf(wR);
+
+        md->a1L=2.f*r*cL; md->a2L=-r*r;
+        md->a1R=2.f*r*cR; md->a2R=-r*r;
+
+        float denomL = (1.f - 2.f*r*cL + r*r);
+        float denomR = (1.f - 2.f*r*cR + r*r);
+        if (denomL < 1e-6f) denomL = 1e-6f;
+        if (denomR < 1e-6f) denomR = 1e-6f;
+        md->normL = denomL;
+        md->normR = denomR;
 
         if (bw_amt > 0.f){
             float mode_scale = (n_modes>1)? ((float)i/(float)(n_modes-1)) : 0.f;
