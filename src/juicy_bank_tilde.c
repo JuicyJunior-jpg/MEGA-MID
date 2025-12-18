@@ -413,6 +413,11 @@ typedef struct {
     float rel_env;
     float rel_env2;
 
+
+    // coupling sends (stored per voice for 1-sample delayed injection)
+    float coup_b1_prevL, coup_b1_prevR; // Bank1 summed output (pre-release env weighting), L/R
+    float coup_b2_prevL, coup_b2_prevR; // Bank2 summed output (pre-release env weighting), L/R
+
     // runtime per-mode — BANK 1/2
     jb_mode_rt_t m[JB_MAX_MODES];
     jb_mode_rt_t m2[JB_MAX_MODES];
@@ -436,7 +441,7 @@ typedef struct _juicy_bank_tilde {
 
 
     // --- COUPLING TOPOLOGY (global test) ---
-    float topology;               // 0=normal, 1=B2 excites B1 (B1 has no direct exciter)
+    float topology;               // 0=normal, 1=B2->B1, 2=B1->B2, 3=cross (B2 has exciter)
     float coupling;               // 0..1 strength
     // Individual/global inlets
     t_inlet *in_partials;          // message inlet for 'partials' (float 0..n_modes)
@@ -444,7 +449,7 @@ typedef struct _juicy_bank_tilde {
     t_inlet *in_semitone;          // per-bank semitone transpose (selected bank)
     t_inlet *in_tune;              // per-bank cents detune (selected bank)
     t_inlet *in_bank;              // bank selector (1 or 2)
-    t_inlet *in_topology;          // topology selector (0=normal, 1=B2->B1)
+    t_inlet *in_topology;          // topology selector (0=normal, 1=B2->B1, 2=B1->B2, 3=cross)
     t_inlet *in_coupling;          // coupling strength (0..1)
     t_outlet *out_index;           // float outlet reporting current selected partial (1-based)
     jb_mode_base_t base[JB_MAX_MODES];
@@ -2091,8 +2096,10 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     jb_exc_update_block(x);
 
 
-    const int topo1 = (x->topology >= 0.5f);
+    const int topo = (int)jb_clamp(x->topology, 0.f, 3.f);
     const float coup = jb_clamp(x->coupling, 0.f, 1.f);
+    const int need_send2 = (topo==1 || topo==3); // Bank2 -> Bank1 send needed
+    const int need_send1 = (topo==2 || topo==3); // Bank1 -> Bank2 send needed
     // Internal exciter mix weights (computed once per block)
     float exc_f = jb_clamp(x->exc_fader, -1.f, 1.f);
     float exc_t = 0.5f * (exc_f + 1.f);
@@ -2176,8 +2183,20 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             float exL = 0.f, exR = 0.f;
             jb_exc_process_sample(x, v, exc_w_imp, exc_w_noise, exc_density, exc_diffusion, &exL, &exR);
 
+            // Cache raw internal exciter for later (Bank1 may need it even if Bank2 input is replaced)
+            const float ex0L = exL, ex0R = exR;
+            // Select what excites BANK 2 for this topology
+            if (topo==2){ // Bank1 excites Bank2 (Bank2 has no direct exciter)
+                exL = coup * v->coup_b1_prevL;
+                exR = coup * v->coup_b1_prevR;
+            } else if (topo==3){ // cross: Bank2 has exciter + coupling from Bank1
+                exL = ex0L + (coup * v->coup_b1_prevL);
+                exR = ex0R + (coup * v->coup_b1_prevR);
+            }
 
-            float b2sendL = 0.f, b2sendR = 0.f; // only used when topo1==1
+
+            float b2sendL = 0.f, b2sendR = 0.f; // bank2 send (used for topo 1/3 and stored for delayed use)
+            float b1sendL = 0.f, b1sendR = 0.f; // bank1 send (used for topo 2/3 and stored for delayed use)
             // -------- BANK 2 --------
             if (bank_gain2 > 0.f && v->rel_env2 > 0.f){
                 for(int m=0;m<x->n_modes2;m++){
@@ -2226,7 +2245,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     else if (p < -1.f) p = -1.f;
                     float wL = sqrtf(0.5f*(1.f - p));
                     float wR = sqrtf(0.5f*(1.f + p));
-                    if (topo1){ b2sendL += y_totalL * wL; b2sendR += y_totalR * wR; }
+                    if (need_send2){ b2sendL += y_totalL * wL; b2sendR += y_totalR * wR; }
                     y_totalL *= v->rel_env2; y_totalR *= v->rel_env2;
                     outL[i] += y_totalL * wL * bank_gain2;
                     outR[i] += y_totalR * wR * bank_gain2;
@@ -2237,12 +2256,20 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
                 }
             }
-            // topology selector:
-            // topo1==0: normal (both banks excited by internal exciter)
-            // topo1==1: Bank2 excites Bank1 (Bank1 gets NO direct exciter)
-            if (topo1){
+            // topology selector (BANK 1 input source):
+            // topo 0: normal (both banks excited by internal exciter)
+            // topo 1: B2 -> B1 (B1 gets ONLY Bank2 send, no direct exciter)
+            // topo 2: B1 -> B2 (B1 gets internal exciter)
+            // topo 3: cross (B1 gets delayed Bank2 send; no direct exciter)
+            if (topo==0 || topo==2){
+                exL = ex0L;
+                exR = ex0R;
+            } else if (topo==1){
                 exL = coup * b2sendL;
                 exR = coup * b2sendR;
+            } else if (topo==3){
+                exL = coup * v->coup_b2_prevL;
+                exR = coup * v->coup_b2_prevR;
             }
 
 // -------- BANK 1 --------
@@ -2293,6 +2320,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     else if (p < -1.f) p = -1.f;
                     float wL = sqrtf(0.5f*(1.f - p));
                     float wR = sqrtf(0.5f*(1.f + p));
+                    if (need_send1){ b1sendL += y_totalL * wL; b1sendR += y_totalR * wR; }
+
                     y_totalL *= v->rel_env; y_totalR *= v->rel_env;
                     outL[i] += y_totalL * wL * bank_gain1;
                     outR[i] += y_totalR * wR * bank_gain1;
@@ -2303,6 +2332,12 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
                 }
             }
+
+            // Store coupling sends for next sample (used by topo 2/3 delayed injection)
+            v->coup_b1_prevL = b1sendL;
+            v->coup_b1_prevR = b1sendR;
+            v->coup_b2_prevL = b2sendL;
+            v->coup_b2_prevR = b2sendR;
 
             // per-sample release envelope update (decays in V_RELEASE, 20ms..5s)
             if (v->state == V_RELEASE){
@@ -2998,7 +3033,7 @@ x->sine_phase2    = x->sine_phase;
 
     x->max_voices = JB_MAX_VOICES;
     for(int v=0; v<JB_MAX_VOICES; ++v){
-        x->v[v].state=V_IDLE; x->v[v].f0=x->basef0_ref; x->v[v].vel=0.f; x->v[v].energy=0.f; x->v[v].rel_env=0.f; x->v[v].rel_env2=0.f;
+        x->v[v].state=V_IDLE; x->v[v].f0=x->basef0_ref; x->v[v].vel=0.f; x->v[v].energy=0.f; x->v[v].rel_env=0.f; x->v[v].rel_env2=0.f; x->v[v].coup_b1_prevL=0.f; x->v[v].coup_b1_prevR=0.f; x->v[v].coup_b2_prevL=0.f; x->v[v].coup_b2_prevR=0.f;
         for(int i=0;i<JB_MAX_MODES;i++){
             x->v[v].disp_offset[i]=x->v[v].disp_target[i]=0.f;
             x->v[v].disp_offset2[i]=x->v[v].disp_target2[i]=0.f;
@@ -3155,12 +3190,19 @@ static void juicy_bank_tilde_bank(t_juicy_bank_tilde *x, t_floatarg f){
 }
 
 static void juicy_bank_tilde_topology(t_juicy_bank_tilde *x, t_floatarg f){
-    // selector: 0 = normal (both banks excited by internal exciter), 1 = Bank2 excites Bank1 (Bank1 gets no direct exciter)
-    x->topology = (f >= 0.5f) ? 1.f : 0.f;
+    // Topology selector (integer encoded as float):
+    //  0 = normal (both banks excited by internal exciter)
+    //  1 = unidirectional: Bank2 excites Bank1 (Bank1 has NO direct exciter)
+    //  2 = unidirectional: Bank1 excites Bank2 (Bank2 has NO direct exciter)
+    //  3 = cross coupling: Bank2 has exciter, and Bank1<->Bank2 exchange energy
+    int t = (int)floorf((float)f + 0.5f);
+    if (t < 0) t = 0;
+    if (t > 3) t = 3;
+    x->topology = (float)t;
 }
 
 static void juicy_bank_tilde_coupling(t_juicy_bank_tilde *x, t_floatarg f){
-    // 0..1 coupling strength (only used when topology==1)
+    // 0..1 coupling strength (used when topology is 1/2/3; ignored in topology 0)
     x->coupling = jb_clamp(f, 0.f, 1.f);
 }
 
