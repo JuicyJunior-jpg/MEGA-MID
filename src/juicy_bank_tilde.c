@@ -1720,15 +1720,22 @@ static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, in
 
         md->a1L=2.f*r*cL; md->a2L=-r*r;
         md->a1R=2.f*r*cR; md->a2R=-r*r;
-
-        // Pitch-independent excitation scaling (highlight fix):
-        // The old denom-based term depended on cos(w) and made excitation strength vary with pitch,
-        // causing low notes to be under-driven and high notes to be over-driven.
-        // Here we keep scaling independent of frequency, using only decay (r) to stay in a similar level range.
-        float norm = 1.f + r * r; // range ~[1,2] as r goes 0->1
-        if (norm < 1e-6f) norm = 1e-6f;
-        md->normL = norm;
-        md->normR = norm;
+        // Scaling Factor normalization (frequency-dependent):
+        // Pick b0 such that |H(e^{jw0})| = 1 for the 2-pole resonator
+        //   H(z) = b0 / (1 - 2r cos(w0) z^-1 + r^2 z^-2)
+        // Mainstream formula used in many DSP lecture notes:
+        //   b0 = (1 - r) * sqrt(1 + r^2 - 2 r cos(2 w0))
+        // This removes the low-vs-high imbalance caused by the raw resonator peak varying with frequency.
+        float tL = 1.f + r*r - 2.f*r*cosf(2.f*wL);
+        float tR = 1.f + r*r - 2.f*r*cosf(2.f*wR);
+        if (tL < 0.f) tL = 0.f;
+        if (tR < 0.f) tR = 0.f;
+        float b0L = (1.f - r) * sqrtf(tL);
+        float b0R = (1.f - r) * sqrtf(tR);
+        if (b0L < 1e-9f) b0L = 1e-9f;
+        if (b0R < 1e-9f) b0R = 1e-9f;
+        md->normL = b0L;
+        md->normR = b0R;
 
         if (bw_amt > 0.f){
             float mode_scale = (n_modes>1)? ((float)i/(float)(n_modes-1)) : 0.f;
