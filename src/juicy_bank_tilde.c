@@ -362,6 +362,10 @@ typedef struct {
     // RIGHT states
     float a1R,a2R, y1R,y2R, a1bR,a2bR, y1bR,y2bR, envR, y_pre_lastR, normR;
 
+    // Bandpass-zero resonator needs x[n-1], x[n-2] per channel
+    float x1L, x2L;
+    float x1R, x2R;
+
     // drive/hit
     float driveL, driveR;
     int   hit_gateL, hit_coolL, hit_gateR, hit_coolR;
@@ -1720,22 +1724,13 @@ static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, in
 
         md->a1L=2.f*r*cL; md->a2L=-r*r;
         md->a1R=2.f*r*cR; md->a2R=-r*r;
-        // Scaling Factor normalization (frequency-dependent):
-        // Pick b0 such that |H(e^{jw0})| = 1 for the 2-pole resonator
-        //   H(z) = b0 / (1 - 2r cos(w0) z^-1 + r^2 z^-2)
-        // Mainstream formula used in many DSP lecture notes:
-        //   b0 = (1 - r) * sqrt(1 + r^2 - 2 r cos(2 w0))
-        // This removes the low-vs-high imbalance caused by the raw resonator peak varying with frequency.
-        float tL = 1.f + r*r - 2.f*r*cosf(2.f*wL);
-        float tR = 1.f + r*r - 2.f*r*cosf(2.f*wR);
-        if (tL < 0.f) tL = 0.f;
-        if (tR < 0.f) tR = 0.f;
-        float b0L = (1.f - r) * sqrtf(tL);
-        float b0R = (1.f - r) * sqrtf(tR);
-        if (b0L < 1e-9f) b0L = 1e-9f;
-        if (b0R < 1e-9f) b0R = 1e-9f;
-        md->normL = b0L;
-        md->normR = b0R;
+        // Bandpass-Zero / Constant Peak-Gain Resonator (J.O. Smith):
+        //   H(z) = [(1-R^2)/2] * (1 - z^-2) / (1 - 2R cos(w0) z^-1 + R^2 z^-2)
+        // Peak gain becomes ~1 for all tunings (where a peak exists).
+        float g = 0.5f * (1.f - r*r);
+        if (g < 1e-9f) g = 1e-9f;
+        md->normL = g;
+        md->normR = g;
 
         if (bw_amt > 0.f){
             float mode_scale = (n_modes>1)? ((float)i/(float)(n_modes-1)) : 0.f;
@@ -2236,12 +2231,24 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     float excR = exR * md->gain_now;
 
                     driveL += att_a*(excL - driveL);
-                    float y_linL = (md->a1L*y1L + md->a2L*y2L) + driveL * md->normL;
+                    float x0L = driveL;
+                    float xinL = x0L - md->x2L;
+                    float y_linL = (md->a1L*y1L + md->a2L*y2L) + xinL * md->normL;
                     y2L=y1L; y1L=y_linL;
 
                     driveR += att_a*(excR - driveR);
-                    float y_linR = (md->a1R*y1R + md->a2R*y2R) + driveR * md->normR;
+                    float x0R = driveR;
+                    float xinR = x0R - md->x2R;
+                    float y_linR = (md->a1R*y1R + md->a2R*y2R) + xinR * md->normR;
                     y2R=y1R; y1R=y_linR;
+
+                    // shift x-history for bandpass-zero numerator (x[n] - x[n-2])
+                    md->x2L = md->x1L; md->x1L = x0L;
+                    md->x2R = md->x1R; md->x1R = x0R;
+
+                    // shift x-history for bandpass-zero numerator (x[n] - x[n-2])
+                    md->x2L = md->x1L; md->x1L = x0L;
+                    md->x2R = md->x1R; md->x1R = x0R;
 
                     float y_totalL = y_linL;
                     float y_totalR = y_linR;
@@ -2311,11 +2318,15 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     float excR = exR * md->gain_now;
 
                     driveL += att_a*(excL - driveL);
-                    float y_linL = (md->a1L*y1L + md->a2L*y2L) + driveL * md->normL;
+                    float x0L = driveL;
+                    float xinL = x0L - md->x2L;
+                    float y_linL = (md->a1L*y1L + md->a2L*y2L) + xinL * md->normL;
                     y2L=y1L; y1L=y_linL;
 
                     driveR += att_a*(excR - driveR);
-                    float y_linR = (md->a1R*y1R + md->a2R*y2R) + driveR * md->normR;
+                    float x0R = driveR;
+                    float xinR = x0R - md->x2R;
+                    float y_linR = (md->a1R*y1R + md->a2R*y2R) + xinR * md->normR;
                     y2R=y1R; y1R=y_linR;
 
                     float y_totalL = y_linL;
