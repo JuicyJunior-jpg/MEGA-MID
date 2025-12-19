@@ -1812,6 +1812,11 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
     float pos = jb_bank_position(x, bank);
     float aniso = jb_bank_aniso(x, bank);
 
+    // Tela-style brightness normalization: keep loudness stable when brightness changes.
+    // We normalize the summed per-mode gains to match the reference spectrum at brightness=0 (saw tilt).
+    float sum_gain = 0.f;
+    float sum_ref  = 0.f;
+
     for(int i = 0; i < n_modes; ++i){
         if(!base[i].active){
             m[i].gain_now = 0.f;
@@ -1823,6 +1828,7 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
 
         float g = base[i].base_gain * jb_bright_gain(ratio_rel, brightness_v);
 
+        float g_ref = base[i].base_gain * jb_bright_gain(ratio_rel, 0.f);
         float w = 1.f;
         if (i != 0 && aniso != 0.f){
             float r = ratio_rel;
@@ -1843,20 +1849,22 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
         g *= cr_gain_mul[i];
 
         float gn = g * w * wp;
-        if (m[i].nyq_kill) gn = 0.f;
+        float gn_ref = g_ref * w * wp;
+        if (m[i].nyq_kill) { gn = 0.f; gn_ref = 0.f; gn_ref = 0.f; }
 
         if (active_modes <= 0){
-            gn = 0.f;
+            gn = 0.f; gn_ref = 0.f;
         } else if (active_modes < n_modes){
             int K = active_modes;
             if (i >= K){
                 float fade_width = 3.f;
                 float u = ((float)i - (float)K) / fade_width;
                 if (u >= 1.f){
-                    gn = 0.f;
+                    gn = 0.f; gn_ref = 0.f;
                 } else if (u > 0.f){
                     float w_fade = 0.5f * (1.f + cosf((float)M_PI * u));
                     gn *= w_fade;
+                    gn_ref *= w_fade;
                 }
             }
         }
@@ -1907,12 +1915,25 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
 
                 if (weight < 0.f) weight = 0.f;
                 gn *= weight;
+                gn_ref *= weight;
             }
         }
 
-        m[i].gain_now = (gn < 0.f) ? 0.f : gn;
+        gn = (gn < 0.f) ? 0.f : gn;
+        gn_ref = (gn_ref < 0.f) ? 0.f : gn_ref;
+        m[i].gain_now = gn;
+        sum_gain += gn;
+        sum_ref  += gn_ref;
+    }
+
+    // Apply normalization so brightness redistributes energy without changing overall level.
+    float norm = (sum_gain > 1e-12f) ? (sum_ref / sum_gain) : 1.f;
+    if (norm < 0.f) norm = 0.f;
+    for (int i = 0; i < n_modes; ++i){
+        m[i].gain_now *= norm;
     }
 }
+
 static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
     jb_update_voice_gains_bank(x, v, 0);
 }
