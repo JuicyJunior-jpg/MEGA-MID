@@ -1734,9 +1734,8 @@ static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, in
         float denomR = (1.f - 2.f*r*cR + r*r);
         if (denomL < 1e-6f) denomL = 1e-6f;
         if (denomR < 1e-6f) denomR = 1e-6f;
-        // Neutral resonators: no pitch- or Q-dependent normalization
-        md->normL = 1.f;
-        md->normR = 1.f;
+        md->normL = denomL;
+        md->normR = denomR;
 
         if (bw_amt > 0.f){
             float mode_scale = (n_modes>1)? ((float)i/(float)(n_modes-1)) : 0.f;
