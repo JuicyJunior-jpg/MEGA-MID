@@ -1721,12 +1721,14 @@ static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, in
         md->a1L=2.f*r*cL; md->a2L=-r*r;
         md->a1R=2.f*r*cR; md->a2R=-r*r;
 
-        float denomL = (1.f - 2.f*r*cL + r*r);
-        float denomR = (1.f - 2.f*r*cR + r*r);
-        if (denomL < 1e-6f) denomL = 1e-6f;
-        if (denomR < 1e-6f) denomR = 1e-6f;
-        md->normL = denomL;
-        md->normR = denomR;
+        // Pitch-independent excitation scaling (highlight fix):
+        // The old denom-based term depended on cos(w) and made excitation strength vary with pitch,
+        // causing low notes to be under-driven and high notes to be over-driven.
+        // Here we keep scaling independent of frequency, using only decay (r) to stay in a similar level range.
+        float norm = 1.f + r * r; // range ~[1,2] as r goes 0->1
+        if (norm < 1e-6f) norm = 1e-6f;
+        md->normL = norm;
+        md->normR = norm;
 
         if (bw_amt > 0.f){
             float mode_scale = (n_modes>1)? ((float)i/(float)(n_modes-1)) : 0.f;
