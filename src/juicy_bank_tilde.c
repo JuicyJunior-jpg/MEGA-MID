@@ -843,26 +843,17 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
 }
 // ---------- helpers ----------
 static float jb_bright_gain(float ratio_rel, float b){
-    // Tela-style tilt:
-    //  - brightness b in [-1,1]
-    //  - b = 0: natural falloff ~ 1 / ratio_rel
-    //  - b > 0: brighten by flattening the falloff towards linear (all partials ~ equal)
-    //  - b < 0: darken by increasing falloff (stronger attenuation of higher partials)
+    // Brightness tilt (defines spectral slope):
+    //  - b in [-1,1]
+    //  - b = 0   : saw reference (gain ~ 1/ratio_rel)
+    //  - b = +1  : flat spectrum (all modes ~ equal gain)
+    //  - b = -1  : dark (gain ~ 1/ratio_rel^2)
+    //
+    // Implementation: gain = ratio_rel^(-alpha), alpha = 1 - b
+    //  -> b=-1 => alpha=2 ; b=0 => alpha=1 ; b=+1 => alpha=0
     float bb = jb_clamp(b, -1.f, 1.f);
     float rr = jb_clamp(ratio_rel, 1.f, 1e6f);
-
-    // exponent alpha controls how fast amplitudes drop with partial ratio:
-    // gain ~ rr^(-alpha)
-    float alpha;
-    if (bb >= 0.f){
-        // from natural 1/ratio (alpha=1) towards flat (alpha=0)
-        alpha = 1.f - bb;
-    } else {
-        // from natural 1/ratio (alpha=1) towards steeper 1/ratio^3 (alpha=3)
-        float k_dark = 2.f; // range of extra darkness
-        alpha = 1.f - bb * k_dark; // bb in [-1,0) -> alpha in (1,3]
-    }
-
+    float alpha = 1.f - bb;
     return powf(rr, -alpha);
 }
 static float jb_position_weight(float ratio_rel, float pos){
@@ -2887,9 +2878,9 @@ static void jb_apply_default_saw_bank(t_juicy_bank_tilde *x, int bank){
         base[i].active = 1;
         base[i].base_ratio = (float)(i+1);
         base[i].base_decay_ms = 1000.f;   // 1 second
-        // True saw-like harmonic amplitude: ~1/n
-        base[i].base_gain = 1.0f / (float)(i+1);
-        base[i].attack_ms = 0.f;
+        // Flat per-mode gain by default (brightness defines the spectral slope)
+        base[i].base_gain = 1.0f;
+base[i].attack_ms = 0.f;
         base[i].curve_amt = 0.f;          // linear
         base[i].pan = 0.f;
         base[i].keytrack = 1;
@@ -2899,13 +2890,13 @@ static void jb_apply_default_saw_bank(t_juicy_bank_tilde *x, int bank){
 
     // sensible body defaults (per bank)
     if (!bank){
-        x->damping = 0.f; x->brightness = 0.5f; x->position = 0.f; x->damp_broad=0.f; x->damp_point=0.f;
+        x->damping = 0.f; x->brightness = 0.f; x->position = 0.f; x->damp_broad=0.f; x->damp_point=0.f;
         x->density_amt = 0.f; x->density_mode = DENSITY_PIVOT;
         x->dispersion = 0.f; x->dispersion_last = -1.f;
         x->aniso = 0.f; x->aniso_eps = 0.02f;
         x->release_amt = 1.f;
     } else {
-        x->damping2 = 0.f; x->brightness2 = 0.5f; x->position2 = 0.f; x->damp_broad2=0.f; x->damp_point2=0.f;
+        x->damping2 = 0.f; x->brightness2 = 0.f; x->position2 = 0.f; x->damp_broad2=0.f; x->damp_point2=0.f;
         x->density_amt2 = 0.f; x->density_mode2 = DENSITY_PIVOT;
         x->dispersion2 = 0.f; x->dispersion_last2 = -1.f;
         x->aniso2 = 0.f; x->aniso_eps2 = 0.02f;
@@ -2926,7 +2917,7 @@ static void *juicy_bank_tilde_new(void){
     jb_apply_default_saw(x);
 
     // body defaults
-    x->damping=0.f; x->brightness=0.5f; x->position=0.f;
+    x->damping=0.f; x->brightness=0.f; x->position=0.f;
     x->density_amt=0.f; x->density_mode=DENSITY_PIVOT;
     x->dispersion=0.f; x->dispersion_last=-1.f;
     x->offset_amt=0.f;
@@ -3156,7 +3147,7 @@ static void juicy_bank_tilde_INIT(t_juicy_bank_tilde *x){
     int b = (x->edit_bank != 0) ? 1 : 0;
     jb_apply_default_saw_bank(x, b);
     juicy_bank_tilde_restart(x);
-    post("juicy_bank~: INIT complete (selected bank=%d, 32 modes, saw-like gains 1/n, decay=1s).", b+1);
+    post("juicy_bank~: INIT complete (selected bank=%d, 32 modes, flat per-mode gains, brightness=0 -> saw tilt, decay=1s).", b+1);
 }
 static void juicy_bank_tilde_init_alias(t_juicy_bank_tilde *x){ juicy_bank_tilde_INIT(x); }
 
