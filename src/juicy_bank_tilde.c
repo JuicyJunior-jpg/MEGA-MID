@@ -1885,11 +1885,23 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
                 float pitch  = jb_clamp(jb_bank_sine_pitch(x, bank), 0.f, 1.f);
                 float phase  = jb_bank_sine_phase(x, bank);
                 float width  = jb_clamp(jb_bank_sine_width(x, bank), 0.f, 1.f);
-                float skew   = jb_clamp(jb_bank_sine_skew(x, bank), -1.f, 1.f);
-
-                float t = order_t[i];
+                float skew   = jb_clamp(jb_bank_sine_skew(x, bank), -1.f, 1.f);                float t = order_t[i];
                 if (t < 0.f) t = 0.f;
                 if (t > 1.f) t = 1.f;
+
+                // Skew: warp modal index space BEFORE evaluating the sine.
+                // Positive skew packs oscillations toward higher partials; negative toward lower partials.
+                if (skew != 0.f){
+                    float a = powf(2.f, fabsf(skew) * 4.f); // 1..16 (tunable)
+                    if (a < 1e-6f) a = 1e-6f;
+                    if (skew > 0.f){
+                        t = powf(t, a);
+                    } else {
+                        t = 1.f - powf(1.f - t, a);
+                    }
+                    if (t < 0.f) t = 0.f;
+                    if (t > 1.f) t = 1.f;
+                }
 
                 float cycles_min = 0.25f;
                 float cycles_max = floorf((float)N * 0.5f);
@@ -1898,23 +1910,18 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
 
                 float theta = 2.f * (float)M_PI * (cycles * t + phase);
 
-                float s1 = sinf(theta);
-                float s2 = sinf(2.f * theta);
-                float s  = s1 + skew * s2;
-                float norm = 1.f + fabsf(skew);
-                if (norm > 0.f) s /= norm;
-
+                // Base sine pattern in [0,1]
+                float s = sinf(theta);
                 float pattern = 0.5f * (1.f + s);
                 if (pattern < 0.f) pattern = 0.f;
                 if (pattern > 1.f) pattern = 1.f;
-
-                // Tela-style sine pattern: bipolar depth chooses peaks vs valleys.
+// Tela-style sine pattern: bipolar depth chooses peaks vs valleys.
                 // width narrows peaks; depth increases sparsity (only highest peaks survive at high depth).
                 float amt  = fabsf(depth);                 // 0..1
                 float mask = (depth >= 0.f) ? pattern : (1.f - pattern);
 
-                float sharp  = 1.f + 18.f * width;         // 1..19
-                float sparse = 1.f + 30.f * amt;           // 1..31
+                                float sharp  = 1.f + 8.f * width;          // peak width / sharpness
+                float sparse = 1.f + 60.f * (amt * amt);   // sparsity (gentle at low depth, strong near 1)
 
                 mask = powf(mask, sharp);
                 mask = powf(mask, sparse);
