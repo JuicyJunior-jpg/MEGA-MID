@@ -336,7 +336,7 @@ typedef enum { DENSITY_PIVOT=0, DENSITY_INDIV=1 } jb_density_mode;
 typedef struct {
     // base params (shared template per mode)
     float base_ratio, base_decay_ms, base_gain;
-    float attack_ms, curve_amt, pan;
+    float attack_ms, pan;
     int   active;
     int   keytrack; // 1 = track f0 (ratio), 0 = absolute Hz
 
@@ -351,7 +351,7 @@ typedef struct {
     float rel_env;
     // runtime per-mode
     float ratio_now, decay_ms_now, gain_now;
-    float t60_s, decay_u;
+    float t60_s;
 
     // per-ear per-hit randomizations
     float md_hit_offsetL, md_hit_offsetR;   // micro detune offsets
@@ -523,7 +523,7 @@ float damping, brightness, position; float damp_broad, damp_point;
 // Body controls (damping, brightness, position, density, dispersion, anisotropy)
     t_inlet *in_damping, *in_damp_broad, *in_damp_point, *in_brightness, *in_position, *in_density, *in_stretch, *in_warp, *in_dispersion, *in_offset, *in_collision, *in_aniso;
     // Individual
-    t_inlet *in_index, *in_ratio, *in_gain, *in_attack, *in_decay, *in_curve, *in_pan, *in_keytrack;
+    t_inlet *in_index, *in_ratio, *in_gain, *in_attack, *in_decay, *in_pan, *in_keytrack;
 
     // --- SINE (AM across modes) ---
     float sine_pitch;   // 0..1
@@ -861,18 +861,6 @@ static float jb_position_weight(float ratio_rel, float pos){
     float k = roundf(jb_clamp(ratio_rel,1.f,1e6f));
     return fabsf(sinf((float)M_PI * k * jb_clamp(pos,0.f,1.f)));
 }
-static inline float jb_curve_shape_gain(float u, float curve){
-    if (u <= 0.f) return 1.f;
-    if (u >= 1.f) return 1.f;
-    float gamma;
-    if (curve < 0.f){ float t = -curve; gamma = 1.f - t*(1.f - 0.35f); }
-    else if (curve > 0.f){ float t = curve;  gamma = 1.f + t*(3.0f - 1.f); }
-    else return 1.f;
-    float phi = powf(jb_clamp(u,0.f,1.f), gamma);
-    float delta = phi - u;
-    return powf(10.f, -3.f * delta);
-}
-
 // ---------- density mapping ----------
 // Only keytracked modes are spread by density; absolute-Hz modes keep base_ratio.
 static void jb_apply_density(const t_juicy_bank_tilde *x, jb_voice_t *v){
@@ -1720,22 +1708,32 @@ static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, in
 
         md->a1L=2.f*r*cL; md->a2L=-r*r;
         md->a1R=2.f*r*cR; md->a2R=-r*r;
-        // Scaling Factor normalization (frequency-dependent):
-        // Pick b0 such that |H(e^{jw0})| = 1 for the 2-pole resonator
-        //   H(z) = b0 / (1 - 2r cos(w0) z^-1 + r^2 z^-2)
-        // Mainstream formula used in many DSP lecture notes:
-        //   b0 = (1 - r) * sqrt(1 + r^2 - 2 r cos(2 w0))
-        // This removes the low-vs-high imbalance caused by the raw resonator peak varying with frequency.
-        float tL = 1.f + r*r - 2.f*r*cosf(2.f*wL);
-        float tR = 1.f + r*r - 2.f*r*cosf(2.f*wR);
-        if (tL < 0.f) tL = 0.f;
-        if (tR < 0.f) tR = 0.f;
-        float b0L = (1.f - r) * sqrtf(tL);
-        float b0R = (1.f - r) * sqrtf(tR);
-        if (b0L < 1e-9f) b0L = 1e-9f;
-        if (b0R < 1e-9f) b0R = 1e-9f;
-        md->normL = b0L;
-        md->normR = b0R;
+        // Scaling Factor normalization (frequency + decay-aware, constant-energy target):
+// The old choice:
+//   b0 = (1 - r) * sqrt(1 + r^2 - 2 r cos(2 w0))
+// normalizes the *steady-state sinusoid* gain at resonance (|H(e^{jw0})|=1),
+// which makes long decays (r→1) inject very little energy for burst/noise exciters.
+//
+// For burst/noise excitation, a better perceptual target is roughly constant injected
+// power/energy vs decay. Replace (1 - r) with sqrt(1 - r^2).
+float tL = 1.f + r*r - 2.f*r*cosf(2.f*wL);
+float tR = 1.f + r*r - 2.f*r*cosf(2.f*wR);
+if (tL < 0.f) tL = 0.f;
+if (tR < 0.f) tR = 0.f;
+
+float qL = 1.f - r*r;
+float qR = 1.f - r*r;
+if (qL < 0.f) qL = 0.f;
+if (qR < 0.f) qR = 0.f;
+
+float b0L = sqrtf(qL) * sqrtf(tL);
+float b0R = sqrtf(qR) * sqrtf(tR);
+
+if (b0L < 1e-9f) b0L = 1e-9f;
+if (b0R < 1e-9f) b0R = 1e-9f;
+
+md->normL = b0L;
+md->normR = b0R;
 
         if (bw_amt > 0.f){
             float mode_scale = (n_modes>1)? ((float)i/(float)(n_modes-1)) : 0.f;
@@ -1964,7 +1962,7 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
         md->ratio_now = x->base[i].base_ratio;
         md->decay_ms_now = x->base[i].base_decay_ms;
         md->gain_now = x->base[i].base_gain;
-        md->t60_s = md->decay_ms_now*0.001f; md->decay_u=0.f;
+        md->t60_s = md->decay_ms_now*0.001f;
         md->a1L=md->a2L=md->y1L=md->y2L=0.f; md->a1bL=md->a2bL=md->y1bL=md->y2bL=0.f;
         md->a1R=md->a2R=md->y1R=md->y2R=0.f; md->a1bR=md->a2bR=md->y1bR=md->y2bR=0.f;
         md->driveL=md->driveR=0.f; md->envL=md->envR=0.f;
@@ -1986,7 +1984,7 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
         md->ratio_now = x->base2[i].base_ratio;
         md->decay_ms_now = x->base2[i].base_decay_ms;
         md->gain_now = x->base2[i].base_gain;
-        md->t60_s = md->decay_ms_now*0.001f; md->decay_u=0.f;
+        md->t60_s = md->decay_ms_now*0.001f;
         md->a1L=md->a2L=md->y1L=md->y2L=0.f; md->a1bL=md->a2bL=md->y1bL=md->y2bL=0.f;
         md->a1R=md->a2R=md->y1R=md->y2R=0.f; md->a1bR=md->a2bR=md->y1bR=md->y2bR=0.f;
         md->driveL=md->driveR=0.f; md->envL=md->envR=0.f;
@@ -2226,12 +2224,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     if (md->gain_now<=0.f || md->nyq_kill) continue;
 
                     float y1L=md->y1L, y2L=md->y2L, y1bL=md->y1bL, y2bL=md->y2bL, driveL=md->driveL, envL=md->envL;
-                    float y1R=md->y1R, y2R=md->y2R, y1bR=md->y1bR, y2bR=md->y2bR, driveR=md->driveR, envR=md->envR;
-                    float u = md->decay_u;
-                    float att_ms = jb_clamp(base2[m].attack_ms,0.f,500.f);
+                    float y1R=md->y1R, y2R=md->y2R, y1bR=md->y1bR, y2bR=md->y2bR, driveR=md->driveR, envR=md->envR;                    float att_ms = jb_clamp(base2[m].attack_ms,0.f,500.f);
                     float att_a = (att_ms<=0.f)?1.f:(1.f-expf(-1.f/(0.001f*att_ms*x->sr)));
-                    float du = (md->t60_s > 1e-6f) ? (1.f / (md->t60_s * x->sr)) : 1.f;
-
                     float excL = exL * md->gain_now;
                     float excR = exR * md->gain_now;
 
@@ -2254,12 +2248,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                         y2bR=y1bR; y1bR=y_lin_bR;
                         y_totalR += 0.12f * bw_amt2 * y_lin_bR;
                     }
-
-                    float S = jb_curve_shape_gain(u, base2[m].curve_amt);
-                    if (base2[m].curve_amt < 0.f){ if (S < 0.001f) S = 0.001f; }
-                    y_totalL *= S; y_totalR *= S;
-                    u += du; if(u>1.f){ u=1.f; }
-
                     float base_pan = jb_clamp(base2[m].pan, -1.f, 1.f);
                     float p = base_pan + pan_mod2;
                     if (p > 1.f) p = 1.f;
@@ -2272,9 +2260,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     outR[i] += y_totalR * wR * bank_gain2;
 
                     md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
-                    md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;
-                    md->decay_u=u;
-                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
+                    md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
                 }
             }
             // topology selector (BANK 1 input source):
@@ -2301,12 +2287,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     if (md->gain_now<=0.f || md->nyq_kill) continue;
 
                     float y1L=md->y1L, y2L=md->y2L, y1bL=md->y1bL, y2bL=md->y2bL, driveL=md->driveL, envL=md->envL;
-                    float y1R=md->y1R, y2R=md->y2R, y1bR=md->y1bR, y2bR=md->y2bR, driveR=md->driveR, envR=md->envR;
-                    float u = md->decay_u;
-                    float att_ms = jb_clamp(base1[m].attack_ms,0.f,500.f);
+                    float y1R=md->y1R, y2R=md->y2R, y1bR=md->y1bR, y2bR=md->y2bR, driveR=md->driveR, envR=md->envR;                    float att_ms = jb_clamp(base1[m].attack_ms,0.f,500.f);
                     float att_a = (att_ms<=0.f)?1.f:(1.f-expf(-1.f/(0.001f*att_ms*x->sr)));
-                    float du = (md->t60_s > 1e-6f) ? (1.f / (md->t60_s * x->sr)) : 1.f;
-
                     float excL = exL * md->gain_now;
                     float excR = exR * md->gain_now;
 
@@ -2329,12 +2311,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                         y2bR=y1bR; y1bR=y_lin_bR;
                         y_totalR += 0.12f * bw_amt1 * y_lin_bR;
                     }
-
-                    float S = jb_curve_shape_gain(u, base1[m].curve_amt);
-                    if (base1[m].curve_amt < 0.f){ if (S < 0.001f) S = 0.001f; }
-                    y_totalL *= S; y_totalR *= S;
-                    u += du; if(u>1.f){ u=1.f; }
-
                     float base_pan = jb_clamp(base1[m].pan, -1.f, 1.f);
                     float p = base_pan + pan_mod1;
                     if (p > 1.f) p = 1.f;
@@ -2348,9 +2324,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     outR[i] += y_totalR * wR * bank_gain1;
 
                     md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
-                    md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;
-                    md->decay_u=u;
-                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
+                    md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
                 }
             }
 
@@ -2485,17 +2459,6 @@ static void juicy_bank_tilde_decay_i(t_juicy_bank_tilde *x, t_floatarg ms){
     int i = *edit_idx_p;
     if (i < 0 || i >= *n_modes_p) return;
     base[i].base_decay_ms = (ms < 0.f) ? 0.f : ms;
-}
-static void juicy_bank_tilde_curve_i(t_juicy_bank_tilde *x, t_floatarg amt){
-    int *n_modes_p   = x->edit_bank ? &x->n_modes2  : &x->n_modes;
-    int *edit_idx_p  = x->edit_bank ? &x->edit_idx2 : &x->edit_idx;
-    jb_mode_base_t *base = x->edit_bank ? x->base2 : x->base;
-
-    int i = *edit_idx_p;
-    if (i < 0 || i >= *n_modes_p) return;
-    if (amt < -1.f) amt = -1.f;
-    if (amt >  1.f) amt =  1.f;
-    base[i].curve_amt = amt;
 }
 static void juicy_bank_tilde_pan_i(t_juicy_bank_tilde *x, t_floatarg p){
     int *n_modes_p   = x->edit_bank ? &x->n_modes2  : &x->n_modes;
@@ -2870,7 +2833,7 @@ inlet_free(x->in_sine_pitch);
     inlet_free(x->in_sine_phase);
 inlet_free(x->in_partials); // free 'partials' inlet
 inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
-    inlet_free(x->in_attack); inlet_free(x->in_decay); inlet_free(x->in_curve); inlet_free(x->in_pan); inlet_free(x->in_keytrack);
+    inlet_free(x->in_attack); inlet_free(x->in_decay); inlet_free(x->in_pan); inlet_free(x->in_keytrack);
 
     // Internal exciter inlets (Fusion STEP 1)
     if (x->in_exc_fader) inlet_free(x->in_exc_fader);
@@ -2910,9 +2873,7 @@ static void jb_apply_default_saw_bank(t_juicy_bank_tilde *x, int bank){
         base[i].base_decay_ms = 1000.f;   // 1 second
         // Flat per-mode gain by default (brightness defines the spectral slope)
         base[i].base_gain = 1.0f;
-base[i].attack_ms = 0.f;
-        base[i].curve_amt = 0.f;          // linear
-        base[i].pan = 0.f;
+base[i].attack_ms = 0.f;        base[i].pan = 0.f;
         base[i].keytrack = 1;
         base[i].disp_signature = 0.f;
         base[i].micro_sig      = 0.f;
@@ -3126,7 +3087,6 @@ x->sine_phase2    = x->sine_phase;
     x->in_gain       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("gain"));
     x->in_attack     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("attack"));
     x->in_decay      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("decay"));   // alias of decay
-    x->in_curve      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("curve"));
     x->in_pan        = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("pan"));
     x->in_keytrack   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("keytrack"));
 
@@ -3603,7 +3563,6 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gens
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_attack_i, gensym("attack"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_decay_i, gensym("decay"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_decay_i, gensym("decya"), A_DEFFLOAT, 0); // alias
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_curve_i, gensym("curve"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pan_i, gensym("pan"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_keytrack_i, gensym("keytrack"), A_DEFFLOAT, 0);
 
