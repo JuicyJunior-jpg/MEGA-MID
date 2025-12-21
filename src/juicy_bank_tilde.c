@@ -1880,23 +1880,57 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
         {
             float depth = jb_clamp(jb_bank_sine_depth(x, bank), -1.f, 1.f);
             if (depth != 0.f){
-                int   N      = (active_count > 0) ? active_count : n_modes;
+                int   N = (active_count > 0) ? active_count : n_modes;
                 if (N < 1) N = 1;
-                float pitch  = jb_clamp(jb_bank_sine_pitch(x, bank), 0.f, 1.f);
-                float phase  = jb_bank_sine_phase(x, bank);
-                float width  = jb_clamp(jb_bank_sine_width(x, bank), 0.f, 1.f);
-                float skew   = jb_clamp(jb_bank_sine_skew(x, bank), -1.f, 1.f);                float t = order_t[i];
-                if (t < 0.f) t = 0.f;
-                if (t > 1.f) t = 1.f;
+                float pitch = jb_clamp(jb_bank_sine_pitch(x, bank), 0.f, 1.f);
+                // If pattern frequency is 0, the sine mask should have no effect (regardless of phase/depth).
+                if (pitch > 1e-6f){
+                    float phase = jb_bank_sine_phase(x, bank);
+                    float width = jb_clamp(jb_bank_sine_width(x, bank), 0.f, 1.f);
+                    float skew  = jb_clamp(jb_bank_sine_skew(x, bank), -1.f, 1.f);
+                    float t = order_t[i];
+                    if (t < 0.f) t = 0.f;
+                    if (t > 1.f) t = 1.f;
 
-                // Skew: warp modal index space BEFORE evaluating the sine.
-                // Positive skew packs oscillations toward higher partials; negative toward lower partials.
-                if (skew != 0.f){
-                    float a = powf(2.f, fabsf(skew) * 4.f); // 1..16 (tunable)
-                    if (a < 1e-6f) a = 1e-6f;
-                    if (skew > 0.f){
-                        t = powf(t, a);
-                    } else {
+                    // Skew: warp modal index space BEFORE evaluating the sine.
+                    // skew > 0 packs oscillations toward higher partials; skew < 0 toward lower partials.
+                    if (skew != 0.f){
+                        float gamma = powf(2.f, 2.f * skew); // 0.25..4
+                        if (gamma < 1e-6f) gamma = 1e-6f;
+                        t = powf(t, gamma);
+                        if (t < 0.f) t = 0.f;
+                        if (t > 1.f) t = 1.f;
+                    }
+
+                    // 'pitch' acts like a sine frequency across the bank: low = stretched wave, high = many cycles.
+                    float cycles_max = floorf((float)N * 0.5f);
+                    if (cycles_max < 0.f) cycles_max = 0.f;
+                    float cycles = pitch * cycles_max; // 0 .. N/2 cycles across modes
+
+                    float theta = 2.f * (float)M_PI * (cycles * t + phase);
+                    float s = sinf(theta);
+                    float pattern = 0.5f * (1.f + s); // [0,1]
+                    if (pattern < 0.f) pattern = 0.f;
+                    if (pattern > 1.f) pattern = 1.f;
+
+                    // Tela-style sine pattern:
+                    //  - depth (bipolar) selects peaks (+) vs valleys (-)
+                    //  - width narrows peaks/valleys
+                    //  - depth magnitude increases sparsity (only highest peaks survive at high depth)
+                    float amt  = fabsf(depth);
+                    float mask = (depth >= 0.f) ? pattern : (1.f - pattern);
+                    float sharp  = 1.f + 8.f  * width;
+                    float sparse = 1.f + 30.f * amt;
+                    mask = powf(mask, sharp);
+                    mask = powf(mask, sparse);
+                    float weight = (1.f - amt) + amt * mask;
+                    if (weight < 0.f) weight = 0.f;
+                    if (weight > 1.f) weight = 1.f;
+
+                    gn *= weight;
+                    gn_ref *= weight;
+                }
+            } else {
                         t = 1.f - powf(1.f - t, a);
                     }
                     if (t < 0.f) t = 0.f;
