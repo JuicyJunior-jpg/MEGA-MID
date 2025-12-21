@@ -1920,14 +1920,17 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
 
         // Width narrows peaks/valleys (no effect at width=0).
         if (width > 1e-6f){
-            float sharp = 1.f + 8.f * width;    // tweak range if needed
+            float sharp = 1.f + 6.f * width;    // tweak range if needed
             mask = powf(mask, sharp);
         }
 
-        // Depth increases sparsity at the extreme, matching Tela-style description.
-        // Keep it gentle so low pitch still sounds like a stretched sine.
-        float sparse = 1.f + 16.f * amt;
-        mask = powf(mask, sparse);
+// Depth controls *contrast* (carving) rather than "making it louder".
+// At depth→1 this becomes near-binary: only peak regions survive.
+// This is cut-only (never boosts above 1).
+float k_max = 64.f;                 // higher = more square/gated at full depth
+float a4 = amt * amt; a4 *= a4;     // amt^4 keeps mid-depth gentler
+float contrast = 1.f + (k_max - 1.f) * a4;
+mask = powf(mask, contrast);
 
         // Blend: depth=0 => weight 1, depth=1 => full mask
         float weight = (1.f - amt) + amt * mask;
