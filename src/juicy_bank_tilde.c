@@ -357,13 +357,7 @@ typedef struct {
     float md_hit_offsetL, md_hit_offsetR;   // micro detune offsets
     float bw_hit_ratioL, bw_hit_ratioR;     // twin detune ratios
 
-        // ZDF State Variable Filter (TPT / zero-delay feedback) states for the MAIN resonator
-    // We use the bandpass output as the modal resonator output.
-    // Coeffs are per-mode, per-ear (L/R).
-    float svf_a1L, svf_a2L, svf_a3L, svf_kL, svf_ic1L, svf_ic2L;
-    float svf_a1R, svf_a2R, svf_a3R, svf_kR, svf_ic1R, svf_ic2R;
-
-// LEFT states
+    // LEFT states
     float a1L,a2L, y1L,y2L, a1bL,a2bL, y1bL,y2bL, envL, y_pre_lastL, normL;
     // RIGHT states
     float a1R,a2R, y1R,y2R, a1bR,a2bR, y1bR,y2bR, envR, y_pre_lastR, normR;
@@ -1637,8 +1631,6 @@ static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, in
             md->a1R=md->a2R=md->a1bR=md->a2bR=0.f;
             md->t60_s=0.f;
             md->normL = md->normR = 1.f;
-        md->svf_a1L=md->svf_a2L=md->svf_a3L=md->svf_kL=0.f; md->svf_ic1L=md->svf_ic2L=0.f;
-        md->svf_a1R=md->svf_a2R=md->svf_a3R=md->svf_kR=0.f; md->svf_ic1R=md->svf_ic2R=0.f;
             continue;
         }
 
@@ -1672,8 +1664,6 @@ static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, in
             md->a1L=md->a2L=md->a1bL=md->a2bL=0.f;
             md->a1R=md->a2R=md->a1bR=md->a2bR=0.f;
             md->normL = md->normR = 1.f;
-        md->svf_a1L=md->svf_a2L=md->svf_a3L=md->svf_kL=0.f; md->svf_ic1L=md->svf_ic2L=0.f;
-        md->svf_a1R=md->svf_a2R=md->svf_a3R=md->svf_kR=0.f; md->svf_ic1R=md->svf_ic2R=0.f;
         }
 
         float base_ms = base[i].base_decay_ms;
@@ -1728,39 +1718,8 @@ static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, in
         float r = (T60 <= 0.f) ? 0.f : powf(10.f, -3.f / (T60 * x->sr));
         float cL=cosf(wL), cR=cosf(wR);
 
-                // ZDF SVF (TPT) coefficient setup for the MAIN resonator.
-        // We keep the existing pole-radius 'r' (derived from T60) as the decay control,
-        // and convert it to an approximate bandwidth to derive k = 1/Q.
-        // r ~= exp(-pi * BW / sr)  =>  BW ~= -(sr/pi) * ln(r)
-        float r_safe = (r < 1e-12f) ? 1e-12f : r;
-        float bwHz = -(x->sr / (float)M_PI) * logf(r_safe);  // bandwidth in Hz (approx)
-        float HzL_safe = (HzL < 1e-3f) ? 1e-3f : HzL;
-        float HzR_safe = (HzR < 1e-3f) ? 1e-3f : HzR;
-
-        float kL = bwHz / HzL_safe;
-        float kR = bwHz / HzR_safe;
-        if (kL < 1e-4f) kL = 1e-4f; else if (kL > 1e3f) kL = 1e3f;
-        if (kR < 1e-4f) kR = 1e-4f; else if (kR > 1e3f) kR = 1e3f;
-
-        float gL = tanf((float)M_PI * (HzL / x->sr));
-        float gR = tanf((float)M_PI * (HzR / x->sr));
-        // clamp g for safety (should already be safe if Nyquist is killed)
-        if (gL < 0.f) gL = 0.f; else if (gL > 1e3f) gL = 1e3f;
-        if (gR < 0.f) gR = 0.f; else if (gR > 1e3f) gR = 1e3f;
-
-        float a1L = 1.f / (1.f + gL * (gL + kL));
-        float a2L = gL * a1L;
-        float a3L = gL * a2L;
-        float a1R = 1.f / (1.f + gR * (gR + kR));
-        float a2R = gR * a1R;
-        float a3R = gR * a2R;
-
-        md->svf_a1L = a1L; md->svf_a2L = a2L; md->svf_a3L = a3L; md->svf_kL = kL;
-        md->svf_a1R = a1R; md->svf_a2R = a2R; md->svf_a3R = a3R; md->svf_kR = kR;
-
-        // legacy biquad coeffs unused for MAIN resonator now
-        md->a1L = md->a2L = 0.f;
-        md->a1R = md->a2R = 0.f;
+        md->a1L=2.f*r*cL; md->a2L=-r*r;
+        md->a1R=2.f*r*cR; md->a2R=-r*r;
         // Scaling Factor normalization (frequency-dependent):
         // Pick b0 such that |H(e^{jw0})| = 1 for the 2-pole resonator
         //   H(z) = b0 / (1 - 2r cos(w0) z^-1 + r^2 z^-2)
@@ -2014,8 +1973,6 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
         md->md_hit_offsetL = 0.f; md->md_hit_offsetR = 0.f;
         md->bw_hit_ratioL = 0.f;  md->bw_hit_ratioR = 0.f;
         md->normL = md->normR = 1.f;
-        md->svf_a1L=md->svf_a2L=md->svf_a3L=md->svf_kL=0.f; md->svf_ic1L=md->svf_ic2L=0.f;
-        md->svf_a1R=md->svf_a2R=md->svf_a3R=md->svf_kR=0.f; md->svf_ic1R=md->svf_ic2R=0.f;
         md->nyq_kill = 0;
 
         v->disp_offset[i]=0.f; v->disp_target[i]=0.f;
@@ -2038,8 +1995,6 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
         md->md_hit_offsetL = 0.f; md->md_hit_offsetR = 0.f;
         md->bw_hit_ratioL = 0.f;  md->bw_hit_ratioR = 0.f;
         md->normL = md->normR = 1.f;
-        md->svf_a1L=md->svf_a2L=md->svf_a3L=md->svf_kL=0.f; md->svf_ic1L=md->svf_ic2L=0.f;
-        md->svf_a1R=md->svf_a2R=md->svf_a3R=md->svf_kR=0.f; md->svf_ic1R=md->svf_ic2R=0.f;
         md->nyq_kill = 0;
 
         v->disp_offset2[i]=0.f; v->disp_target2[i]=0.f;
@@ -2270,11 +2225,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     jb_mode_rt_t *md=&v->m2[m];
                     if (md->gain_now<=0.f || md->nyq_kill) continue;
 
-                                        float ic1L = md->svf_ic1L, ic2L = md->svf_ic2L;
-                    float y1bL = md->y1bL, y2bL = md->y2bL, driveL = md->driveL, envL = md->envL;
-
-                    float ic1R = md->svf_ic1R, ic2R = md->svf_ic2R;
-                    float y1bR = md->y1bR, y2bR = md->y2bR, driveR = md->driveR, envR = md->envR;
+                    float y1L=md->y1L, y2L=md->y2L, y1bL=md->y1bL, y2bL=md->y2bL, driveL=md->driveL, envL=md->envL;
+                    float y1R=md->y1R, y2R=md->y2R, y1bR=md->y1bR, y2bR=md->y2bR, driveR=md->driveR, envR=md->envR;
                     float u = md->decay_u;
                     float att_ms = jb_clamp(base2[m].attack_ms,0.f,500.f);
                     float att_a = (att_ms<=0.f)?1.f:(1.f-expf(-1.f/(0.001f*att_ms*x->sr)));
@@ -2283,27 +2235,13 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     float excL = exL * md->gain_now;
                     float excR = exR * md->gain_now;
 
-                                        driveL += att_a*(excL - driveL);
+                    driveL += att_a*(excL - driveL);
+                    float y_linL = (md->a1L*y1L + md->a2L*y2L) + driveL * md->normL;
+                    y2L=y1L; y1L=y_linL;
 
-                    // MAIN resonator: ZDF SVF (bandpass output)
-                    float xinL = driveL * md->normL;
-                    float v3L = xinL - ic2L;
-                    float v1L = md->svf_a1L * ic1L + md->svf_a2L * v3L;
-                    float v2L = ic2L + md->svf_a2L * ic1L + md->svf_a3L * v3L;
-                    ic1L = 2.f * v1L - ic1L;
-                    ic2L = 2.f * v2L - ic2L;
-                    float y_linL = v1L;
-
-                                        driveR += att_a*(excR - driveR);
-
-                    // MAIN resonator: ZDF SVF (bandpass output)
-                    float xinR = driveR * md->normR;
-                    float v3R = xinR - ic2R;
-                    float v1R = md->svf_a1R * ic1R + md->svf_a2R * v3R;
-                    float v2R = ic2R + md->svf_a2R * ic1R + md->svf_a3R * v3R;
-                    ic1R = 2.f * v1R - ic1R;
-                    ic2R = 2.f * v2R - ic2R;
-                    float y_linR = v1R;
+                    driveR += att_a*(excR - driveR);
+                    float y_linR = (md->a1R*y1R + md->a2R*y2R) + driveR * md->normR;
+                    y2R=y1R; y1R=y_linR;
 
                     float y_totalL = y_linL;
                     float y_totalR = y_linR;
@@ -2333,11 +2271,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     outL[i] += y_totalL * wL * bank_gain2;
                     outR[i] += y_totalR * wR * bank_gain2;
 
-                                        md->svf_ic1L = ic1L; md->svf_ic2L = ic2L;
-                    md->y1bL = y1bL; md->y2bL = y2bL; md->driveL = driveL; md->envL = envL;
-
-                    md->svf_ic1R = ic1R; md->svf_ic2R = ic2R;
-                    md->y1bR = y1bR; md->y2bR = y2bR; md->driveR = driveR; md->envR = envR;
+                    md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
+                    md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;
                     md->decay_u=u;
                     md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
                 }
@@ -2365,11 +2300,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     jb_mode_rt_t *md=&v->m[m];
                     if (md->gain_now<=0.f || md->nyq_kill) continue;
 
-                                        float ic1L = md->svf_ic1L, ic2L = md->svf_ic2L;
-                    float y1bL = md->y1bL, y2bL = md->y2bL, driveL = md->driveL, envL = md->envL;
-
-                    float ic1R = md->svf_ic1R, ic2R = md->svf_ic2R;
-                    float y1bR = md->y1bR, y2bR = md->y2bR, driveR = md->driveR, envR = md->envR;
+                    float y1L=md->y1L, y2L=md->y2L, y1bL=md->y1bL, y2bL=md->y2bL, driveL=md->driveL, envL=md->envL;
+                    float y1R=md->y1R, y2R=md->y2R, y1bR=md->y1bR, y2bR=md->y2bR, driveR=md->driveR, envR=md->envR;
                     float u = md->decay_u;
                     float att_ms = jb_clamp(base1[m].attack_ms,0.f,500.f);
                     float att_a = (att_ms<=0.f)?1.f:(1.f-expf(-1.f/(0.001f*att_ms*x->sr)));
@@ -2378,27 +2310,13 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     float excL = exL * md->gain_now;
                     float excR = exR * md->gain_now;
 
-                                        driveL += att_a*(excL - driveL);
+                    driveL += att_a*(excL - driveL);
+                    float y_linL = (md->a1L*y1L + md->a2L*y2L) + driveL * md->normL;
+                    y2L=y1L; y1L=y_linL;
 
-                    // MAIN resonator: ZDF SVF (bandpass output)
-                    float xinL = driveL * md->normL;
-                    float v3L = xinL - ic2L;
-                    float v1L = md->svf_a1L * ic1L + md->svf_a2L * v3L;
-                    float v2L = ic2L + md->svf_a2L * ic1L + md->svf_a3L * v3L;
-                    ic1L = 2.f * v1L - ic1L;
-                    ic2L = 2.f * v2L - ic2L;
-                    float y_linL = v1L;
-
-                                        driveR += att_a*(excR - driveR);
-
-                    // MAIN resonator: ZDF SVF (bandpass output)
-                    float xinR = driveR * md->normR;
-                    float v3R = xinR - ic2R;
-                    float v1R = md->svf_a1R * ic1R + md->svf_a2R * v3R;
-                    float v2R = ic2R + md->svf_a2R * ic1R + md->svf_a3R * v3R;
-                    ic1R = 2.f * v1R - ic1R;
-                    ic2R = 2.f * v2R - ic2R;
-                    float y_linR = v1R;
+                    driveR += att_a*(excR - driveR);
+                    float y_linR = (md->a1R*y1R + md->a2R*y2R) + driveR * md->normR;
+                    y2R=y1R; y1R=y_linR;
 
                     float y_totalL = y_linL;
                     float y_totalR = y_linR;
@@ -2429,11 +2347,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     outL[i] += y_totalL * wL * bank_gain1;
                     outR[i] += y_totalR * wR * bank_gain1;
 
-                                        md->svf_ic1L = ic1L; md->svf_ic2L = ic2L;
-                    md->y1bL = y1bL; md->y2bL = y2bL; md->driveL = driveL; md->envL = envL;
-
-                    md->svf_ic1R = ic1R; md->svf_ic2R = ic2R;
-                    md->y1bR = y1bR; md->y2bR = y2bR; md->driveR = driveR; md->envR = envR;
+                    md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
+                    md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;
                     md->decay_u=u;
                     md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
                 }
