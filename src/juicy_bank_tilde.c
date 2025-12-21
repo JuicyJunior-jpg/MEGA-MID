@@ -1908,19 +1908,21 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
                 if (pattern < 0.f) pattern = 0.f;
                 if (pattern > 1.f) pattern = 1.f;
 
-                if (width > 0.f && pattern > 0.f && pattern < 1.f){
-                    float gamma = 0.5f + 3.0f * width;
-                    pattern = powf(pattern, gamma);
-                }
+                // Tela-style sine pattern: bipolar depth chooses peaks vs valleys.
+                // width narrows peaks; depth increases sparsity (only highest peaks survive at high depth).
+                float amt  = fabsf(depth);                 // 0..1
+                float mask = (depth >= 0.f) ? pattern : (1.f - pattern);
 
-                float a_pos = (depth > 0.f) ? depth : 0.f;
-                float a_neg = (depth < 0.f) ? -depth : 0.f;
+                float sharp  = 1.f + 18.f * width;         // 1..19
+                float sparse = 1.f + 30.f * amt;           // 1..31
 
-                float weight = 1.f
-                               - a_pos * pattern
-                               - a_neg * (1.f - pattern);
+                mask = powf(mask, sharp);
+                mask = powf(mask, sparse);
 
+                float weight = (1.f - amt) + amt * mask;   // lerp(1, mask, amt)
                 if (weight < 0.f) weight = 0.f;
+                if (weight > 1.f) weight = 1.f;
+
                 gn *= weight;
                 gn_ref *= weight;
             }
