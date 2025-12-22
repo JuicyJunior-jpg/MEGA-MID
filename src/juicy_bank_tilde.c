@@ -1876,58 +1876,71 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
             }
         }
 
-        // --- SINE AM mask (bank-specific) ---
-        {
-            float depth = jb_clamp(jb_bank_sine_depth(x, bank), -1.f, 1.f);
-            if (depth != 0.f){
-                int   N      = (active_count > 0) ? active_count : n_modes;
-                if (N < 1) N = 1;
-                float pitch  = jb_clamp(jb_bank_sine_pitch(x, bank), 0.f, 1.f);
-                float phase  = jb_bank_sine_phase(x, bank);
-                float width  = jb_clamp(jb_bank_sine_width(x, bank), 0.f, 1.f);
-                float skew   = jb_clamp(jb_bank_sine_skew(x, bank), -1.f, 1.f);
+// --- SINE AM mask (bank-specific) ---
+{
+    // depth is bipolar: + keeps peaks, - keeps valleys
+    float depth = jb_clamp(jb_bank_sine_depth(x, bank), -1.f, 1.f);
+    // pitch is the sine "frequency" across modal index: low = stretched wave, high = many cycles
+    float pitch = jb_clamp(jb_bank_sine_pitch(x, bank), 0.f, 1.f);
 
-                float t = order_t[i];
-                if (t < 0.f) t = 0.f;
-                if (t > 1.f) t = 1.f;
+    // pattern=0 => no effect (regardless of phase/width/skew/depth)
+    if (depth != 0.f && pitch > 1e-6f){
 
-                float cycles_min = 0.25f;
-                float cycles_max = floorf((float)N * 0.5f);
-                if (cycles_max < cycles_min) cycles_max = cycles_min;
-                float cycles = cycles_min + pitch * (cycles_max - cycles_min);
+        int N = (active_count > 0) ? active_count : n_modes;
+        if (N < 1) N = 1;
 
-                float theta = 2.f * (float)M_PI * (cycles * t + phase);
+        float phase = jb_bank_sine_phase(x, bank);                 // 0..1 cycles
+        float width = jb_clamp(jb_bank_sine_width(x, bank), 0.f, 1.f);
+        float skew  = jb_clamp(jb_bank_sine_skew(x, bank), -1.f, 1.f);
 
-                float s1 = sinf(theta);
-                float s2 = sinf(2.f * theta);
-                float s  = s1 + skew * s2;
-                float norm = 1.f + fabsf(skew);
-                if (norm > 0.f) s /= norm;
+        // normalized ordered index (0..1) across *active* modes
+        float t = order_t[i];
+        if (t < 0.f) t = 0.f;
+        if (t > 1.f) t = 1.f;
 
-                float pattern = 0.5f * (1.f + s);
-                if (pattern < 0.f) pattern = 0.f;
-                if (pattern > 1.f) pattern = 1.f;
-
-                // Tela-style sine pattern: bipolar depth chooses peaks vs valleys.
-                // width narrows peaks; depth increases sparsity (only highest peaks survive at high depth).
-                float amt  = fabsf(depth);                 // 0..1
-                float mask = (depth >= 0.f) ? pattern : (1.f - pattern);
-
-                float sharp  = 1.f + 18.f * width;         // 1..19
-                float sparse = 1.f + 30.f * amt;           // 1..31
-
-                mask = powf(mask, sharp);
-                mask = powf(mask, sparse);
-
-                float weight = (1.f - amt) + amt * mask;   // lerp(1, mask, amt)
-                if (weight < 0.f) weight = 0.f;
-                if (weight > 1.f) weight = 1.f;
-
-                gn *= weight;
-                gn_ref *= weight;
-            }
+        // Skew: warp index space BEFORE evaluating the sine (biases peak/valley agglomeration)
+        if (skew != 0.f){
+            // gamma in ~[0.25..4] for skew in [-1..+1]
+            float gamma = powf(2.f, 2.f * skew);
+            if (gamma < 1e-6f) gamma = 1e-6f;
+            t = powf(t, gamma);
+            if (t < 0.f) t = 0.f;
+            if (t > 1.f) t = 1.f;
         }
 
+        // Map pitch to number of sine cycles across the bank (continuous).
+        // Max cycles = N/2 gives alternating peaks/valleys roughly every other mode.
+        float cycles = pitch * (0.5f * (float)N);
+
+        float theta = 2.f * (float)M_PI * (cycles * t + phase);
+        float pat = 0.5f * (1.f + sinf(theta)); // [0,1]
+
+        float amt  = fabsf(depth);              // 0..1
+        float mask = (depth >= 0.f) ? pat : (1.f - pat);
+
+        // Width narrows peaks/valleys (no effect at width=0).
+        if (width > 1e-6f){
+            float sharp = 1.f + 6.f * width;    // tweak range if needed
+            mask = powf(mask, sharp);
+        }
+
+// Depth controls *contrast* (carving) rather than "making it louder".
+// At depth→1 this becomes near-binary: only peak regions survive.
+// This is cut-only (never boosts above 1).
+float k_max = 64.f;                 // higher = more square/gated at full depth
+float a4 = amt * amt; a4 *= a4;     // amt^4 keeps mid-depth gentler
+float contrast = 1.f + (k_max - 1.f) * a4;
+mask = powf(mask, contrast);
+
+        // Blend: depth=0 => weight 1, depth=1 => full mask
+        float weight = (1.f - amt) + amt * mask;
+        if (weight < 0.f) weight = 0.f;
+        if (weight > 1.f) weight = 1.f;
+
+        gn *= weight;
+        gn_ref *= weight;
+    }
+}
         gn = (gn < 0.f) ? 0.f : gn;
         gn_ref = (gn_ref < 0.f) ? 0.f : gn_ref;
         m[i].gain_now = gn;
