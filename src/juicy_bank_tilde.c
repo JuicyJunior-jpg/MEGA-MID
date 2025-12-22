@@ -1924,99 +1924,76 @@ if (sine_depth != 0.f && sine_pitch > 1e-6f && active_modes > 0){
     }
 }
 
-    for(int i = 0; i < n_modes; ++i){
-        if(!base[i].active){
-            m[i].gain_now = 0.f;
-            continue;
-        }
+for (int i = 0; i < n_modes; ++i){
+    if(!base[i].active){
+        m[i].gain_now = 0.f;
+        continue;
+    }
 
-        float ratio = m[i].ratio_now + disp_offset[i];
-        float ratio_rel = base[i].keytrack ? ratio : ((v->f0>0.f)? (ratio / v->f0) : ratio);
+    float ratio = m[i].ratio_now + disp_offset[i];
+    float ratio_rel = base[i].keytrack ? ratio : ((v->f0 > 0.f) ? (ratio / v->f0) : ratio);
 
-        float g = base[i].base_gain * jb_bright_gain(ratio_rel, brightness_v);
+    float g     = base[i].base_gain * jb_bright_gain(ratio_rel, brightness_v);
+    float g_ref = base[i].base_gain * jb_bright_gain(ratio_rel, 0.f);
 
-        float g_ref = base[i].base_gain * jb_bright_gain(ratio_rel, 0.f);
-        float w = 1.f;
-        if (i != 0 && aniso != 0.f){
-            float r = ratio_rel;
-            float kf = nearbyintf(r);
-            int   k  = (int)kf; if (k < 1) k = 1;
-            float d  = fabsf(r - kf);
-            float w0 = 0.25f;
-            float prox = expf(- (d/w0)*(d/w0));
-            int parity = (k % 2 == 0) ? +1 : -1;
-            float bias = aniso * parity * prox;
-            float ampMul = 1.f + bias;
-            if (ampMul < 0.f) ampMul = 0.f;
-            w *= ampMul;
-        }
+    float w = 1.f;
+    if (i != 0 && aniso != 0.f){
+        float r  = ratio_rel;
+        float kf = nearbyintf(r);
+        int   k  = (int)kf; if (k < 1) k = 1;
+        float d  = fabsf(r - kf);
+        float w0 = 0.25f;
+        float prox = expf(- (d/w0)*(d/w0));
+        int parity = (k % 2 == 0) ? +1 : -1;
+        float bias = aniso * parity * prox;
+        float ampMul = 1.f + bias;
+        if (ampMul < 0.f) ampMul = 0.f;
+        w *= ampMul;
+    }
 
-        float wp = jb_position_weight(ratio_rel, pos);
+    float wp = jb_position_weight(ratio_rel, pos);
 
-        g *= cr_gain_mul[i];
+    g *= cr_gain_mul[i];
 
-        float gn = g * w * wp;
-        float gn_ref = g_ref * w * wp;
-        if (m[i].nyq_kill) { gn = 0.f; gn_ref = 0.f; gn_ref = 0.f; }
+    float gn     = g     * w * wp;
+    float gn_ref = g_ref * w * wp;
 
-        if (active_modes <= 0){
-            gn = 0.f; gn_ref = 0.f;
-        } else if (active_modes < n_modes){
-            int K = active_modes;
-            if (i >= K){
-                float fade_width = 3.f;
-                float u = ((float)i - (float)K) / fade_width;
-                if (u >= 1.f){
-                    gn = 0.f; gn_ref = 0.f;
-                } else if (u > 0.f){
-                    float w_fade = 0.5f * (1.f + cosf((float)M_PI * u));
-                    gn *= w_fade;
-                    gn_ref *= w_fade;
-                }
+    if (m[i].nyq_kill){
+        gn = 0.f;
+        gn_ref = 0.f;
+    }
+
+    if (active_modes <= 0){
+        gn = 0.f;
+        gn_ref = 0.f;
+    } else if (active_modes < n_modes){
+        int K = active_modes;
+        if (i >= K){
+            float fade_width = 3.f;
+            float u = ((float)i - (float)K) / fade_width;
+            if (u >= 1.f){
+                gn = 0.f;
+                gn_ref = 0.f;
+            } else if (u > 0.f){
+                float w_fade = 0.5f * (1.f + cosf((float)M_PI * u));
+                gn *= w_fade;
+                gn_ref *= w_fade;
             }
         }
-        // Apply precomputed sine pattern weight (Tela-style, cut-only)
-        gn *= sine_weight[i];
-        gn_ref *= sine_weight[i];
-        // Map pitch to number of sine cycles across the bank (continuous).
-        // Max cycles = N/2 gives alternating peaks/valleys roughly every other mode.
-        float cycles = pitch * (0.5f * (float)N);
-
-        float theta = 2.f * (float)M_PI * (cycles * t + phase);
-        float pat = 0.5f * (1.f + sinf(theta)); // [0,1]
-
-        float amt  = fabsf(depth);              // 0..1
-        float mask = (depth >= 0.f) ? pat : (1.f - pat);
-
-        // Width narrows peaks/valleys (no effect at width=0).
-        if (width > 1e-6f){
-            float sharp = 1.f + 6.f * width;    // tweak range if needed
-            mask = powf(mask, sharp);
-        }
-
-// Depth controls *contrast* (carving) rather than "making it louder".
-// At depth→1 this becomes near-binary: only peak regions survive.
-// This is cut-only (never boosts above 1).
-float k_max = 64.f;                 // higher = more square/gated at full depth
-float a4 = amt * amt; a4 *= a4;     // amt^4 keeps mid-depth gentler
-float contrast = 1.f + (k_max - 1.f) * a4;
-mask = powf(mask, contrast);
-
-        // Blend: depth=0 => weight 1, depth=1 => full mask
-        float weight = (1.f - amt) + amt * mask;
-        if (weight < 0.f) weight = 0.f;
-        if (weight > 1.f) weight = 1.f;
-
-        gn *= weight;
-        gn_ref *= weight;
     }
+
+    // Apply precomputed sine pattern weight (Tela-style, cut-only, no dead spots)
+    gn     *= sine_weight[i];
+    gn_ref *= sine_weight[i];
+
+    if (gn < 0.f) gn = 0.f;
+    if (gn_ref < 0.f) gn_ref = 0.f;
+
+    m[i].gain_now = gn;
+    sum_gain += gn;
+    sum_ref  += gn_ref;
 }
-        gn = (gn < 0.f) ? 0.f : gn;
-        gn_ref = (gn_ref < 0.f) ? 0.f : gn_ref;
-        m[i].gain_now = gn;
-        sum_gain += gn;
-        sum_ref  += gn_ref;
-    }
+
 
     // Apply normalization so brightness redistributes energy without changing overall level.
     float norm = (sum_gain > 1e-12f) ? (sum_ref / sum_gain) : 1.f;
