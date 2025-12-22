@@ -1824,176 +1824,114 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
     float sum_gain = 0.f;
     float sum_ref  = 0.f;
 
-
-// --- SINE pattern weights (Tela-style, relative-selection invariant) ---
-// We precompute per-mode weights so the sine mask NEVER produces "dead spots".
-// Invariant: if the sine pattern is active, at least one mode per voice hits full weight (1.0),
-// and others are suppressed relative to that, never boosted above 1.
-float sine_weight[JB_MAX_MODES];
-for (int i = 0; i < n_modes; ++i) sine_weight[i] = 1.f;
-
-float sine_depth = jb_clamp(jb_bank_sine_depth(x, bank), -1.f, 1.f); // bipolar: +peaks, -valleys
-float sine_pitch = jb_clamp(jb_bank_sine_pitch(x, bank), 0.f, 1.f);  // cycles across bank (0..1 mapped below)
-
-if (sine_depth != 0.f && sine_pitch > 1e-6f && active_modes > 0){
-    float amt   = fabsf(sine_depth);                 // 0..1
-    float phase = jb_bank_sine_phase(x, bank);        // 0..1 cycles
-    float width = jb_clamp(jb_bank_sine_width(x, bank), 0.f, 1.f);
-    float skew  = jb_clamp(jb_bank_sine_skew(x, bank), -1.f, 1.f);
-
-    int N = (active_count > 0) ? active_count : n_modes;
-    if (N < 1) N = 1;
-
-    // Map pitch to number of sine cycles across the bank (continuous).
-    // Max cycles = N/2 gives alternating peaks/valleys roughly every other mode.
-    float cycles = sine_pitch * (0.5f * (float)N);
-
-    // Depth contrast: higher = more square/gated at full depth (cut-only).
-    const float k_max = 64.f;
-    float a4 = amt * amt; a4 *= a4;                  // amt^4 keeps mid-depth gentler
-    float contrast = 1.f + (k_max - 1.f) * a4;
-
-    float mask_raw[JB_MAX_MODES];
-    for (int i = 0; i < n_modes; ++i) mask_raw[i] = 0.f;
-
-    float max_mask = 0.f;
-
-    // We compute masks only for modes that can actually contribute (active + within active_modes fade region).
-    // This prevents "invisible" (fully-faded) modes from stealing the max and shrinking everyone else.
-    int K = active_modes;
-    int audible_max_i = (K < n_modes) ? (K + 3) : (n_modes - 1); // fade_width is 3.f in the main loop
-
-    for (int i = 0; i < n_modes; ++i){
-        if (!base[i].active) continue;
-        if (m[i].nyq_kill)  continue;
-        if (i > audible_max_i) continue;
-
-        // normalized ordered index (0..1) across active modes
-        float t = order_t[i];
-        if (t < 0.f) t = 0.f;
-        if (t > 1.f) t = 1.f;
-
-        // Skew: warp index space BEFORE evaluating the sine (biases peak/valley agglomeration)
-        if (skew != 0.f){
-            // gamma in ~[0.25..4] for skew in [-1..+1]
-            float gamma = powf(2.f, 2.f * skew);
-            if (gamma < 1e-6f) gamma = 1e-6f;
-            t = powf(t, gamma);
-            if (t < 0.f) t = 0.f;
-            if (t > 1.f) t = 1.f;
+    for(int i = 0; i < n_modes; ++i){
+        if(!base[i].active){
+            m[i].gain_now = 0.f;
+            continue;
         }
 
-        float theta = 2.f * (float)M_PI * (cycles * t + phase);
-        float pat   = 0.5f * (1.f + sinf(theta));   // [0,1]
+        float ratio = m[i].ratio_now + disp_offset[i];
+        float ratio_rel = base[i].keytrack ? ratio : ((v->f0>0.f)? (ratio / v->f0) : ratio);
 
-        float mask = (sine_depth >= 0.f) ? pat : (1.f - pat); // bipolar
+        float g = base[i].base_gain * jb_bright_gain(ratio_rel, brightness_v);
 
-        // Width narrows peaks/valleys (no effect at width=0).
-        if (width > 1e-6f){
-            float sharp = 1.f + 6.f * width;
-            mask = powf(mask, sharp);
+        float g_ref = base[i].base_gain * jb_bright_gain(ratio_rel, 0.f);
+        float w = 1.f;
+        if (i != 0 && aniso != 0.f){
+            float r = ratio_rel;
+            float kf = nearbyintf(r);
+            int   k  = (int)kf; if (k < 1) k = 1;
+            float d  = fabsf(r - kf);
+            float w0 = 0.25f;
+            float prox = expf(- (d/w0)*(d/w0));
+            int parity = (k % 2 == 0) ? +1 : -1;
+            float bias = aniso * parity * prox;
+            float ampMul = 1.f + bias;
+            if (ampMul < 0.f) ampMul = 0.f;
+            w *= ampMul;
         }
 
-        // Contrast carving: pushes non-peak regions toward 0 at high depth.
-        mask = powf(mask, contrast);
+        float wp = jb_position_weight(ratio_rel, pos);
 
-        if (mask < 0.f) mask = 0.f;
-        if (mask > 1.f) mask = 1.f;
+        g *= cr_gain_mul[i];
 
-        mask_raw[i] = mask;
-        if (mask > max_mask) max_mask = mask;
-    }
+        float gn = g * w * wp;
+        float gn_ref = g_ref * w * wp;
+        if (m[i].nyq_kill) { gn = 0.f; gn_ref = 0.f; gn_ref = 0.f; }
 
-    // Relative-selection invariant:
-    // Normalize by the maximum mask among audible modes so at least one mode hits 1.0 (no dead spots).
-    if (max_mask > 1e-12f){
-        float inv_max = 1.f / max_mask;
-        for (int i = 0; i < n_modes; ++i){
-            float nm = mask_raw[i] * inv_max;
-            if (nm > 1.f) nm = 1.f;
-            // Blend: depth=0 => weight 1, depth=1 => full (normalized) mask
-            float wgt = (1.f - amt) + amt * nm;
-            if (wgt < 0.f) wgt = 0.f;
-            if (wgt > 1.f) wgt = 1.f;
-            sine_weight[i] = wgt;
-        }
-    } else {
-        // Degenerate case: mask collapsed everywhere (e.g., extreme contrast + denormals).
-        // Preserve signal instead of muting the whole bank.
-        for (int i = 0; i < n_modes; ++i) sine_weight[i] = 1.f;
-    }
-}
-
-for (int i = 0; i < n_modes; ++i){
-    if(!base[i].active){
-        m[i].gain_now = 0.f;
-        continue;
-    }
-
-    float ratio = m[i].ratio_now + disp_offset[i];
-    float ratio_rel = base[i].keytrack ? ratio : ((v->f0 > 0.f) ? (ratio / v->f0) : ratio);
-
-    float g     = base[i].base_gain * jb_bright_gain(ratio_rel, brightness_v);
-    float g_ref = base[i].base_gain * jb_bright_gain(ratio_rel, 0.f);
-
-    float w = 1.f;
-    if (i != 0 && aniso != 0.f){
-        float r  = ratio_rel;
-        float kf = nearbyintf(r);
-        int   k  = (int)kf; if (k < 1) k = 1;
-        float d  = fabsf(r - kf);
-        float w0 = 0.25f;
-        float prox = expf(- (d/w0)*(d/w0));
-        int parity = (k % 2 == 0) ? +1 : -1;
-        float bias = aniso * parity * prox;
-        float ampMul = 1.f + bias;
-        if (ampMul < 0.f) ampMul = 0.f;
-        w *= ampMul;
-    }
-
-    float wp = jb_position_weight(ratio_rel, pos);
-
-    g *= cr_gain_mul[i];
-
-    float gn     = g     * w * wp;
-    float gn_ref = g_ref * w * wp;
-
-    if (m[i].nyq_kill){
-        gn = 0.f;
-        gn_ref = 0.f;
-    }
-
-    if (active_modes <= 0){
-        gn = 0.f;
-        gn_ref = 0.f;
-    } else if (active_modes < n_modes){
-        int K = active_modes;
-        if (i >= K){
-            float fade_width = 3.f;
-            float u = ((float)i - (float)K) / fade_width;
-            if (u >= 1.f){
-                gn = 0.f;
-                gn_ref = 0.f;
-            } else if (u > 0.f){
-                float w_fade = 0.5f * (1.f + cosf((float)M_PI * u));
-                gn *= w_fade;
-                gn_ref *= w_fade;
+        if (active_modes <= 0){
+            gn = 0.f; gn_ref = 0.f;
+        } else if (active_modes < n_modes){
+            int K = active_modes;
+            if (i >= K){
+                float fade_width = 3.f;
+                float u = ((float)i - (float)K) / fade_width;
+                if (u >= 1.f){
+                    gn = 0.f; gn_ref = 0.f;
+                } else if (u > 0.f){
+                    float w_fade = 0.5f * (1.f + cosf((float)M_PI * u));
+                    gn *= w_fade;
+                    gn_ref *= w_fade;
+                }
             }
         }
+
+        // --- SINE AM mask (bank-specific) ---
+        {
+            float depth = jb_clamp(jb_bank_sine_depth(x, bank), -1.f, 1.f);
+            if (depth != 0.f){
+                int   N      = (active_count > 0) ? active_count : n_modes;
+                if (N < 1) N = 1;
+                float pitch  = jb_clamp(jb_bank_sine_pitch(x, bank), 0.f, 1.f);
+                float phase  = jb_bank_sine_phase(x, bank);
+                float width  = jb_clamp(jb_bank_sine_width(x, bank), 0.f, 1.f);
+                float skew   = jb_clamp(jb_bank_sine_skew(x, bank), -1.f, 1.f);
+
+                float t = order_t[i];
+                if (t < 0.f) t = 0.f;
+                if (t > 1.f) t = 1.f;
+
+                float cycles_min = 0.25f;
+                float cycles_max = floorf((float)N * 0.5f);
+                if (cycles_max < cycles_min) cycles_max = cycles_min;
+                float cycles = cycles_min + pitch * (cycles_max - cycles_min);
+
+                float theta = 2.f * (float)M_PI * (cycles * t + phase);
+
+                float s1 = sinf(theta);
+                float s2 = sinf(2.f * theta);
+                float s  = s1 + skew * s2;
+                float norm = 1.f + fabsf(skew);
+                if (norm > 0.f) s /= norm;
+
+                float pattern = 0.5f * (1.f + s);
+                if (pattern < 0.f) pattern = 0.f;
+                if (pattern > 1.f) pattern = 1.f;
+
+                if (width > 0.f && pattern > 0.f && pattern < 1.f){
+                    float gamma = 0.5f + 3.0f * width;
+                    pattern = powf(pattern, gamma);
+                }
+
+                float a_pos = (depth > 0.f) ? depth : 0.f;
+                float a_neg = (depth < 0.f) ? -depth : 0.f;
+
+                float weight = 1.f
+                               - a_pos * pattern
+                               - a_neg * (1.f - pattern);
+
+                if (weight < 0.f) weight = 0.f;
+                gn *= weight;
+                gn_ref *= weight;
+            }
+        }
+
+        gn = (gn < 0.f) ? 0.f : gn;
+        gn_ref = (gn_ref < 0.f) ? 0.f : gn_ref;
+        m[i].gain_now = gn;
+        sum_gain += gn;
+        sum_ref  += gn_ref;
     }
-
-    // Apply precomputed sine pattern weight (Tela-style, cut-only, no dead spots)
-    gn     *= sine_weight[i];
-    gn_ref *= sine_weight[i];
-
-    if (gn < 0.f) gn = 0.f;
-    if (gn_ref < 0.f) gn_ref = 0.f;
-
-    m[i].gain_now = gn;
-    sum_gain += gn;
-    sum_ref  += gn_ref;
-}
-
 
     // Apply normalization so brightness redistributes energy without changing overall level.
     float norm = (sum_gain > 1e-12f) ? (sum_ref / sum_gain) : 1.f;
