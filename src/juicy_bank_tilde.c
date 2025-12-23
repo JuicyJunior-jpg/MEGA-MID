@@ -525,16 +525,14 @@ float damping, brightness, position; float damp_broad, damp_point;
     // Individual
     t_inlet *in_index, *in_ratio, *in_gain, *in_attack, *in_decay, *in_pan, *in_keytrack;
 
-    // --- SINE (AM across modes) ---
-    float sine_pitch;   // 0..1
+    // --- SINE pattern (index-based AM mask across modes) ---
+    float sine_pitch;   // 1..32 (integer pattern count)
     float sine_depth;   // -1..1 (bipolar amount)
-    float sine_width;   // 0..1 (pattern peak width / sharpness)
-    float sine_skew;    // -1..1 (pattern asymmetry via 2nd harmonic)
+    float sine_width;   // 0..1 (BALANCE / duty bias)
     float sine_phase;   // 0..1 (wraps)
     float sine_pitch2;  // bank2
     float sine_depth2;
     float sine_width2;
-    float sine_skew2;
     float sine_phase2;
 
     // --- LFO globals (for modulation matrix UI) ---
@@ -585,7 +583,6 @@ float damping, brightness, position; float damp_broad, damp_point;
     t_inlet *in_sine_pitch;
     t_inlet *in_sine_depth;
     t_inlet *in_sine_width;
-    t_inlet *in_sine_skew;
     t_inlet *in_sine_phase;
 
     // --- LFO + ADSR inlets (for modulation matrix) ---
@@ -1023,9 +1020,6 @@ static inline float jb_bank_sine_depth(const t_juicy_bank_tilde *x, int bank){
 }
 static inline float jb_bank_sine_width(const t_juicy_bank_tilde *x, int bank){
     return bank ? x->sine_width2 : x->sine_width;
-}
-static inline float jb_bank_sine_skew(const t_juicy_bank_tilde *x, int bank){
-    return bank ? x->sine_skew2 : x->sine_skew;
 }
 static inline float jb_bank_sine_phase(const t_juicy_bank_tilde *x, int bank){
     return bank ? x->sine_phase2 : x->sine_phase;
@@ -1770,10 +1764,12 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
     float ratio_rel_sorted[JB_MAX_MODES];
     int   idx_sorted[JB_MAX_MODES];
     float order_t[JB_MAX_MODES];
+    int   rank_of_id[JB_MAX_MODES];
     int   active_count = 0;
 
     for (int i = 0; i < n_modes; ++i){
         order_t[i] = 0.f;
+        rank_of_id[i] = -1;
         if (!base[i].active) continue;
 
         float ratio = m[i].ratio_now + disp_offset[i];
@@ -1810,9 +1806,11 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
         for (int rank = 0; rank < active_count; ++rank){
             int i = idx_sorted[rank];
             order_t[i] = (float)rank / denom;
+            rank_of_id[i] = rank;
         }
     } else if (active_count == 1){
         order_t[idx_sorted[0]] = 0.f;
+        rank_of_id[idx_sorted[0]] = 0;
     }
 
     float brightness_v = bank ? v->brightness_v2 : v->brightness_v;
@@ -1869,56 +1867,67 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
                 if (u >= 1.f){
                     gn = 0.f; gn_ref = 0.f;
                 } else if (u > 0.f){
-                    float w_fade = 0.5f * (1.f + cosf((float)M_PI * u));
-                    gn *= w_fade;
-                    gn_ref *= w_fade;
-                }
-            }
+                    float w_fade = 0.5f * (1.f + cosf((floa// --- SINE pattern mask (bank-specific, index-based) ---
+{
+    float amount = jb_clamp(jb_bank_sine_depth(x, bank), -1.f, 1.f); // bipolar: +mutes assigned, -mutes unassigned
+    if (amount != 0.f){
+        int N = (active_count > 0) ? active_count : n_modes;
+        if (N < 1) N = 1;
+
+        // Pattern count P (integer): 1..32
+        int P = (int)floorf(jb_clamp(jb_bank_sine_pitch(x, bank), 1.f, 32.f));
+        if (P < 1)  P = 1;
+        if (P > 32) P = 32;
+
+        // Balance biases the duty within each period (0 => P:P, 1 => 1:P)
+        float balance = jb_clamp(jb_bank_sine_width(x, bank), 0.f, 1.f);
+
+        // Assigned count A (integer): balance=0 -> A=P, balance=1 -> A=1
+        float Af = (float)P - balance * (float)(P - 1);
+        int   A  = (int)floorf(Af + 0.5f);
+        if (A < 1) A = 1;
+        if (A > P) A = P;
+
+        int period = P + A;
+        if (period < 1) period = 1;
+
+        // Phase shifts the mask across ONE period and wraps back to original at phase=1
+        float phase = jb_bank_sine_phase(x, bank);
+        float shift_f = phase * (float)period;
+        int   shift_i = (int)floorf(shift_f);
+        float frac    = shift_f - (float)shift_i;
+        if (frac < 0.f) frac = 0.f;
+        if (frac > 1.f) frac = 1.f;
+
+        // Rank index across active modes (sorted low->high): this is the "index lane"
+        int r = rank_of_id[i];
+        if (r < 0) r = 0;
+
+        // Binary mask at two adjacent integer shifts, then interpolate -> 1-resonator smoothing at boundaries
+        int pos0 = (r + shift_i) % period;
+        if (pos0 < 0) pos0 += period;
+        int pos1 = (r + shift_i + 1) % period;
+        if (pos1 < 0) pos1 += period;
+
+        float m0 = (pos0 >= P) ? 1.f : 0.f; // period starts with OFF (0..P-1), then ON (P..period-1)
+        float m1 = (pos1 >= P) ? 1.f : 0.f;
+        float assigned = m0 + (m1 - m0) * frac; // 0..1
+
+        float weight;
+        if (amount >= 0.f){
+            // +amount mutes ASSIGNED modes
+            weight = 1.f - amount * assigned;
+        } else {
+            // -amount mutes UNASSIGNED modes
+            weight = 1.f - (-amount) * (1.f - assigned);
         }
+        if (weight < 0.f) weight = 0.f;
 
-        // --- SINE AM mask (bank-specific) ---
-        {
-            float depth = jb_clamp(jb_bank_sine_depth(x, bank), -1.f, 1.f);
-            if (depth != 0.f){
-                int   N      = (active_count > 0) ? active_count : n_modes;
-                if (N < 1) N = 1;
-                float pitch  = jb_clamp(jb_bank_sine_pitch(x, bank), 0.f, 1.f);
-                float phase  = jb_bank_sine_phase(x, bank);
-                float width  = jb_clamp(jb_bank_sine_width(x, bank), 0.f, 1.f);
-                float skew   = jb_clamp(jb_bank_sine_skew(x, bank), -1.f, 1.f);
-
-                float t = order_t[i];
-                if (t < 0.f) t = 0.f;
-                if (t > 1.f) t = 1.f;
-
-                float cycles_min = 0.25f;
-                float cycles_max = floorf((float)N * 0.5f);
-                if (cycles_max < cycles_min) cycles_max = cycles_min;
-                float cycles = cycles_min + pitch * (cycles_max - cycles_min);
-
-                float theta = 2.f * (float)M_PI * (cycles * t + phase);
-
-                float s1 = sinf(theta);
-                float s2 = sinf(2.f * theta);
-                float s  = s1 + skew * s2;
-                float norm = 1.f + fabsf(skew);
-                if (norm > 0.f) s /= norm;
-
-                float pattern = 0.5f * (1.f + s);
-                if (pattern < 0.f) pattern = 0.f;
-                if (pattern > 1.f) pattern = 1.f;
-
-                if (width > 0.f && pattern > 0.f && pattern < 1.f){
-                    float gamma = 0.5f + 3.0f * width;
-                    pattern = powf(pattern, gamma);
-                }
-
-                float a_pos = (depth > 0.f) ? depth : 0.f;
-                float a_neg = (depth < 0.f) ? -depth : 0.f;
-
-                float weight = 1.f
-                               - a_pos * pattern
-                               - a_neg * (1.f - pattern);
+        gn *= weight;
+        gn_ref *= weight;
+    }
+}
+ pattern);
 
                 if (weight < 0.f) weight = 0.f;
                 gn *= weight;
@@ -2581,7 +2590,13 @@ static void juicy_bank_tilde_micro_detune(t_juicy_bank_tilde *x, t_floatarg f){
 }
 // --- SINE param setters ---
 static void juicy_bank_tilde_sine_pitch(t_juicy_bank_tilde *x, t_floatarg f){
-    float v = jb_clamp(f, 0.f, 1.f);
+    // New meaning: integer pattern count 1..32 (fractional part ignored)
+    float ff = jb_clamp(f, 1.f, 32.f);
+    int   P  = (int)floorf(ff);      // no fractional behavior
+    if (P < 1)  P = 1;
+    if (P > 32) P = 32;
+    float v = (float)P;
+
     if (x->edit_bank) x->sine_pitch2 = v;
     else              x->sine_pitch  = v;
 }
@@ -2601,12 +2616,6 @@ static void juicy_bank_tilde_sine_width(t_juicy_bank_tilde *x, t_floatarg f){
     if (x->edit_bank) x->sine_width2 = v;
     else              x->sine_width  = v;
 }
-static void juicy_bank_tilde_sine_skew(t_juicy_bank_tilde *x, t_floatarg f){
-    float v = jb_clamp(f, -1.f, 1.f);
-    if (x->edit_bank) x->sine_skew2 = v;
-    else              x->sine_skew  = v;
-}
-
 // --- LFO + ADSR param setters (for modulation matrix) ---
 static void juicy_bank_tilde_lfo_shape(t_juicy_bank_tilde *x, t_floatarg f){
     int s = (int)floorf(f + 0.5f);
@@ -2827,9 +2836,10 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
     inlet_free(x->in_collision);
     inlet_free(x->in_aniso);
 
-            inlet_free(x->in_stretch);
-inlet_free(x->in_sine_pitch);
+                inlet_free(x->in_stretch);
+    inlet_free(x->in_sine_pitch);
     inlet_free(x->in_sine_depth);
+    inlet_free(x->in_sine_width);
     inlet_free(x->in_sine_phase);
 inlet_free(x->in_partials); // free 'partials' inlet
 inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
@@ -2922,7 +2932,7 @@ static void *juicy_bank_tilde_new(void){
 // realism defaults
     x->phase_rand=1.f; x->phase_debug=0;
     x->bandwidth=0.1f; x->micro_detune=0.1f;
-    x->sine_pitch=0.f; x->sine_depth=0.f; x->sine_width=0.f; x->sine_skew=0.f; x->sine_phase=0.f;
+        x->sine_pitch=1.f; x->sine_depth=0.f; x->sine_width=0.f; x->sine_phase=0.f;
 // bank 2 defaults: start as a functional copy of bank 1 (bank 2 is still silent by master=0)
 x->n_modes2 = x->n_modes;
 x->active_modes2 = x->active_modes;
@@ -2968,7 +2978,6 @@ x->crossring_amt2   = x->crossring_amt;
 x->sine_pitch2    = x->sine_pitch;
 x->sine_depth2    = x->sine_depth;
 x->sine_width2    = x->sine_width;
-x->sine_skew2     = x->sine_skew;
 x->sine_phase2    = x->sine_phase;
 
 
@@ -3067,7 +3076,6 @@ x->sine_phase2    = x->sine_phase;
     x->in_sine_pitch = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_pitch"));
     x->in_sine_depth = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_depth"));
     x->in_sine_width = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_width"));
-    x->in_sine_skew  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_skew"));
     x->in_sine_phase = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("sine_phase"));
 // Individual
 
@@ -3239,92 +3247,83 @@ static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
     x->_undo_valid = 1;
     x->_undo_bank  = bank;
 
-    // --- SINE bake into base_gain (mirror runtime SINE AM mask) ---
-    {
-        float depth = jb_clamp(jb_bank_sine_depth(x, bank), -1.f, 1.f);
-        if (depth != 0.f){
-            // build a 0..1 coordinate per active mode, ordered by base_ratio
-            float order_t[JB_MAX_MODES];
-            for (int i = 0; i < JB_MAX_MODES; ++i) order_t[i] = 0.f;
+    // --- SINE bake into base_gain (mirror runtime SINE pattern mask) ---
+{
+    float amount = jb_clamp(jb_bank_sine_depth(x, bank), -1.f, 1.f); // bipolar: +mutes assigned, -mutes unassigned
+    if (amount != 0.f){
+        int idxs[JB_MAX_MODES];
+        int active_count = 0;
+        for (int i = 0; i < n_modes; ++i){
+            if (base[i].active) idxs[active_count++] = i;
+        }
 
-            int idxs[JB_MAX_MODES];
-            int active_count = 0;
-            for (int i = 0; i < n_modes; ++i){
-                if (base[i].active) idxs[active_count++] = i;
+        // insertion sort by base_ratio (stable, small N)
+        for (int k = 1; k < active_count; ++k){
+            int id = idxs[k];
+            float r = base[id].base_ratio;
+            int j = k;
+            while (j > 0 && base[idxs[j-1]].base_ratio > r){
+                idxs[j] = idxs[j-1];
+                --j;
             }
+            idxs[j] = id;
+        }
 
-            // insertion sort by base_ratio (stable, small N)
-            for (int k = 1; k < active_count; ++k){
-                int id = idxs[k];
-                float r = base[id].base_ratio;
-                int j = k;
-                while (j > 0 && base[idxs[j-1]].base_ratio > r){
-                    idxs[j] = idxs[j-1];
-                    --j;
-                }
-                idxs[j] = id;
+        int N = (active_count > 0) ? active_count : n_modes;
+        if (N < 1) N = 1;
+
+        // Pattern count P (integer): 1..32
+        int P = (int)floorf(jb_clamp(jb_bank_sine_pitch(x, bank), 1.f, 32.f));
+        if (P < 1)  P = 1;
+        if (P > 32) P = 32;
+
+        // Balance biases the duty within each period (0 => P:P, 1 => 1:P)
+        float balance = jb_clamp(jb_bank_sine_width(x, bank), 0.f, 1.f);
+
+        // Assigned count A (integer): balance=0 -> A=P, balance=1 -> A=1
+        float Af = (float)P - balance * (float)(P - 1);
+        int   A  = (int)floorf(Af + 0.5f);
+        if (A < 1) A = 1;
+        if (A > P) A = P;
+
+        int period = P + A;
+        if (period < 1) period = 1;
+
+        // Phase shifts the mask across ONE period and wraps back to original at phase=1
+        float phase   = jb_bank_sine_phase(x, bank);
+        float shift_f = phase * (float)period;
+        int   shift_i = (int)floorf(shift_f);
+        float frac    = shift_f - (float)shift_i;
+        if (frac < 0.f) frac = 0.f;
+        if (frac > 1.f) frac = 1.f;
+
+        for (int r = 0; r < active_count; ++r){
+            int id = idxs[r];
+
+            int pos0 = (r + shift_i) % period;
+            if (pos0 < 0) pos0 += period;
+            int pos1 = (r + shift_i + 1) % period;
+            if (pos1 < 0) pos1 += period;
+
+            float m0 = (pos0 >= P) ? 1.f : 0.f;
+            float m1 = (pos1 >= P) ? 1.f : 0.f;
+            float assigned = m0 + (m1 - m0) * frac;
+
+            float weight;
+            if (amount >= 0.f){
+                weight = 1.f - amount * assigned;
+            } else {
+                weight = 1.f - (-amount) * (1.f - assigned);
             }
+            if (weight < 0.f) weight = 0.f;
 
-            if (active_count > 0){
-                for (int r = 0; r < active_count; ++r){
-                    int id = idxs[r];
-                    order_t[id] = (active_count > 1) ? ((float)r / (float)(active_count - 1)) : 0.f;
-                }
-            }
-
-            int   N      = (active_count > 0) ? active_count : n_modes;
-            if (N < 1) N = 1;
-
-            float pitch  = jb_clamp(jb_bank_sine_pitch(x, bank), 0.f, 1.f);
-            float phase  = jb_bank_sine_phase(x, bank);
-            float width  = jb_clamp(jb_bank_sine_width(x, bank), 0.f, 1.f);
-            float skew   = jb_clamp(jb_bank_sine_skew(x, bank), -1.f, 1.f);
-
-            float cycles_min = 0.25f;
-            float cycles_max = floorf((float)N * 0.5f);
-            if (cycles_max < cycles_min) cycles_max = cycles_min;
-            float cycles = cycles_min + pitch * (cycles_max - cycles_min);
-
-            for (int i = 0; i < n_modes; ++i){
-                if (!base[i].active) continue;
-
-                float t = order_t[i];
-                if (t < 0.f) t = 0.f;
-                if (t > 1.f) t = 1.f;
-
-                float theta = 2.f * (float)M_PI * (cycles * t + phase);
-
-                float s1 = sinf(theta);
-                float s2 = sinf(2.f * theta);
-                float s  = s1 + skew * s2;
-                float norm = 1.f + fabsf(skew);
-                if (norm > 0.f) s /= norm;
-
-                float pattern = 0.5f * (1.f + s);
-                if (pattern < 0.f) pattern = 0.f;
-                if (pattern > 1.f) pattern = 1.f;
-
-                if (width > 0.f && pattern > 0.f && pattern < 1.f){
-                    float gamma = 0.5f + 3.0f * width;
-                    pattern = powf(pattern, gamma);
-                }
-
-                float a_pos = (depth > 0.f) ? depth : 0.f;
-                float a_neg = (depth < 0.f) ? -depth : 0.f;
-
-                float weight = 1.f
-                               - a_pos * pattern
-                               - a_neg * (1.f - pattern);
-
-                if (weight < 0.f) weight = 0.f;
-
-                base[i].base_gain *= weight;
-                if (base[i].base_gain < 0.f) base[i].base_gain = 0.f;
-            }
+            base[id].base_gain *= weight;
+            if (base[id].base_gain < 0.f) base[id].base_gain = 0.f;
         }
     }
+}
 
-    // --- DAMPER bake into base_decay_ms (mirror runtime damping logic + new window) ---
+// --- DAMPER bake into base_decay_ms (mirror runtime damping logic + new window) ---
     {
         float damp = jb_clamp(jb_bank_damping(x, bank), -1.f, 1.f);
         if (damp != 0.f && n_modes > 0){
@@ -3548,7 +3547,6 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gens
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_sine_pitch, gensym("sine_pitch"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_sine_depth, gensym("sine_depth"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_sine_width, gensym("sine_width"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_sine_skew,  gensym("sine_skew"),  A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_sine_phase, gensym("sine_phase"), A_DEFFLOAT, 0);
 
     // LFO + ADSR methods
