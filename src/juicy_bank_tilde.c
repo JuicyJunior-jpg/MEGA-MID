@@ -468,7 +468,7 @@ typedef struct _juicy_bank_tilde {
     float warp; // -1..+1 bias for stretch distribution
     float warp2;
 float damping, brightness; float damp_broad, damp_point;
-    float damping2, brightness2, ; float damp_broad2, damp_point2;
+    float damping2, brightness2; float damp_broad2, damp_point2;
     float density_amt; jb_density_mode density_mode;
     float density_amt2; jb_density_mode density_mode2;
     float dispersion, dispersion_last;
@@ -1852,8 +1852,6 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
             if (ampMul < 0.f) ampMul = 0.f;
             w *= ampMul;
         }
-        float wp = 1.f;
-
         g *= cr_gain_mul[i];
 
         float gn = g * w;
@@ -2872,7 +2870,7 @@ static void jb_apply_default_saw_bank(t_juicy_bank_tilde *x, int bank){
         x->aniso = 0.f; x->aniso_eps = 0.02f;
         x->release_amt = 1.f;
     } else {
-        x->damping2 = 0.f; x->brightness2 = 0.f; x-> = 0.f; x->damp_broad2=0.f; x->damp_point2=0.f;
+        x->damping2 = 0.f; x->brightness2 = 0.f; x->damp_broad2=0.f; x->damp_point2=0.f;
         x->density_amt2 = 0.f; x->density_mode2 = DENSITY_PIVOT;
         x->dispersion2 = 0.f; x->dispersion_last2 = -1.f;
         x->aniso2 = 0.f; x->aniso_eps2 = 0.02f;
