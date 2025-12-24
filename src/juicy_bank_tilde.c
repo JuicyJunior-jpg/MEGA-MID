@@ -1315,16 +1315,35 @@ static void jb_project_behavior_into_voice_bank(t_juicy_bank_tilde *x, jb_voice_
     *decay_vel_mul_p = (1.f + (0.30f + 1.20f * linger_amt) * jb_clamp(v->vel,0.f,1.f));
 
     // Brightness: user-controlled
-    *brightness_v_p = jb_clamp(jb_bank_brightness(x, bank), -1.f, 1.f);
-
-    // Bloom → bandwidth
+    *brightness_v_p = {
+        const t_symbol *lfo1_tgt = x->lfo_target[0];
+        const float lfo1 = x->lfo_val[0] * x->lfo_amt_v[0];
+        float b = jb_clamp(jb_bank_brightness(x, bank), -1.f, 1.f);
+        if (lfo1 != 0.f){
+            if ((bank == 0 && lfo1_tgt == gensym("brightness_1")) || (bank != 0 && lfo1_tgt == gensym("brightness_2"))){
+                b = jb_clamp(b + lfo1, -1.f, 1.f);
+            }
+        }
+        *brightness_v_p = b;
+    }
+// Bloom → bandwidth
     float baseBW = jb_bank_bandwidth_base(x, bank);
     float addBW  = (0.15f + 0.45f * bloom_amt) * jb_clamp(v->vel,0.f,1.f);
     *bandwidth_v_p = jb_clamp(baseBW + addBW, 0.f, 1.f);
 
     // per-mode dispersion targets (ignore fundamental)
-    float total_disp = jb_clamp(jb_bank_dispersion(x, bank) + *stiffen_add_p, 0.f, 1.f);
-    float *disp_last_p = jb_bank_dispersion_last(x, bank);
+    float disp_base = jb_clamp(jb_bank_dispersion(x, bank), 0.f, 1.f);
+    {
+        const t_symbol *lfo1_tgt = x->lfo_target[0];
+        const float lfo1 = x->lfo_val[0] * x->lfo_amt_v[0];
+        if (lfo1 != 0.f){
+            if ((bank == 0 && lfo1_tgt == gensym("dispersion_1")) || (bank != 0 && lfo1_tgt == gensym("dispersion_2"))){
+                disp_base = jb_clamp(disp_base + lfo1, 0.f, 1.f);
+            }
+        }
+    }
+    float total_disp = jb_clamp(disp_base + *stiffen_add_p, 0.f, 1.f);
+float *disp_last_p = jb_bank_dispersion_last(x, bank);
     if (*disp_last_p < 0.f){ *disp_last_p = -1.f; }
 
     for(int i=0;i<n_modes;i++){
@@ -1608,8 +1627,19 @@ static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, in
     for(int i=0;i<n_modes;i++){ disp_offset[i] = disp_target[i]; }
 
     // ratio transforms
-    jb_apply_density_generic(n_modes, base, jb_bank_density_amt(x, bank), m);
-    jb_lock_fundamental_generic(n_modes, base, m);
+    {
+        float density_amt_eff = jb_bank_density_amt(x, bank);
+        const t_symbol *lfo1_tgt = x->lfo_target[0];
+        const float lfo1 = x->lfo_val[0] * x->lfo_amt_v[0];
+        if (lfo1 != 0.f){
+            if ((bank == 0 && lfo1_tgt == gensym("density_1")) || (bank != 0 && lfo1_tgt == gensym("density_2"))){
+                density_amt_eff += lfo1;
+                if (density_amt_eff < -1.f) density_amt_eff = -1.f; // keep existing lower clamp behavior
+            }
+        }
+        jb_apply_density_generic(n_modes, base, density_amt_eff, m);
+    }
+jb_lock_fundamental_generic(n_modes, base, m);
     jb_apply_stretch_generic(n_modes, base, jb_bank_stretch_amt(x, bank), jb_bank_warp_amt(x, bank), m);
     jb_apply_offset_generic(n_modes, base, jb_bank_offset_amt(x, bank), m);
     jb_apply_collision_generic(n_modes, base, jb_bank_collision_amt(x, bank), m);
@@ -1649,8 +1679,18 @@ static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, in
     }
 
     // --- damping + broadness mod (targets 0 and 1) ---
-    float damping_base = jb_bank_damping(x, bank);
-    float broad_base   = jb_clamp(jb_bank_damp_broad(x, bank), 0.f, 1.f);
+    float damping_base = jb_clamp(jb_bank_damping(x, bank), -1.f, 1.f);
+    // NEW MOD LANES (scaffold): LFO1 target modulation (partial implementation)
+    {
+        const t_symbol *lfo1_tgt = x->lfo_target[0];
+        const float lfo1 = x->lfo_val[0] * x->lfo_amt_v[0];
+        if (lfo1 != 0.f){
+            if ((bank == 0 && lfo1_tgt == gensym("damper_1")) || (bank != 0 && lfo1_tgt == gensym("damper_2"))){
+                damping_base = jb_clamp(damping_base + lfo1, -1.f, 1.f);
+            }
+        }
+    }
+float broad_base   = jb_clamp(jb_bank_damp_broad(x, bank), 0.f, 1.f);
 
     float damping_mod = 0.f;
     float broad_mod   = 0.f;
@@ -1835,6 +1875,16 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
     float *disp_offset = bank ? v->disp_offset2 : v->disp_offset;
     float *cr_gain_mul = bank ? v->cr_gain_mul2 : v->cr_gain_mul;
 
+    // NEW MOD LANES (partial): LFO1 direct-to-target modulation values
+    const t_symbol *lfo1_tgt = x->lfo_target[0];
+    const float lfo1 = x->lfo_val[0] * x->lfo_amt_v[0];
+
+    // LFO1 -> partials_* : smooth float gating across active modes (0..active_count_idx)
+    int   lfo1_partials_k = -1;
+    float lfo1_partials_frac = 0.f;
+    int   lfo1_partials_enabled = 0;
+
+
     float ratio_rel_sorted[JB_MAX_MODES];
     int   idx_sorted[JB_MAX_MODES];
     float order_t[JB_MAX_MODES];
@@ -1897,6 +1947,19 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
     float sum_gain = 0.f;
     float sum_ref  = 0.f;
 
+    // LFO1 -> partials_* : smooth float gating across active modes
+    if (lfo1 != 0.f){
+        if ((bank == 0 && lfo1_tgt == gensym("partials_1")) || (bank != 0 && lfo1_tgt == gensym("partials_2"))){
+            float pf = (float)active_modes + lfo1 * (float)((active_count_idx > 1) ? (active_count_idx - 1) : 1);
+            if (pf < 0.f) pf = 0.f;
+            if (pf > (float)active_count_idx) pf = (float)active_count_idx;
+            lfo1_partials_k = (int)floorf(pf);
+            lfo1_partials_frac = pf - (float)lfo1_partials_k;
+            lfo1_partials_enabled = 1;
+        }
+    }
+
+
     for(int i = 0; i < n_modes; ++i){
         if(!base[i].active){
             m[i].gain_now = 0.f;
@@ -1946,7 +2009,27 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
             }
         }
 
-        // --- SINE pattern mask (bank-specific, index-based over ACTIVE modes) ---
+        // LFO1 partials gating (smooth float: 0..32)
+
+        if (lfo1_partials_enabled){
+
+            const int r = rank_of_id[i];
+
+            float w_p = 0.f;
+
+            if (r < lfo1_partials_k) w_p = 1.f;
+
+            else if (r == lfo1_partials_k) w_p = lfo1_partials_frac;
+
+            else w_p = 0.f;
+
+            gn *= w_p;
+
+            gn_ref *= w_p;
+
+        }
+
+        // --- SINE pattern mask (bank-specific, index-based & continuous phase)
         {
             float amount = jb_clamp(jb_bank_sine_depth(x, bank), -1.f, 1.f);
             if (amount != 0.f){
@@ -1971,7 +2054,12 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
                 if (period < 1) period = 1;
 
                 float phase = jb_bank_sine_phase(x, bank);
-                // shift across ONE period (phase=1 returns to original alignment)
+            if (lfo1 != 0.f){
+                if ((bank == 0 && lfo1_tgt == gensym("sine_phase_1")) || (bank != 0 && lfo1_tgt == gensym("sine_phase_2"))){
+                    phase = jb_clamp(phase + lfo1, 0.f, 1.f);
+                }
+            }
+// shift across ONE period (phase=1 returns to original alignment)
                 float shift = phase * (float)period;
                 int   s_int = (int)floorf(shift);
                 float s_frac = shift - (float)s_int;
@@ -2203,8 +2291,16 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     jb_mod_adsr_update_block(x);
 
 
+    // NEW MOD LANES (partial): LFO1 direct modulation values (used below)
+    const t_symbol *lfo1_tgt = x->lfo_target[0];
+    const float lfo1_out = x->lfo_val[0] * x->lfo_amt_v[0];
+
+
     const int topo = (int)jb_clamp(x->topology, 0.f, 3.f);
-    const float coup = jb_clamp(x->coupling, 0.f, 1.f);
+    float coup = jb_clamp(x->coupling, 0.f, 1.f);
+    if (lfo1_out != 0.f && lfo1_tgt == gensym("coupling_amt")){
+        coup = jb_clamp(coup + lfo1_out, 0.f, 1.f);
+    }
     const int need_send2 = (topo==1 || topo==3); // Bank2 -> Bank1 send needed
     const int need_send1 = (topo==2 || topo==3); // Bank1 -> Bank2 send needed
     // Internal exciter mix weights (computed once per block)
@@ -2267,6 +2363,15 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         float bank_gain2;
         if (master_mod2 >= 0.f) bank_gain2 = master_base2 + master_mod2 * (1.f - master_base2);
         else                    bank_gain2 = master_base2 + master_mod2 * master_base2;
+
+        // LFO1 -> master_* (bank output volume): additive + clamp (0..1)
+        if (lfo1_out != 0.f){
+            if (lfo1_tgt == gensym("master_1")){
+                bank_gain1 = jb_clamp(bank_gain1 + lfo1_out, 0.f, 1.f);
+            }else if (lfo1_tgt == gensym("master_2")){
+                bank_gain2 = jb_clamp(bank_gain2 + lfo1_out, 0.f, 1.f);
+            }
+        }
 
         // --- pan modulation (target index 13 = "pan") ---
         float pan_mod1 = 0.f;
