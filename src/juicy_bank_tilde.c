@@ -375,6 +375,10 @@ typedef struct {
     // Internal exciter runtime state (per voice, stereo)
     jb_exc_voice_t exc;
     float exc_env_last; // STEP 2: per-voice env (0..1) for mod matrix
+    // Dedicated modulation ADSR (independent from exciter ADSR)
+    float mod_env;      // 0..1
+    float mod_env_last; // cached for modulation source
+    int   mod_env_stage; // 0=off,1=attack,2=decay,3=sustain,4=release
 
 
     // projected behavior (per voice) — BANK 1
@@ -562,6 +566,22 @@ float damping, brightness; float damp_broad, damp_point;
     float mod_matrix[JB_N_MODSRC][JB_N_MODTGT];
     float mod_matrix2[JB_N_MODSRC][JB_N_MODTGT];
 
+    // --- NEW MOD LANES (matrix replacement scaffolding; target wiring comes next) ---
+    // Targets are stored as symbols; the special symbol "none" disables that lane.
+    // Uniqueness rule: if a target is already owned by another lane, new assignment is ignored.
+    t_symbol *lfo_target[JB_N_LFO];   // LFO1/LFO2 targets
+    float     lfo_amt_v[JB_N_LFO];    // LFO1/LFO2 amounts (-1..+1)
+    float     lfo_amount;             // UI mirror for currently selected LFO amount (via lfo_index)
+
+    // Dedicated modulation ADSR (independent of exciter ADSR)
+    float mod_attack_ms, mod_decay_ms, mod_sustain, mod_release_ms;
+    float mod_a_inc, mod_d_dec, mod_r_dec; // per-sample increments (computed per DSP block)
+    float adsr_amount; t_symbol *adsr_target;
+
+    // MIDI lane
+    float midi_amount; t_symbol *midi_target;
+
+
     // --- INTERNAL EXCITER params (shared, Fusion STEP 1) ---
     float exc_fader;
     float exc_attack_ms, exc_attack_curve;
@@ -590,12 +610,26 @@ float damping, brightness; float damp_broad, damp_point;
     t_inlet *in_sine_width; // now BALANCE
     t_inlet *in_sine_phase;
 
-    // --- LFO + ADSR inlets (for modulation matrix) ---
+    // --- MOD SECTION inlets (targets/amounts; actual wiring added next step) ---
+    t_inlet *in_lfo_index;
     t_inlet *in_lfo_shape;
     t_inlet *in_lfo_rate;
     t_inlet *in_lfo_phase;
-    t_inlet *in_lfo_index;
-    t_inlet *in_matrix;   // inlet for modulation-matrix messages (anything)
+    t_inlet *in_lfo_amount;
+    t_inlet *in_lfo1_target;
+    t_inlet *in_lfo2_target;
+
+    t_inlet *in_mod_attack;
+    t_inlet *in_mod_decay;
+    t_inlet *in_mod_sustain;
+    t_inlet *in_mod_release;
+
+    t_inlet *in_adsr_amount;
+    t_inlet *in_adsr_target;
+
+    t_inlet *in_midi_amount;
+    t_inlet *in_midi_target;
+
 // --- SNAPSHOT (bake) undo buffer ---
 int _undo_valid;
 int _undo_bank; // 0=bank1, 1=bank2
@@ -695,8 +729,8 @@ static float jb_mod_source_value(const t_juicy_bank_tilde *x,
             return norm;
         }
 
-    case 2: // ADSR envelope (0..1) — internal exciter per-voice
-        return jb_clamp(v->exc_env_last, 0.f, 1.f);
+    case 2: // ADSR envelope (0..1) — dedicated modulation ADSR
+        return jb_clamp(v->mod_env_last, 0.f, 1.f);
 
     case 3: // LFO1
         return jb_clamp(x->lfo_val[0], -1.f, 1.f);
@@ -764,6 +798,43 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
         jb_exc_adsr_set_times(&e->env, sr, a_ms, d_ms, sus, r_ms);
     }
 }
+
+// ---------- MOD ADSR (dedicated modulation envelope) ----------
+
+// Update per-sample increments for the dedicated modulation ADSR.
+// Called once per DSP block.
+static void jb_mod_adsr_update_block(t_juicy_bank_tilde *x){
+    float sr = (x->sr > 0.f) ? x->sr : 48000.f;
+
+    // clamp parameters to sane ranges
+    float a_ms = jb_clamp(x->mod_attack_ms,  0.f, 20000.f);
+    float d_ms = jb_clamp(x->mod_decay_ms,   0.f, 20000.f);
+    float r_ms = jb_clamp(x->mod_release_ms, 0.f, 20000.f);
+    float sus  = jb_clamp(x->mod_sustain,    0.f, 1.f);
+    x->mod_sustain = sus;
+
+    float a_samps = a_ms * 0.001f * sr;
+    float d_samps = d_ms * 0.001f * sr;
+    float r_samps = r_ms * 0.001f * sr;
+
+    x->mod_a_inc = (a_samps <= 1.f) ? 1.f : (1.f / a_samps);
+    x->mod_d_dec = (d_samps <= 1.f) ? 1.f : ((1.f - sus) / d_samps);
+    x->mod_r_dec = (r_samps <= 1.f) ? 1.f : (1.f / r_samps);
+}
+
+static inline void jb_modenv_note_on(jb_voice_t *v){
+    v->mod_env = 0.f;
+    v->mod_env_last = 0.f;
+    v->mod_env_stage = 1; // attack
+}
+
+static inline void jb_modenv_note_off(jb_voice_t *v){
+    if (v->mod_env_stage != 0){
+        v->mod_env_stage = 4; // release
+    }
+}
+
+
 
 // Render one exciter sample for one voice (stereo).
 static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
@@ -1966,6 +2037,9 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
     // Internal exciter reset (note-on reset + voice-steal reset)
     jb_exc_voice_reset_runtime(&v->exc);
     v->exc_env_last = 0.f;
+    v->mod_env = 0.f;
+    v->mod_env_last = 0.f;
+    v->mod_env_stage = 0;
 
     // BANK 1
     for(int i=0;i<x->n_modes;i++){
@@ -2052,6 +2126,7 @@ static void jb_note_on(t_juicy_bank_tilde *x, float f0, float vel){
     jb_project_behavior_into_voice(x, v);
     jb_project_behavior_into_voice2(x, v);
     jb_exc_note_on(x, v, v->vel);
+    jb_modenv_note_on(v);
 }
 
 static void jb_note_off(t_juicy_bank_tilde *x, float f0){
@@ -2063,7 +2138,7 @@ static void jb_note_off(t_juicy_bank_tilde *x, float f0){
             if (x->v[i].energy<best){ best=x->v[i].energy; match=i; }
         }
     }
-    if (match>=0){ jb_exc_note_off(&x->v[match]); x->v[match].state = V_RELEASE; }
+    if (match>=0){ jb_exc_note_off(&x->v[match]); jb_modenv_note_off(&x->v[match]); x->v[match].state = V_RELEASE; }
 }
 
 // ===== Explicit voice-addressed control (for Pd [poly]) =====
@@ -2080,13 +2155,14 @@ static void jb_note_on_voice(t_juicy_bank_tilde *x, int vix1, float f0, float ve
     jb_project_behavior_into_voice(x, v);
     jb_project_behavior_into_voice2(x, v);
     jb_exc_note_on(x, v, v->vel);
+    jb_modenv_note_on(v);
 }
 
 static void jb_note_off_voice(t_juicy_bank_tilde *x, int vix1){
     if (vix1 < 1) vix1 = 1;
     if (vix1 > x->max_voices) vix1 = x->max_voices;
     int idx = vix1 - 1;
-    if (x->v[idx].state != V_IDLE){ jb_exc_note_off(&x->v[idx]); x->v[idx].state = V_RELEASE; }
+    if (x->v[idx].state != V_IDLE){ jb_exc_note_off(&x->v[idx]); jb_modenv_note_off(&x->v[idx]); x->v[idx].state = V_RELEASE; }
 }
 
 // Message handlers (voice-addressed)
@@ -2124,6 +2200,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
     // Internal exciter: update shared params -> per-voice filters + ADSR times/curves
     jb_exc_update_block(x);
+    jb_mod_adsr_update_block(x);
 
 
     const int topo = (int)jb_clamp(x->topology, 0.f, 3.f);
@@ -2209,6 +2286,23 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         const jb_mode_base_t *base2 = x->base2;
 
         for(int i=0;i<n;i++){
+            // Dedicated MOD ADSR (independent of exciter ADSR)
+            if (v->mod_env_stage != 0){
+                if (v->mod_env_stage == 1){
+                    v->mod_env += x->mod_a_inc;
+                    if (v->mod_env >= 1.f){ v->mod_env = 1.f; v->mod_env_stage = 2; }
+                } else if (v->mod_env_stage == 2){
+                    v->mod_env -= x->mod_d_dec;
+                    if (v->mod_env <= x->mod_sustain){ v->mod_env = x->mod_sustain; v->mod_env_stage = 3; }
+                } else if (v->mod_env_stage == 3){
+                    v->mod_env = x->mod_sustain;
+                } else { // release
+                    v->mod_env -= x->mod_r_dec;
+                    if (v->mod_env <= 0.f){ v->mod_env = 0.f; v->mod_env_stage = 0; }
+                }
+            }
+            v->mod_env_last = v->mod_env;
+
             // Internal exciter (stereo) — one sample per voice per frame
             float exL = 0.f, exR = 0.f;
             jb_exc_process_sample(x, v, exc_w_imp, exc_w_noise, exc_density, exc_diffusion, &exL, &exR);
@@ -2639,7 +2733,80 @@ static void juicy_bank_tilde_lfo_index(t_juicy_bank_tilde *x, t_floatarg f){
     x->lfo_shape = x->lfo_shape_v[li];
     x->lfo_rate  = x->lfo_rate_v[li];
     x->lfo_phase = x->lfo_phase_v[li];
+    x->lfo_amount = x->lfo_amt_v[li];
 }
+
+static void juicy_bank_tilde_lfo_amount(t_juicy_bank_tilde *x, t_floatarg f){
+    float a = jb_clamp(f, -1.f, 1.f);
+    x->lfo_amount = a;
+
+    int idx = (int)floorf(x->lfo_index + 0.5f) - 1;
+    if (idx < 0) idx = 0;
+    if (idx >= JB_N_LFO) idx = JB_N_LFO - 1;
+    x->lfo_amt_v[idx] = a;
+}
+
+// --- target assignment helpers (symbols) ---
+static inline int jb_target_is_none(t_symbol *s){
+    return (!s || s == gensym("none"));
+}
+static inline int jb_target_taken(const t_juicy_bank_tilde *x, t_symbol *tgt, int exclude_lane){
+    if (jb_target_is_none(tgt)) return 0;
+    // lanes: 0=LFO1, 1=LFO2, 2=ADSR, 3=MIDI
+    if (exclude_lane != 0 && x->lfo_target[0] == tgt) return 1;
+    if (exclude_lane != 1 && x->lfo_target[1] == tgt) return 1;
+    if (exclude_lane != 2 && x->adsr_target   == tgt) return 1;
+    if (exclude_lane != 3 && x->midi_target   == tgt) return 1;
+    return 0;
+}
+
+static void juicy_bank_tilde_lfo1_target(t_juicy_bank_tilde *x, t_symbol *s){
+    if (!s) return;
+    if (jb_target_is_none(s)){
+        x->lfo_target[0] = gensym("none");
+        return;
+    }
+    if (jb_target_taken(x, s, 0)) return; // reject duplicate target
+    x->lfo_target[0] = s;
+}
+
+static void juicy_bank_tilde_lfo2_target(t_juicy_bank_tilde *x, t_symbol *s){
+    if (!s) return;
+    if (jb_target_is_none(s)){
+        x->lfo_target[1] = gensym("none");
+        return;
+    }
+    if (jb_target_taken(x, s, 1)) return;
+    x->lfo_target[1] = s;
+}
+
+static void juicy_bank_tilde_adsr_amount(t_juicy_bank_tilde *x, t_floatarg f){
+    x->adsr_amount = jb_clamp(f, -1.f, 1.f);
+}
+static void juicy_bank_tilde_adsr_target(t_juicy_bank_tilde *x, t_symbol *s){
+    if (!s) return;
+    if (jb_target_is_none(s)){
+        x->adsr_target = gensym("none");
+        return;
+    }
+    if (jb_target_taken(x, s, 2)) return;
+    x->adsr_target = s;
+}
+
+static void juicy_bank_tilde_midi_amount(t_juicy_bank_tilde *x, t_floatarg f){
+    x->midi_amount = jb_clamp(f, -1.f, 1.f);
+}
+static void juicy_bank_tilde_midi_target(t_juicy_bank_tilde *x, t_symbol *s){
+    if (!s) return;
+    if (jb_target_is_none(s)){
+        x->midi_target = gensym("none");
+        return;
+    }
+    if (jb_target_taken(x, s, 3)) return;
+    x->midi_target = s;
+}
+
+
 
 static void juicy_bank_tilde_offset(t_juicy_bank_tilde *x, t_floatarg f){
     float v = jb_clamp(f, -1.f, 1.f);
@@ -2834,6 +3001,24 @@ inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     if (x->in_exc_diffusion) inlet_free(x->in_exc_diffusion);
     if (x->in_exc_freq) inlet_free(x->in_exc_freq);
 
+    // MOD SECTION inlets
+    if (x->in_lfo_index) inlet_free(x->in_lfo_index);
+    if (x->in_lfo_shape) inlet_free(x->in_lfo_shape);
+    if (x->in_lfo_rate) inlet_free(x->in_lfo_rate);
+    if (x->in_lfo_phase) inlet_free(x->in_lfo_phase);
+    if (x->in_lfo_amount) inlet_free(x->in_lfo_amount);
+    if (x->in_lfo1_target) inlet_free(x->in_lfo1_target);
+    if (x->in_lfo2_target) inlet_free(x->in_lfo2_target);
+    if (x->in_mod_attack) inlet_free(x->in_mod_attack);
+    if (x->in_mod_decay) inlet_free(x->in_mod_decay);
+    if (x->in_mod_sustain) inlet_free(x->in_mod_sustain);
+    if (x->in_mod_release) inlet_free(x->in_mod_release);
+    if (x->in_adsr_amount) inlet_free(x->in_adsr_amount);
+    if (x->in_adsr_target) inlet_free(x->in_adsr_target);
+    if (x->in_midi_amount) inlet_free(x->in_midi_amount);
+    if (x->in_midi_target) inlet_free(x->in_midi_target);
+
+
     inlet_free(x->inR);
 
     outlet_free(x->outL); outlet_free(x->outR);
@@ -2984,6 +3169,27 @@ x->sine_phase2    = x->sine_phase;
         x->lfo_snh[li]          = 0.f;
     }
 
+
+    // default new mod-lane scaffolding
+    for (int li = 0; li < JB_N_LFO; ++li){
+        x->lfo_amt_v[li] = 0.f;
+        x->lfo_target[li] = gensym("none");
+    }
+    x->lfo_amount = 0.f;
+
+    x->mod_attack_ms  = 50.f;
+    x->mod_decay_ms   = 200.f;
+    x->mod_sustain    = 0.f;
+    x->mod_release_ms = 200.f;
+    x->mod_a_inc = 1.f; x->mod_d_dec = 1.f; x->mod_r_dec = 1.f;
+
+    x->adsr_amount = 0.f;
+    x->adsr_target = gensym("none");
+
+    x->midi_amount = 0.f;
+    x->midi_target = gensym("none");
+
+
     // clear modulation matrix (bank 1 + bank 2)
     for(int i=0;i<JB_N_MODSRC;i++)
         for(int j=0;j<JB_N_MODTGT;j++){
@@ -3090,12 +3296,27 @@ x->sine_phase2    = x->sine_phase;
     x->in_exc_freq          = floatinlet_new(&x->x_obj, &x->exc_freq);
 
     // LFO + ADSR inlets (for future modulation matrix)
-    x->in_lfo_shape = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("lfo_shape"));
-    x->in_lfo_rate  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("lfo_rate"));
-    x->in_lfo_phase = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("lfo_phase"));
-    x->in_lfo_index = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("lfo_index"));
-    // inlet for modulation-matrix configuration messages
-    x->in_matrix    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, gensym("matrix"), gensym("matrix"));
+    // --- MOD SECTION (starts after exciter impulse freq inlet) ---
+    x->in_lfo_index  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_index"));
+    x->in_lfo_shape  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_shape"));
+    x->in_lfo_rate   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_rate"));
+    x->in_lfo_phase  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_phase"));
+    x->in_lfo_amount = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_amount"));
+
+    x->in_lfo1_target = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_symbol, gensym("lfo1_target"));
+    x->in_lfo2_target = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_symbol, gensym("lfo2_target"));
+
+    x->in_mod_attack  = floatinlet_new(&x->x_obj, &x->mod_attack_ms);
+    x->in_mod_decay   = floatinlet_new(&x->x_obj, &x->mod_decay_ms);
+    x->in_mod_sustain = floatinlet_new(&x->x_obj, &x->mod_sustain);
+    x->in_mod_release = floatinlet_new(&x->x_obj, &x->mod_release_ms);
+
+    x->in_adsr_amount = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("adsr_amount"));
+    x->in_adsr_target = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_symbol, gensym("adsr_target"));
+
+    x->in_midi_amount = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("midi_amount"));
+    x->in_midi_target = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_symbol, gensym("midi_target"));
+
 
     // Outs
     x->outL = outlet_new(&x->x_obj, &s_signal);
@@ -3414,7 +3635,6 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_snapshot_undo
     // 1) Direct: "lfo1_to_pitch 0.5" (left inlet, via 'anything')
     // 2) Tagged: "matrix lfo1_to_pitch 0.5" (matrix inlet, via 'matrix' method)
     class_addanything(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_anything);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_matrix, gensym("matrix"), A_GIMME, 0);
 
     // BEHAVIOR
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_stiffen, gensym("stiffen"), A_DEFFLOAT, 0);
@@ -3458,6 +3678,13 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gens
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo_rate,  gensym("lfo_rate"),  A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo_phase, gensym("lfo_phase"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo_index, gensym("lfo_index"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo_amount, gensym("lfo_amount"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo1_target, gensym("lfo1_target"), A_SYMBOL, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo2_target, gensym("lfo2_target"), A_SYMBOL, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_adsr_amount, gensym("adsr_amount"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_adsr_target, gensym("adsr_target"), A_SYMBOL, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_midi_amount, gensym("midi_amount"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_midi_target, gensym("midi_target"), A_SYMBOL, 0);
 // INDIVIDUAL (per-mode)
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index, gensym("index"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_ratio_i, gensym("ratio"), A_DEFFLOAT, 0);
