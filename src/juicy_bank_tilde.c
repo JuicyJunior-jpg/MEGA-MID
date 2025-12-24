@@ -656,7 +656,7 @@ static void jb_update_lfos_block(t_juicy_bank_tilde *x, int n){
         float rate  = jb_clamp(x->lfo_rate_v[li], 0.f, 20.f);   // Hz
         if (li == 1) {
             const t_symbol *tgt = x->lfo_target[0];
-            if (tgt == gensym(\"lfo2_rate\")) {
+            if (tgt == gensym("lfo2_rate")) {
                 const float lfo1_amt = jb_clamp(x->lfo_amt_v[0], -1.f, 1.f);
                 const float lfo1_out = x->lfo_val[0] * lfo1_amt;
                 rate = jb_clamp(rate + lfo1_out, 0.f, 20.f);
@@ -2351,7 +2351,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     float exc_w_imp   = sinf(0.5f * (float)M_PI * exc_t);
     float exc_w_noise = cosf(0.5f * (float)M_PI * exc_t);
     float exc_density   = jb_clamp(x->exc_density, 0.f, 1.f);
-    if (lfo1_out != 0.f && lfo1_tgt == gensym(\"exc_vol\")) {
+    if (lfo1_out != 0.f && lfo1_tgt == gensym("exc_vol")) {
         exc_density = jb_clamp(exc_density + lfo1_out, 0.f, 1.f);
     }
     float exc_diffusion = jb_clamp(x->exc_diffusion, 0.f, 1.f);
