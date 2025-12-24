@@ -1315,7 +1315,7 @@ static void jb_project_behavior_into_voice_bank(t_juicy_bank_tilde *x, jb_voice_
     *decay_vel_mul_p = (1.f + (0.30f + 1.20f * linger_amt) * jb_clamp(v->vel,0.f,1.f));
 
     // Brightness: user-controlled
-    *brightness_v_p = {
+    {
         const t_symbol *lfo1_tgt = x->lfo_target[0];
         const float lfo1 = x->lfo_val[0] * x->lfo_amt_v[0];
         float b = jb_clamp(jb_bank_brightness(x, bank), -1.f, 1.f);
@@ -1326,7 +1326,7 @@ static void jb_project_behavior_into_voice_bank(t_juicy_bank_tilde *x, jb_voice_
         }
         *brightness_v_p = b;
     }
-// Bloom → bandwidth
+    // Bloom → bandwidth
     float baseBW = jb_bank_bandwidth_base(x, bank);
     float addBW  = (0.15f + 0.45f * bloom_amt) * jb_clamp(v->vel,0.f,1.f);
     *bandwidth_v_p = jb_clamp(baseBW + addBW, 0.f, 1.f);
