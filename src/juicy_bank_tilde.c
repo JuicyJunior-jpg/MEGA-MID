@@ -428,6 +428,16 @@ typedef struct {
 
 // ---------- the object ----------
 static t_class *juicy_bank_tilde_class;
+static t_class *jb_tgtproxy_class;
+
+// Proxy to accept ANY message on target-selection inlets (so message boxes like 'damper_1' work)
+typedef struct _juicy_bank_tilde t_juicy_bank_tilde; // forward
+typedef struct _jb_tgtproxy{
+    t_pd p_pd;
+    t_juicy_bank_tilde *owner;
+    int lane; // 0=LFO1, 1=LFO2, 2=ADSR, 3=MIDI
+} jb_tgtproxy;
+
 
 typedef struct _juicy_bank_tilde {
     t_object  x_obj; t_float f_dummy; t_float sr;
@@ -570,6 +580,10 @@ float damping, brightness; float damp_broad, damp_point;
     // Targets are stored as symbols; the special symbol "none" disables that lane.
     // Uniqueness rule: if a target is already owned by another lane, new assignment is ignored.
     t_symbol *lfo_target[JB_N_LFO];   // LFO1/LFO2 targets
+    jb_tgtproxy *tgtproxy_lfo1;
+    jb_tgtproxy *tgtproxy_lfo2;
+    jb_tgtproxy *tgtproxy_adsr;
+    jb_tgtproxy *tgtproxy_midi;
     float     lfo_amt_v[JB_N_LFO];    // LFO1/LFO2 amounts (-1..+1)
     float     lfo_amt_eff[JB_N_LFO];  // effective amounts (after LFO1->LFO2 amount mod)
     float     lfo_amount;             // UI mirror for currently selected LFO amount (via lfo_index)
@@ -2964,6 +2978,36 @@ static void juicy_bank_tilde_midi_target(t_juicy_bank_tilde *x, t_symbol *s){
     x->midi_target = s;
 }
 
+// ---------- target inlet proxy (accepts bare selectors like 'brightness_1') ----------
+static void jb_tgtproxy_set(jb_tgtproxy *p, t_symbol *tgt){
+    if (!p || !p->owner || !tgt) return;
+    switch(p->lane){
+        case 0: juicy_bank_tilde_lfo1_target(p->owner, tgt); break;
+        case 1: juicy_bank_tilde_lfo2_target(p->owner, tgt); break;
+        case 2: juicy_bank_tilde_adsr_target(p->owner, tgt); break;
+        case 3: juicy_bank_tilde_midi_target(p->owner, tgt); break;
+        default: break;
+    }
+}
+static void jb_tgtproxy_float(jb_tgtproxy *p, t_floatarg f){ (void)p; (void)f; } // ignore floats
+static void jb_tgtproxy_symbol(jb_tgtproxy *p, t_symbol *s){ jb_tgtproxy_set(p, s); }
+static void jb_tgtproxy_list(jb_tgtproxy *p, t_symbol *s, int argc, t_atom *argv){
+    (void)s;
+    if (argc < 1) return;
+    if (argv[0].a_type == A_SYMBOL) jb_tgtproxy_set(p, atom_getsymbol(argv));
+}
+static void jb_tgtproxy_anything(jb_tgtproxy *p, t_symbol *s, int argc, t_atom *argv){
+    if (!p) return;
+    // If user sends "symbol foo" or "list foo", use first atom. Otherwise treat selector as the target.
+    if ((s == &s_symbol || s == &s_list) && argc >= 1){
+        if (argv[0].a_type == A_SYMBOL) jb_tgtproxy_set(p, atom_getsymbol(argv));
+        return;
+    }
+    // Bare message box like "damper_1" comes through here with argc==0 and selector==gensym("damper_1")
+    jb_tgtproxy_set(p, s);
+}
+
+
 
 
 static void juicy_bank_tilde_offset(t_juicy_bank_tilde *x, t_floatarg f){
@@ -3175,6 +3219,12 @@ inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     if (x->in_adsr_target) inlet_free(x->in_adsr_target);
     if (x->in_midi_amount) inlet_free(x->in_midi_amount);
     if (x->in_midi_target) inlet_free(x->in_midi_target);
+
+    // Target proxies
+    if (x->tgtproxy_lfo1) { pd_free((t_pd *)x->tgtproxy_lfo1); x->tgtproxy_lfo1 = 0; }
+    if (x->tgtproxy_lfo2) { pd_free((t_pd *)x->tgtproxy_lfo2); x->tgtproxy_lfo2 = 0; }
+    if (x->tgtproxy_adsr) { pd_free((t_pd *)x->tgtproxy_adsr); x->tgtproxy_adsr = 0; }
+    if (x->tgtproxy_midi) { pd_free((t_pd *)x->tgtproxy_midi); x->tgtproxy_midi = 0; }
 
 
     inlet_free(x->inR);
@@ -3463,8 +3513,20 @@ x->sine_phase2    = x->sine_phase;
     x->in_lfo_phase  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_phase"));
     x->in_lfo_amount = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_amount"));
 
-    x->in_lfo1_target = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_symbol, gensym("lfo1_target"));
-    x->in_lfo2_target = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_symbol, gensym("lfo2_target"));
+    // Target selector inlets must accept bare selectors (e.g. a message box containing "damper_1"),
+    // so we route them through proxies that implement an 'anything' handler.
+    x->tgtproxy_lfo1 = (jb_tgtproxy *)pd_new(jb_tgtproxy_class);
+    x->tgtproxy_lfo2 = (jb_tgtproxy *)pd_new(jb_tgtproxy_class);
+    x->tgtproxy_adsr = (jb_tgtproxy *)pd_new(jb_tgtproxy_class);
+    x->tgtproxy_midi = (jb_tgtproxy *)pd_new(jb_tgtproxy_class);
+
+    if (x->tgtproxy_lfo1){ x->tgtproxy_lfo1->owner = x; x->tgtproxy_lfo1->lane = 0; }
+    if (x->tgtproxy_lfo2){ x->tgtproxy_lfo2->owner = x; x->tgtproxy_lfo2->lane = 1; }
+    if (x->tgtproxy_adsr){ x->tgtproxy_adsr->owner = x; x->tgtproxy_adsr->lane = 2; }
+    if (x->tgtproxy_midi){ x->tgtproxy_midi->owner = x; x->tgtproxy_midi->lane = 3; }
+
+    x->in_lfo1_target = inlet_new(&x->x_obj, x->tgtproxy_lfo1 ? &x->tgtproxy_lfo1->p_pd : &x->x_obj.ob_pd, 0, 0);
+    x->in_lfo2_target = inlet_new(&x->x_obj, x->tgtproxy_lfo2 ? &x->tgtproxy_lfo2->p_pd : &x->x_obj.ob_pd, 0, 0);
 
     x->in_mod_attack  = floatinlet_new(&x->x_obj, &x->mod_attack_ms);
     x->in_mod_decay   = floatinlet_new(&x->x_obj, &x->mod_decay_ms);
@@ -3472,10 +3534,10 @@ x->sine_phase2    = x->sine_phase;
     x->in_mod_release = floatinlet_new(&x->x_obj, &x->mod_release_ms);
 
     x->in_adsr_amount = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("adsr_amount"));
-    x->in_adsr_target = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_symbol, gensym("adsr_target"));
+    x->in_adsr_target = inlet_new(&x->x_obj, x->tgtproxy_adsr ? &x->tgtproxy_adsr->p_pd : &x->x_obj.ob_pd, 0, 0);
 
     x->in_midi_amount = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("midi_amount"));
-    x->in_midi_target = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_symbol, gensym("midi_target"));
+    x->in_midi_target = inlet_new(&x->x_obj, x->tgtproxy_midi ? &x->tgtproxy_midi->p_pd : &x->x_obj.ob_pd, 0, 0);
 
 
     // Outs
@@ -3782,6 +3844,19 @@ static void juicy_bank_tilde_matrix(t_juicy_bank_tilde *x, t_symbol *s, int argc
 }
 
 void juicy_bank_tilde_setup(void){
+    // Target-inlet proxy class (accepts bare selectors like 'brightness_1')
+    if (!jb_tgtproxy_class){
+        jb_tgtproxy_class = class_new(gensym("_jb_tgtproxy"),
+                                      0, 0,
+                                      sizeof(jb_tgtproxy),
+                                      CLASS_PD, 0);
+        class_addfloat(jb_tgtproxy_class, (t_method)jb_tgtproxy_float);
+        class_addsymbol(jb_tgtproxy_class, (t_method)jb_tgtproxy_symbol);
+        class_addlist(jb_tgtproxy_class, (t_method)jb_tgtproxy_list);
+        class_addanything(jb_tgtproxy_class, (t_method)jb_tgtproxy_anything);
+    }
+
+
     juicy_bank_tilde_class = class_new(gensym("juicy_bank~"),
                            (t_newmethod)juicy_bank_tilde_new,
                            (t_method)juicy_bank_tilde_free,
