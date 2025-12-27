@@ -697,12 +697,15 @@ static void jb_update_lfos_block(t_juicy_bank_tilde *x, int n){
 
         int shape = (int)floorf(shape_f + 0.5f);
         if (shape < 1) shape = 1;
-        if (shape > 4) shape = 4;
+        if (shape > 5) shape = 5;
 
         float val = 0.f;
         if (shape == 1){
-            // saw: -1..+1
+            // saw (up): -1..+1
             val = 2.f * ph - 1.f;
+        } else if (shape == 5){
+            // saw (down): +1..-1
+            val = 1.f - 2.f * ph;
         } else if (shape == 2){
             // square
             val = (ph < 0.5f) ? 1.f : -1.f;
@@ -1357,15 +1360,7 @@ static void jb_project_behavior_into_voice_bank(t_juicy_bank_tilde *x, jb_voice_
 
     // per-mode dispersion targets (ignore fundamental)
     float disp_base = jb_clamp(jb_bank_dispersion(x, bank), 0.f, 1.f);
-    {
-        const t_symbol *lfo1_tgt = x->lfo_target[0];
-        const float lfo1 = x->lfo_val[0] * x->lfo_amt_v[0];
-        if (lfo1 != 0.f){
-            if ((bank == 0 && lfo1_tgt == gensym("dispersion_1")) || (bank != 0 && lfo1_tgt == gensym("dispersion_2"))){
-                disp_base = jb_clamp(disp_base + lfo1, 0.f, 1.f);
-            }
-        }
-    }
+    // LFO1 dispersion modulation removed (not a supported target anymore).
     float total_disp = jb_clamp(disp_base + *stiffen_add_p, 0.f, 1.f);
 float *disp_last_p = jb_bank_dispersion_last(x, bank);
     if (*disp_last_p < 0.f){ *disp_last_p = -1.f; }
@@ -1716,16 +1711,7 @@ jb_lock_fundamental_generic(n_modes, base, m);
 
     // --- damping + broadness mod (targets 0 and 1) ---
     float damping_base = jb_clamp(jb_bank_damping(x, bank), -1.f, 1.f);
-    // NEW MOD LANES (scaffold): LFO1 target modulation (partial implementation)
-    {
-        const t_symbol *lfo1_tgt = x->lfo_target[0];
-        const float lfo1 = x->lfo_val[0] * x->lfo_amt_v[0];
-        if (lfo1 != 0.f){
-            if ((bank == 0 && lfo1_tgt == gensym("damper_1")) || (bank != 0 && lfo1_tgt == gensym("damper_2"))){
-                damping_base = jb_clamp(damping_base + lfo1, -1.f, 1.f);
-            }
-        }
-    }
+    // LFO1: (damper removed from LFO targets)
 float broad_base   = jb_clamp(jb_bank_damp_broad(x, bank), 0.f, 1.f);
 
     float damping_mod = 0.f;
@@ -2089,12 +2075,7 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
                 int period = pattern + A;
                 if (period < 1) period = 1;
 
-                float phase = jb_bank_sine_phase(x, bank);
-            if (lfo1 != 0.f){
-                if ((bank == 0 && lfo1_tgt == gensym("sine_phase_1")) || (bank != 0 && lfo1_tgt == gensym("sine_phase_2"))){
-                    phase = jb_clamp(phase + lfo1, 0.f, 1.f);
-                }
-            }
+	                float phase = jb_bank_sine_phase(x, bank);
 // shift across ONE period (phase=1 returns to original alignment)
                 float shift = phase * (float)period;
                 int   s_int = (int)floorf(shift);
@@ -2340,11 +2321,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         x->exc_shape = jb_clamp(exc_shape_saved + lfo1_out, 0.f, 1.f);
     }
 
-    // LFO1 -> Impulse frequency (0..1, additive, clamped). Stored in exc_freq_eff and used on note-on triggers.
+    // LFO1 no longer modulates impulse frequency.
     x->exc_freq_eff = jb_clamp(x->exc_freq, 0.f, 1.f);
-    if (lfo1_out != 0.f && lfo1_tgt == gensym("impulse_freq")) {
-        x->exc_freq_eff = jb_clamp(x->exc_freq_eff + lfo1_out, 0.f, 1.f);
-    }
 
     // Internal exciter: update shared params -> per-voice filters + ADSR times/curves
     jb_exc_update_block(x);
@@ -2365,9 +2343,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     float exc_w_imp   = sinf(0.5f * (float)M_PI * exc_t);
     float exc_w_noise = cosf(0.5f * (float)M_PI * exc_t);
     float exc_density   = jb_clamp(x->exc_density, 0.f, 1.f);
-    if (lfo1_out != 0.f && lfo1_tgt == gensym("exc_vol")) {
-        exc_density = jb_clamp(exc_density + lfo1_out, 0.f, 1.f);
-    }
     float exc_diffusion = jb_clamp(x->exc_diffusion, 0.f, 1.f);
 
     // Per-block updates that don't change sample-phase
@@ -2516,18 +2491,12 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                         y2bR=y1bR; y1bR=y_lin_bR;
                         y_totalR += 0.12f * bw_amt2 * y_lin_bR;
                     }
-                    float base_pan = 0.f;
-            if (lfo1_out != 0.f && lfo1_tgt == gensym("pan_2")) {
-                const float pan01 = jb_clamp(0.5f + lfo1_out, 0.f, 1.f);
-                base_pan = (2.f * pan01) - 1.f;
-            }
-            if (lfo1_out != 0.f && lfo1_tgt == gensym("pan_1")) {
-                const float pan01 = jb_clamp(0.5f + lfo1_out, 0.f, 1.f);
-                base_pan = (2.f * pan01) - 1.f; // convert 0..1 -> -1..+1
-            }
-                    float p = jb_clamp(base_pan + pan_mod2, -1.f, 1.f);
-                    if (p > 1.f) p = 1.f;
-                    else if (p < -1.f) p = -1.f;
+	                    float base_pan = 0.f;
+	                    // NEW MOD LANES: LFO1 -> pan_2 (bank 2)
+	                    if (lfo1_out != 0.f && lfo1_tgt == gensym("pan_2")) {
+	                        base_pan = jb_clamp(lfo1_out, -1.f, 1.f);
+	                    }
+	                    float p = jb_clamp(base_pan + pan_mod2, -1.f, 1.f);
                     float wL = sqrtf(0.5f*(1.f - p));
                     float wR = sqrtf(0.5f*(1.f + p));
                     if (need_send2){ b2sendL += y_totalL * wL; b2sendR += y_totalR * wR; }
@@ -2587,6 +2556,9 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                         y_totalR += 0.12f * bw_amt1 * y_lin_bR;
                     }
                     float base_pan = 0.f;
+	            if (lfo1_out != 0.f && lfo1_tgt == gensym("pan_1")) {
+	                base_pan = jb_clamp(lfo1_out, -1.f, 1.f);
+	            }
                     float p = jb_clamp(base_pan + pan_mod1, -1.f, 1.f);
                     if (p > 1.f) p = 1.f;
                     else if (p < -1.f) p = -1.f;
@@ -2862,7 +2834,7 @@ static void juicy_bank_tilde_sine_width(t_juicy_bank_tilde *x, t_floatarg f){
 static void juicy_bank_tilde_lfo_shape(t_juicy_bank_tilde *x, t_floatarg f){
     int s = (int)floorf(f + 0.5f);
     if (s < 1) s = 1;
-    if (s > 4) s = 4;
+    if (s > 5) s = 5;
     x->lfo_shape = (float)s;
 
     // write into the currently selected LFO slot
@@ -2932,8 +2904,27 @@ static inline int jb_target_taken(const t_juicy_bank_tilde *x, t_symbol *tgt, in
     return 0;
 }
 
+static inline int jb_lfo1_target_allowed(t_symbol *s){
+    if (jb_target_is_none(s)) return 1;
+    return (
+        s == gensym("master_1") || s == gensym("master_2") ||
+        s == gensym("pitch_1")  || s == gensym("pitch_2")  ||
+        s == gensym("pan_1")    || s == gensym("pan_2")    ||
+        s == gensym("brightness_1") || s == gensym("brightness_2") ||
+        s == gensym("density_1")    || s == gensym("density_2")    ||
+        s == gensym("partials_1")   || s == gensym("partials_2")   ||
+        s == gensym("coupling_amt") ||
+        s == gensym("exc_shape")    ||
+        s == gensym("lfo2_rate")    ||
+        s == gensym("lfo2_amount")
+    );
+}
+
 static void juicy_bank_tilde_lfo1_target(t_juicy_bank_tilde *x, t_symbol *s){
     if (!s) return;
+    if (!jb_lfo1_target_allowed(s)){
+        s = gensym("none");
+    }
     if (jb_target_is_none(s)){
         x->lfo_target[0] = gensym("none");
         return;
