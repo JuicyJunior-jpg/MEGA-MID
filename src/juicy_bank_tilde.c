@@ -3720,7 +3720,6 @@ static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
             }
         }
     }
-    }
 }
 static void juicy_bank_tilde_snapshot_undo(t_juicy_bank_tilde *x){
     if (!x->_undo_valid) return;
