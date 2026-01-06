@@ -25,6 +25,14 @@
 #include <string.h>
 #include <stdlib.h>
 
+
+// Denormal/subnormal protection (prevents CPU spikes on Intel when signals decay to tiny values)
+#if defined(__SSE__) || defined(__SSE2__)
+#include <xmmintrin.h>
+  #if defined(__SSE3__)
+  #include <pmmintrin.h>
+  #endif
+#endif
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -2042,8 +2050,9 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
                 const float phi_p = (1.f - open) * sinf(ang * xp) + open * cosf(ang * xp);
 
                 const float w = fabsf(phi_e * phi_p); // 0..1
-                gn *= w;
-                gn_ref *= w;
+                const float ww = w * w;             // sharpness=2 (stronger nodes/antinodes)
+                gn *= ww;
+                gn_ref *= ww;
             }
         }
 
@@ -2229,6 +2238,14 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     t_sample *outL=(t_sample *)(w[4]);
     t_sample *outR=(t_sample *)(w[5]);
     int n=(int)(w[6]);
+
+#if defined(__SSE__) || defined(__SSE2__)
+    // Avoid denormal/subnormal slowdowns on Intel CPUs (does not affect audible quality).
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+  #if defined(__SSE3__)
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+  #endif
+#endif
 
     // clear outputs
     for(int i=0;i<n;i++){ outL[i]=0; outR[i]=0; }
