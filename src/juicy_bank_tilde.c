@@ -82,6 +82,21 @@ static inline unsigned int jb_rng_u32(jb_rng_t *r){ unsigned int x = r->s; x ^= 
 static inline float jb_rng_uni(jb_rng_t *r){ return (jb_rng_u32(r) >> 8) * (1.0f/16777216.0f); }
 static inline float jb_rng_bi(jb_rng_t *r){ return 2.f * jb_rng_uni(r) - 1.f; }
 
+// ---------- safety / stability ----------
+// If a voice ever produces NaN/INF or astronomically large values (runaway), we hard-reset that voice
+// to prevent audio-thread stalls / "freezing".
+// Threshold is extremely high so it won't affect normal audio.
+#ifndef JB_PANIC_ABS_MAX
+#define JB_PANIC_ABS_MAX 1.0e6f
+#endif
+
+static inline int jb_isfinitef(float x){
+    return isfinite(x);
+}
+static inline float jb_kill_denorm(float x){
+    return (fabsf(x) < 1e-20f) ? 0.f : x;
+}
+
 // ---------- INTERNAL EXCITER (Fusion STEP 1) ----------
 // This is the former juicy_exciter~ DSP engine embedded into juicy_bank~.
 // STEP 1: adds exciter DSP structs + helpers + per-voice exciter state storage + param inlets.
@@ -2144,6 +2159,48 @@ static int jb_find_voice_to_steal(t_juicy_bank_tilde *x){
 }
 
 // ---------- INTERNAL EXCITER (Fusion STEP 2) — note triggers ----------
+
+// Hard reset used only as a "panic" guard if a voice goes unstable (NaN/INF/runaway).
+// This does NOT change normal sound; it only triggers on broken states.
+static void jb_voice_panic_reset(t_juicy_bank_tilde *x, jb_voice_t *v){
+    if (!x || !v) return;
+
+    v->state = V_IDLE;
+    v->rel_env = 0.f;
+    v->rel_env2 = 0.f;
+    v->energy = 0.f;
+
+    v->coup_b1_prevL = v->coup_b1_prevR = 0.f;
+    v->coup_b2_prevL = v->coup_b2_prevR = 0.f;
+
+    // Internal exciter reset
+    jb_exc_voice_reset_runtime(&v->exc);
+    v->exc_env_last = 0.f;
+
+    // Dedicated MOD ADSR reset
+    v->mod_env = 0.f;
+    v->mod_env_last = 0.f;
+    v->mod_env_stage = 0;
+
+    // Clear resonator runtime states (keep ratios/decays/gains as-is so next note is consistent)
+    for (int i = 0; i < x->n_modes; ++i){
+        jb_mode_rt_t *md = &v->m[i];
+        md->y1L = md->y2L = md->y1bL = md->y2bL = 0.f;
+        md->y1R = md->y2R = md->y1bR = md->y2bR = 0.f;
+        md->driveL = md->driveR = 0.f;
+        md->envL = md->envR = 0.f;
+        md->y_pre_lastL = md->y_pre_lastR = 0.f;
+    }
+    for (int i = 0; i < x->n_modes2; ++i){
+        jb_mode_rt_t *md = &v->m2[i];
+        md->y1L = md->y2L = md->y1bL = md->y2bL = 0.f;
+        md->y1R = md->y2R = md->y1bR = md->y2bR = 0.f;
+        md->driveL = md->driveR = 0.f;
+        md->envL = md->envR = 0.f;
+        md->y_pre_lastL = md->y_pre_lastR = 0.f;
+    }
+}
+
 static inline void jb_exc_note_on(t_juicy_bank_tilde *x, jb_voice_t *v, float vel){
     jb_exc_voice_t *e = &v->exc;
     e->vel_cur = jb_clamp(vel, 0.f, 1.f);
@@ -2373,6 +2430,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         const jb_mode_base_t *base2 = x->base2;
 
         for(int i=0;i<n;i++){
+            float vOutL = 0.f;
+            float vOutR = 0.f;
             // Dedicated MOD ADSR (independent of exciter ADSR)
             if (v->mod_env_stage != 0){
                 if (v->mod_env_stage == 1){
@@ -2393,6 +2452,9 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             // Internal exciter (stereo) — one sample per voice per frame
             float exL = 0.f, exR = 0.f;
             jb_exc_process_sample(x, v, exc_w_imp, exc_w_noise, exc_density, exc_diffusion, &exL, &exR);
+            exL = jb_kill_denorm(exL);
+            exR = jb_kill_denorm(exR);
+            if (!jb_isfinitef(exL) || !jb_isfinitef(exR)) { exL = 0.f; exR = 0.f; }
 
             // Cache raw internal exciter for later (Bank1 may need it even if Bank2 input is replaced)
             const float ex0L = exL, ex0R = exR;
@@ -2448,8 +2510,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     float wR = sqrtf(0.5f*(1.f + p));
                     if (need_send2){ b2sendL += y_totalL * wL; b2sendR += y_totalR * wR; }
                     y_totalL *= v->rel_env2; y_totalR *= v->rel_env2;
-                    outL[i] += y_totalL * wL * bank_gain2;
-                    outR[i] += y_totalR * wR * bank_gain2;
+                    vOutL += y_totalL * wL * bank_gain2;
+                    vOutR += y_totalR * wR * bank_gain2;
 
                     md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
                     md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
@@ -2514,8 +2576,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     if (need_send1){ b1sendL += y_totalL * wL; b1sendR += y_totalR * wR; }
 
                     y_totalL *= v->rel_env; y_totalR *= v->rel_env;
-                    outL[i] += y_totalL * wL * bank_gain1;
-                    outR[i] += y_totalR * wR * bank_gain1;
+                    vOutL += y_totalL * wL * bank_gain1;
+                    vOutR += y_totalR * wR * bank_gain1;
 
                     md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
                     md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
@@ -2527,6 +2589,18 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             v->coup_b1_prevR = b1sendR;
             v->coup_b2_prevL = b2sendL;
             v->coup_b2_prevR = b2sendR;
+
+
+            // --- voice output + safety watchdog ---
+            // If anything goes unstable (NaN/INF or runaway magnitude), hard-reset this voice.
+            if (!jb_isfinitef(vOutL) || !jb_isfinitef(vOutR) ||
+                fabsf(vOutL) > JB_PANIC_ABS_MAX || fabsf(vOutR) > JB_PANIC_ABS_MAX){
+                jb_voice_panic_reset(x, v);
+                vOutL = 0.f;
+                vOutR = 0.f;
+            }
+            outL[i] += vOutL;
+            outR[i] += vOutR;
 
             // per-sample release envelope update (decays in V_RELEASE, 20ms..5s)
             if (v->state == V_RELEASE){
@@ -2551,6 +2625,13 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
         } // end samples
     } // end voices
+
+
+    // Final safety: never output NaN/INF (can destabilize audio drivers / cause "freezing").
+    for (int i = 0; i < n; ++i){
+        if (!jb_isfinitef(outL[i])) outL[i] = 0.f;
+        if (!jb_isfinitef(outR[i])) outR[i] = 0.f;
+    }
 
     // Output DC HP (post-sum)
     float a=x->hp_a; float x1L=x->hpL_x1, y1L=x->hpL_y1, x1R=x->hpR_x1, y1R=x->hpR_y1;
