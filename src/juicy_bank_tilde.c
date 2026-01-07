@@ -43,7 +43,9 @@
 #define JB_DAMP_T60_MIN_S     0.005f  /* high-frequency minimum T60 at damper=1 (seconds) */
 
 #define JB_MAX_MODES    32
-#define JB_MAX_VOICES    4
+#define JB_MAX_VOICES    8
+#define JB_ATTACK_VOICES 4
+#define JB_TAIL_VOICES   (JB_MAX_VOICES - JB_ATTACK_VOICES)
 #define JB_N_MODSRC    5
 #define JB_N_MODTGT    15
 #define JB_N_LFO       2
@@ -546,6 +548,7 @@ float damping, brightness; float global_decay, slope;
 
     // voices
     int   max_voices;
+    int   total_voices; // attack+tail voices actually processed
     jb_voice_t v[JB_MAX_VOICES];
 
     // current edit index for Individual setters
@@ -839,7 +842,7 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
     float sus  = x->exc_sustain;
     float r_ms = x->exc_release_ms;
 
-    for(int i=0; i<x->max_voices; ++i){
+    for(int i=0; i<x->total_voices; ++i){
         jb_exc_voice_t *e = &x->v[i].exc;
 
         // filters
@@ -1425,7 +1428,7 @@ static void jb_update_crossring_bank(t_juicy_bank_tilde *x, int self_idx, int ba
     if (cr_amt<=0.f) return;
     if (vs->state==V_IDLE) return;
 
-    for(int u=0; u<x->max_voices; ++u){
+    for(int u=0; u<x->total_voices; ++u){
         if (u==self_idx) continue;
         const jb_voice_t *vu = &x->v[u];
         if (vu->state==V_IDLE) continue;
@@ -2231,10 +2234,50 @@ static inline void jb_exc_note_on(t_juicy_bank_tilde *x, jb_voice_t *v, float ve
 static inline void jb_exc_note_off(jb_voice_t *v){
     jb_exc_adsr_note_off(&v->exc.env);
 }
+static int jb_find_idle_tail_voice(const t_juicy_bank_tilde *x){
+    for(int i=x->max_voices; i<x->total_voices; ++i){
+        if (x->v[i].state == V_IDLE) return i;
+    }
+    return -1;
+}
+static int jb_find_quietest_tail_voice(const t_juicy_bank_tilde *x){
+    int best = x->max_voices;
+    float bestE = 1e9f;
+    for(int i=x->max_voices; i<x->total_voices; ++i){
+        // Prefer stealing already-low-energy tails; if all idle, fall back to first tail slot
+        if (x->v[i].state == V_IDLE) return i;
+        float e = x->v[i].energy;
+        if (e < bestE){ bestE = e; best = i; }
+    }
+    return best;
+}
+
 static void jb_note_on(t_juicy_bank_tilde *x, float f0, float vel){
+    // Pick an ATTACK voice (0..max_voices-1). Tail voices are never selected for new attacks.
     int idx = jb_find_voice_to_steal(x);
     jb_voice_t *v = &x->v[idx];
-    v->state = V_HELD; v->f0 = (f0<=0.f)?1.f:f0; v->vel = jb_clamp(vel,0.f,1.f);
+
+    // If we're stealing a currently-sounding voice, migrate it into the tail pool so it can
+    // ring out naturally (as if a key was released) while we reuse this attack slot immediately.
+    if (v->state != V_IDLE){
+        int tidx = jb_find_idle_tail_voice(x);
+        if (tidx < 0) tidx = jb_find_quietest_tail_voice(x);
+        jb_voice_t *t = &x->v[tidx];
+
+        *t = *v; // POD copy: includes resonator states + exciter runtime + env state
+
+        // Convert copied voice to a natural NOTE-OFF release tail.
+        jb_exc_note_off(t);
+        jb_modenv_note_off(t);
+        t->state = V_RELEASE;
+        // keep rel_env/rel_env2 as-is (they're 1 while held/releasing), they will decay in DSP loop
+    }
+
+    // Start (or restart) the attack voice immediately
+    v->state = V_HELD;
+    v->f0  = (f0<=0.f)?1.f:f0;
+    v->vel = jb_clamp(vel,0.f,1.f);
+
     jb_voice_reset_states(x, v, &x->rng);
     jb_project_behavior_into_voice(x, v);
     jb_project_behavior_into_voice2(x, v);
@@ -2361,7 +2404,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     float exc_diffusion = jb_clamp(x->exc_diffusion, 0.f, 1.f);
 
     // Per-block updates that don't change sample-phase
-    for(int vix=0; vix<x->max_voices; ++vix){
+    for(int vix=0; vix<x->total_voices; ++vix){
         jb_voice_t *v = &x->v[vix];
         if (v->state==V_IDLE) continue;
         jb_update_crossring(x, vix);
@@ -2378,7 +2421,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     // constants
 
     // Process per-voice, sample-major so feedback uses only a 2-sample delay (no block latency)
-    for(int vix=0; vix<x->max_voices; ++vix){
+    for(int vix=0; vix<x->total_voices; ++vix){
         jb_voice_t *v = &x->v[vix];
         if (v->state==V_IDLE) continue;
 
@@ -3134,7 +3177,9 @@ static void juicy_bank_tilde_note(t_juicy_bank_tilde *x, t_floatarg f0, t_floata
 }
 static void juicy_bank_tilde_off(t_juicy_bank_tilde *x, t_floatarg f0){ jb_note_off(x, (f0<=0.f)?1.f:f0); }
 static void juicy_bank_tilde_voices(t_juicy_bank_tilde *x, t_floatarg nf){
-    (void)nf; x->max_voices = JB_MAX_VOICES; // fixed 4
+    (void)nf; x->max_voices = JB_ATTACK_VOICES;
+    x->total_voices = JB_MAX_VOICES;
+// fixed 4
 }
 
 static void juicy_bank_tilde_note_midi(t_juicy_bank_tilde *x, t_floatarg midi, t_floatarg vel){
