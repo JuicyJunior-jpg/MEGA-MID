@@ -265,7 +265,9 @@ typedef struct {
     float n;
 } jb_exc_pulse_t;
 
-static inline void jb_exc_pulse_trigger(jb_exc_pulse_t *p, float sr, float freq01, float vel){
+// NOTE: Velocity scaling is applied uniformly in jb_exc_process_sample()
+// so the impulse and noise branches share the same per-voice velocity->loudness law.
+static inline void jb_exc_pulse_trigger(jb_exc_pulse_t *p, float sr, float freq01){
     float t_short = 0.00015915f;
     float t_long  = 0.015915f;
     float tau2 = jb_exc_expmap01(1.f - jb_clamp(freq01,0.f,1.f), t_short, t_long);
@@ -276,7 +278,8 @@ static inline void jb_exc_pulse_trigger(jb_exc_pulse_t *p, float sr, float freq0
     p->a2 = 1.f/tau2 / sr;
     p->k2 = tau1 / tau2;
     float vol = 0.25f;
-    p->A  = vol * jb_clamp(vel,0.f,1.f);
+    // Keep impulse base level here; per-voice velocity is applied later in the shared exciter scaler.
+    p->A  = vol;
     int len = (int)(sr * (6.f * tau2));
     if (len < 16) len = 16;
     if (len > (int)(sr*0.05f)) len = (int)(sr*0.05f);
@@ -967,6 +970,12 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
         pL = wetL;
         pR = wetR;
     }
+
+    // Match the impulse branch to the same per-voice scaler used by the noise branch.
+    // This guarantees a consistent velocity->loudness relationship for the full exciter,
+    // and makes the impulse/noise crossfade behave predictably.
+    pL *= env * e->vel_on * e->gainL;
+    pR *= env * e->vel_on * e->gainR;
 
     // mix (fader crossfade between noise and impulse)
     *outL = w_noise * yL + w_imp * pL;
@@ -2224,8 +2233,8 @@ static inline void jb_exc_note_on(t_juicy_bank_tilde *x, jb_voice_t *v, float ve
         e->gainL = 1.f + 0.02f * jb_exc_noise_tpdf(&e->rngL);
         e->gainR = 1.f + 0.02f * jb_exc_noise_tpdf(&e->rngR);
 
-        jb_exc_pulse_trigger(&e->pulseL, x->sr, x->exc_freq_eff, e->vel_on);
-        jb_exc_pulse_trigger(&e->pulseR, x->sr, x->exc_freq_eff, e->vel_on);
+        jb_exc_pulse_trigger(&e->pulseL, x->sr, x->exc_freq_eff);
+        jb_exc_pulse_trigger(&e->pulseR, x->sr, x->exc_freq_eff);
     }else{
         jb_exc_adsr_note_off(&e->env);
     }
@@ -2295,7 +2304,8 @@ static void jb_note_on(t_juicy_bank_tilde *x, float f0, float vel){
     // Start (or restart) the attack voice immediately
     v->state = V_HELD;
     v->f0  = (f0<=0.f)?1.f:f0;
-    v->vel = jb_clamp(vel,0.f,1.f);
+    // Velocity is accepted as either 0..1 or MIDI 0..127, and always stored 0..1.
+    v->vel = jb_exc_midi_to_vel01(vel);
 
     jb_voice_reset_states(x, v, &x->rng);
     jb_project_behavior_into_voice(x, v);
@@ -2346,7 +2356,8 @@ static void jb_note_on_voice(t_juicy_bank_tilde *x, int vix1, float f0, float ve
     int idx = vix1 - 1;
 
     if (f0 <= 0.f) f0 = 1.f;
-    vel = jb_clamp(vel, 0.f, 1.f);
+    // Velocity is accepted as either 0..1 or MIDI 0..127.
+    vel = jb_exc_midi_to_vel01(vel);
 
     jb_voice_t *v = &x->v[idx];
 
