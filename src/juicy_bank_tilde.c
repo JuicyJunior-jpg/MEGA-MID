@@ -2317,15 +2317,47 @@ static void jb_note_off(t_juicy_bank_tilde *x, float f0){
 }
 
 // ===== Explicit voice-addressed control (for Pd [poly]) =====
+static inline void jb_migrate_to_tail_if_needed(t_juicy_bank_tilde *x, const jb_voice_t *src){
+    if (!x || !src) return;
+    if (src->state == V_IDLE) return;
+
+    int tidx = jb_find_idle_tail_voice(x);
+    if (tidx < 0) tidx = jb_find_quietest_tail_voice(x);
+    if (tidx < 0 || tidx >= x->total_voices) return;
+
+    jb_voice_t *t = &x->v[tidx];
+    *t = *src; // deep copy (struct contains full per-mode state)
+
+    // Convert copied voice to a natural NOTE-OFF release tail.
+    jb_exc_note_off(t);
+    jb_modenv_note_off(t);
+    t->state = V_RELEASE;
+
+    // Ensure tails are audible even if the stolen voice was already in release.
+    t->rel_env  = 1.f;
+    t->rel_env2 = 1.f;
+}
+
 static void jb_note_on_voice(t_juicy_bank_tilde *x, int vix1, float f0, float vel){
+    // This path is used by [note_poly]/[poly]-style voice addressing.
+    // We still want tail behavior here: stealing a busy attack voice migrates it into the tail pool.
     if (vix1 < 1) vix1 = 1;
     if (vix1 > x->max_voices) vix1 = x->max_voices;
     int idx = vix1 - 1;
+
     if (f0 <= 0.f) f0 = 1.f;
-    if (vel < 0.f) vel = 0.f;
-    if (vel > 1.f) vel = 1.f;
+    vel = jb_clamp(vel, 0.f, 1.f);
+
     jb_voice_t *v = &x->v[idx];
-    v->state = V_HELD; v->f0 = f0; v->vel = vel;
+
+    // If this voice is currently sounding, migrate it into a tail slot so it can ring out naturally.
+    jb_migrate_to_tail_if_needed(x, v);
+
+    // Start the new note immediately in the requested attack slot.
+    v->state = V_HELD;
+    v->f0 = f0;
+    v->vel = vel;
+
     jb_voice_reset_states(x, v, &x->rng);
     jb_project_behavior_into_voice(x, v);
     jb_project_behavior_into_voice2(x, v);
@@ -2334,21 +2366,54 @@ static void jb_note_on_voice(t_juicy_bank_tilde *x, int vix1, float f0, float ve
 }
 
 static void jb_note_off_voice(t_juicy_bank_tilde *x, int vix1){
+    // Voice-index only (legacy / hard off). Kept for off_poly.
     if (vix1 < 1) vix1 = 1;
     if (vix1 > x->max_voices) vix1 = x->max_voices;
     int idx = vix1 - 1;
-    if (x->v[idx].state != V_IDLE){ jb_exc_note_off(&x->v[idx]); jb_modenv_note_off(&x->v[idx]); x->v[idx].state = V_RELEASE; }
+    if (x->v[idx].state != V_IDLE){
+        jb_exc_note_off(&x->v[idx]);
+        jb_modenv_note_off(&x->v[idx]);
+        x->v[idx].state = V_RELEASE;
+    }
+}
+
+static void jb_note_off_voice_pitch(t_juicy_bank_tilde *x, int vix1, float f0){
+    // Safer NOTE-OFF for voice-addressed poly:
+    // Only releases if the pitch matches the current voice pitch (prevents old note-offs
+    // from killing a newer note after voice stealing).
+    if (vix1 < 1) vix1 = 1;
+    if (vix1 > x->max_voices) vix1 = x->max_voices;
+    int idx = vix1 - 1;
+
+    jb_voice_t *v = &x->v[idx];
+    if (v->state == V_IDLE) return;
+
+    if (f0 > 0.f && v->f0 > 0.f){
+        float ratio = v->f0 / f0;
+        if (ratio < 1.f) ratio = 1.f / ratio;
+
+        // ~20 cents tolerance
+        const float tol = 1.0116f;
+        if (ratio > tol){
+            return; // ignore mismatched note-off
+        }
+    }
+
+    jb_exc_note_off(v);
+    jb_modenv_note_off(v);
+    v->state = V_RELEASE;
 }
 
 // Message handlers (voice-addressed)
 static void juicy_bank_tilde_note_poly(t_juicy_bank_tilde *x, t_floatarg vix, t_floatarg f0, t_floatarg vel){
-    if (vel <= 0.f) { jb_note_off_voice(x, (int)vix); }
+    if (vel <= 0.f) { jb_note_off_voice_pitch(x, (int)vix, f0); }
     else            { jb_note_on_voice(x, (int)vix, f0, vel); }
 }
 
 static void juicy_bank_tilde_note_poly_midi(t_juicy_bank_tilde *x, t_floatarg vix, t_floatarg midi, t_floatarg vel){
-    if (vel <= 0.f) { jb_note_off_voice(x, (int)vix); }
-    else            { jb_note_on_voice(x, (int)vix, jb_midi_to_hz(midi), vel); }
+    float f0 = jb_midi_to_hz(midi);
+    if (vel <= 0.f) { jb_note_off_voice_pitch(x, (int)vix, f0); }
+    else            { jb_note_on_voice(x, (int)vix, f0, vel); }
 }
 
 static void juicy_bank_tilde_off_poly(t_juicy_bank_tilde *x, t_floatarg vix){
