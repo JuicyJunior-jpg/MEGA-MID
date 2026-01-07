@@ -2235,16 +2235,35 @@ static inline void jb_exc_note_off(jb_voice_t *v){
     jb_exc_adsr_note_off(&v->exc.env);
 }
 static int jb_find_idle_tail_voice(const t_juicy_bank_tilde *x){
-    for(int i=x->max_voices; i<x->total_voices; ++i){
+    if (!x) return -1;
+    int start = x->max_voices;
+    int end   = x->total_voices;
+    if (start < 0) start = 0;
+    if (start > JB_MAX_VOICES) start = JB_MAX_VOICES;
+    if (end < 0) end = 0;
+    if (end > JB_MAX_VOICES) end = JB_MAX_VOICES;
+    if (end <= start) return -1;
+
+    for(int i=start; i<end; ++i){
         if (x->v[i].state == V_IDLE) return i;
     }
     return -1;
 }
 static int jb_find_quietest_tail_voice(const t_juicy_bank_tilde *x){
-    int best = x->max_voices;
+    if (!x) return -1;
+    int start = x->max_voices;
+    int end   = x->total_voices;
+    if (start < 0) start = 0;
+    if (start > JB_MAX_VOICES) start = JB_MAX_VOICES;
+    if (end < 0) end = 0;
+    if (end > JB_MAX_VOICES) end = JB_MAX_VOICES;
+    if (end <= start) return -1;
+
+    int best = start;
     float bestE = 1e9f;
-    for(int i=x->max_voices; i<x->total_voices; ++i){
-        // Prefer stealing already-low-energy tails; if all idle, fall back to first tail slot
+
+    for(int i=start; i<end; ++i){
+        // Prefer stealing already-low-energy tails; if an idle slot exists, use it immediately.
         if (x->v[i].state == V_IDLE) return i;
         float e = x->v[i].energy;
         if (e < bestE){ bestE = e; best = i; }
@@ -3462,7 +3481,8 @@ x->geometry2      = x->geometry;
     x->basef0_ref=261.626f; // C4
     x->stiffen_amt=x->shortscale_amt=x->linger_amt=x->tilt_amt=x->bite_amt=x->bloom_amt=x->crossring_amt=0.f;
 
-    x->max_voices = JB_MAX_VOICES;
+    x->max_voices = JB_ATTACK_VOICES;
+    x->total_voices = JB_MAX_VOICES;
     for(int v=0; v<JB_MAX_VOICES; ++v){
         x->v[v].state=V_IDLE; x->v[v].f0=x->basef0_ref; x->v[v].vel=0.f; x->v[v].energy=0.f; x->v[v].rel_env=0.f; x->v[v].rel_env2=0.f; x->v[v].coup_b1_prevL=0.f; x->v[v].coup_b1_prevR=0.f; x->v[v].coup_b2_prevL=0.f; x->v[v].coup_b2_prevR=0.f;
         for(int i=0;i<JB_MAX_MODES;i++){
