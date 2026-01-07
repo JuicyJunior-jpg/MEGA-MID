@@ -66,51 +66,6 @@ static inline float jb_expmap01(float t, float lo, float hi){
     if (lo <= 0.f) return lo + t*(hi-lo);
     return lo * powf(hi/lo, t);
 }
-
-// dB helpers (sonically neutral; just mapping)
-static inline float jb_db_to_amp(float db){
-    return powf(10.f, db * (1.f/20.f));
-}
-
-// Velocity energy mapping: MIDI velocity (0..1) -> linear amp using a dB curve.
-// This affects ONLY energy/loudness (exciter injection), not timbre.
-// - vel=0   -> 0
-// - vel=1   -> 1
-// - curve:  vel^2 into [-50dB..0dB]
-static inline float jb_vel_to_amp(float vel01){
-    float v = jb_clamp(vel01, 0.f, 1.f);
-    if (v <= 0.f) return 0.f;
-    float u = v * v;               // energy curve
-    float db = -50.f + 50.f * u;   // -50..0 dB
-    return jb_db_to_amp(db);
-}
-
-// Master gain perceptual curve (0..1 knob -> linear amp)
-// - 0 -> 0 (true silence)
-// - 1 -> 1
-// - between: -60dB..0dB
-static inline float jb_master_curve(float u01){
-    float u = jb_clamp(u01, 0.f, 1.f);
-    if (u <= 0.f) return 0.f;
-    float db = -60.f + 60.f * u;
-    return jb_db_to_amp(db);
-}
-
-// One-pole block-rate smoothing coefficient for a given time constant (seconds).
-static inline float jb_smooth_coeff(float sr, int block_n, float tau_sec){
-    if (sr <= 0.f) sr = 48000.f;
-    if (block_n <= 0) block_n = 64;
-    if (tau_sec <= 0.f) return 1.f;
-    float x = -((float)block_n) / (sr * tau_sec);
-    // a = 1 - exp(-N/(sr*tau))
-    float a = 1.f - expf(x);
-    if (a < 0.f) a = 0.f; else if (a > 1.f) a = 1.f;
-    return a;
-}
-static inline void jb_smooth_step(float *z, float target, float a){
-    *z += a * (target - *z);
-}
-
 static inline float jb_slope_to_powerlaw(float slope01){
     float s = jb_clamp(slope01, 0.f, 1.f);
     // Anchor points:
@@ -577,35 +532,6 @@ float damping, brightness; float global_decay, slope;
     float offset_amt2;
     float collision_amt;
     float collision_amt2;
-
-    // --- 10ms parameter smoothing (block-rate) ---
-    // Targets are the original fields (e.g., damping/brightness/etc). These are the smoothed
-    // versions actually used by DSP to prevent zipper noise.
-    float smooth_a;               // smoothing coefficient for current block
-    float bank_master_s[2];       // smoothed per-bank master (0..1 UI domain)
-    float coupling_s;             // smoothed coupling (0..1)
-
-    // bank1 smoothed
-    float damping_s, brightness_s, global_decay_s, slope_s;
-    float density_amt_s;
-    float dispersion_s;
-    float offset_amt_s;
-    float collision_amt_s;
-    float stretch_s;
-    float warp_s;
-
-    // bank2 smoothed
-    float damping2_s, brightness2_s, global_decay2_s, slope2_s;
-    float density_amt2_s;
-    float dispersion2_s;
-    float offset_amt2_s;
-    float collision_amt2_s;
-    float stretch2_s;
-    float warp2_s;
-
-    // node/antinode spatial smoothed (per-bank)
-    float excite_pos_s,     pickup_pos_s,     pos_sharpness_s,     geometry_s;
-    float excite_pos2_s,    pickup_pos2_s,    pos_sharpness2_s,    geometry2_s;
 
     // realism/misc
     float phase_rand; int phase_debug;
@@ -2289,8 +2215,7 @@ static void jb_voice_panic_reset(t_juicy_bank_tilde *x, jb_voice_t *v){
 
 static inline void jb_exc_note_on(t_juicy_bank_tilde *x, jb_voice_t *v, float vel){
     jb_exc_voice_t *e = &v->exc;
-    // Velocity -> energy (dB curve)
-    e->vel_cur = jb_vel_to_amp(vel);
+    e->vel_cur = jb_clamp(vel, 0.f, 1.f);
     if (e->vel_cur > 0.f){
         e->vel_on = e->vel_cur;
         jb_exc_adsr_note_on(&e->env);
@@ -2548,7 +2473,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     jb_mod_adsr_update_block(x);
 
     const int topo = (int)jb_clamp(x->topology, 0.f, 3.f);
-    float coup = x->coupling_s;
+    float coup = jb_clamp(x->coupling, 0.f, 1.f);
     if (lfo1_out != 0.f && lfo1_tgt == gensym("coupling_amt")){
         coup = jb_clamp(coup + lfo1_out, 0.f, 1.f);
     }
@@ -2568,53 +2493,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     const float tail_energy_thresh = 1e-6f;
 
     // Per-block updates that don't change sample-phase
-    // 10ms parameter smoothing (block-rate, prevents zipper noise)
-    {
-        const float a_sm = jb_smooth_coeff(x->sr, n, 0.010f);
-        x->smooth_a = a_sm;
-
-        // global
-        jb_smooth_step(&x->coupling_s, jb_clamp(x->coupling, 0.f, 1.f), a_sm);
-
-        // master (UI domain 0..1; perceptual curve applied later)
-        jb_smooth_step(&x->bank_master_s[0], jb_clamp(x->bank_master[0], 0.f, 1.f), a_sm);
-        jb_smooth_step(&x->bank_master_s[1], jb_clamp(x->bank_master[1], 0.f, 1.f), a_sm);
-
-        // bank 1
-        jb_smooth_step(&x->damping_s,       jb_clamp(x->damping,       0.f, 1.f), a_sm);
-        jb_smooth_step(&x->brightness_s,    jb_clamp(x->brightness,   -1.f, 1.f), a_sm);
-        jb_smooth_step(&x->global_decay_s,  jb_clamp(x->global_decay,  0.f, 1.f), a_sm);
-        jb_smooth_step(&x->slope_s,         jb_clamp(x->slope,         0.f, 1.f), a_sm);
-        jb_smooth_step(&x->density_amt_s,   jb_clamp(x->density_amt,  -1.f, 5.f), a_sm);
-        jb_smooth_step(&x->dispersion_s,    jb_clamp(x->dispersion,   -1.f, 1.f), a_sm);
-        jb_smooth_step(&x->offset_amt_s,    jb_clamp(x->offset_amt,   -1.f, 1.f), a_sm);
-        jb_smooth_step(&x->collision_amt_s, jb_clamp(x->collision_amt, 0.f, 1.f), a_sm);
-        jb_smooth_step(&x->stretch_s,       jb_clamp(x->stretch,      -1.f, 1.f), a_sm);
-        jb_smooth_step(&x->warp_s,          jb_clamp(x->warp,         -1.f, 1.f), a_sm);
-
-        jb_smooth_step(&x->excite_pos_s,    jb_clamp(x->excite_pos,    0.f, 1.f), a_sm);
-        jb_smooth_step(&x->pickup_pos_s,    jb_clamp(x->pickup_pos,    0.f, 1.f), a_sm);
-        jb_smooth_step(&x->pos_sharpness_s, jb_clamp(x->pos_sharpness, 0.f, 5.f), a_sm);
-        jb_smooth_step(&x->geometry_s,      jb_clamp(x->geometry,     -1.f, 1.f), a_sm);
-
-        // bank 2
-        jb_smooth_step(&x->damping2_s,       jb_clamp(x->damping2,       0.f, 1.f), a_sm);
-        jb_smooth_step(&x->brightness2_s,    jb_clamp(x->brightness2,   -1.f, 1.f), a_sm);
-        jb_smooth_step(&x->global_decay2_s,  jb_clamp(x->global_decay2,  0.f, 1.f), a_sm);
-        jb_smooth_step(&x->slope2_s,         jb_clamp(x->slope2,         0.f, 1.f), a_sm);
-        jb_smooth_step(&x->density_amt2_s,   jb_clamp(x->density_amt2,  -1.f, 5.f), a_sm);
-        jb_smooth_step(&x->dispersion2_s,    jb_clamp(x->dispersion2,   -1.f, 1.f), a_sm);
-        jb_smooth_step(&x->offset_amt2_s,    jb_clamp(x->offset_amt2,   -1.f, 1.f), a_sm);
-        jb_smooth_step(&x->collision_amt2_s, jb_clamp(x->collision_amt2, 0.f, 1.f), a_sm);
-        jb_smooth_step(&x->stretch2_s,       jb_clamp(x->stretch2,      -1.f, 1.f), a_sm);
-        jb_smooth_step(&x->warp2_s,          jb_clamp(x->warp2,         -1.f, 1.f), a_sm);
-
-        jb_smooth_step(&x->excite_pos2_s,    jb_clamp(x->excite_pos2,    0.f, 1.f), a_sm);
-        jb_smooth_step(&x->pickup_pos2_s,    jb_clamp(x->pickup_pos2,    0.f, 1.f), a_sm);
-        jb_smooth_step(&x->pos_sharpness2_s, jb_clamp(x->pos_sharpness2, 0.f, 5.f), a_sm);
-        jb_smooth_step(&x->geometry2_s,      jb_clamp(x->geometry2,     -1.f, 1.f), a_sm);
-    }
-
     for(int vix=0; vix<x->total_voices; ++vix){
         jb_voice_t *v = &x->v[vix];
         if (v->state==V_IDLE) continue;
@@ -2644,8 +2522,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         float (*mm1)[JB_N_MODTGT] = x->mod_matrix;
         float (*mm2)[JB_N_MODTGT] = x->mod_matrix2;
 
-        float master_base1 = x->bank_master_s[0];
-        float master_base2 = x->bank_master_s[1];
+        float master_base1 = x->bank_master[0];
+        float master_base2 = x->bank_master[1];
 
         float master_mod1 = 0.f;
         float master_mod2 = 0.f;
@@ -2674,10 +2552,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 bank_gain2 = jb_clamp(bank_gain2 + lfo1_out, 0.f, 1.f);
             }
         }
-
-        // Master perceptual curve (0..1 -> dB -> linear amp)
-        float bank_gain1_lin = jb_master_curve(bank_gain1);
-        float bank_gain2_lin = jb_master_curve(bank_gain2);
 
         // --- pan modulation (target index 13 = "pan") ---
         float pan_mod1 = 0.f;
@@ -2777,8 +2651,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     float wR = sqrtf(0.5f*(1.f + p));
                     if (need_send2){ b2sendL += y_totalL * wL; b2sendR += y_totalR * wR; }
                     y_totalL *= v->rel_env2; y_totalR *= v->rel_env2;
-                    vOutL += y_totalL * wL * bank_gain2_lin;
-                    vOutR += y_totalR * wR * bank_gain2_lin;
+                    vOutL += y_totalL * wL * bank_gain2;
+                    vOutR += y_totalR * wR * bank_gain2;
 
                     md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
                     md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
@@ -2843,8 +2717,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     if (need_send1){ b1sendL += y_totalL * wL; b1sendR += y_totalR * wR; }
 
                     y_totalL *= v->rel_env; y_totalR *= v->rel_env;
-                    vOutL += y_totalL * wL * bank_gain1_lin;
-                    vOutR += y_totalR * wR * bank_gain1_lin;
+                    vOutL += y_totalL * wL * bank_gain1;
+                    vOutR += y_totalR * wR * bank_gain1;
 
                     md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
                     md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
@@ -3082,7 +2956,6 @@ static void juicy_bank_tilde_brightness(t_juicy_bank_tilde *x, t_floatarg f){
 static void juicy_bank_tilde_density(t_juicy_bank_tilde *x, t_floatarg f){
     float v = (float)f;
     if (v < -1.f) v = -1.f;
-    if (v >  5.f) v =  5.f;
     if (x->edit_bank) x->density_amt2 = v;
     else              x->density_amt  = v;
 }
@@ -3638,45 +3511,6 @@ x->excite_pos2    = x->excite_pos;
 x->pos_sharpness2 = x->pos_sharpness;
 x->pickup_pos2    = x->pickup_pos;
 x->geometry2      = x->geometry;
-
-// init smoothed parameters (start = target)
-x->smooth_a = 1.f;
-x->coupling_s = jb_clamp(x->coupling, 0.f, 1.f);
-
-x->bank_master_s[0] = jb_clamp(x->bank_master[0], 0.f, 1.f);
-x->bank_master_s[1] = jb_clamp(x->bank_master[1], 0.f, 1.f);
-
-x->damping_s       = jb_clamp(x->damping,       0.f, 1.f);
-x->brightness_s    = jb_clamp(x->brightness,   -1.f, 1.f);
-x->global_decay_s  = jb_clamp(x->global_decay,  0.f, 1.f);
-x->slope_s         = jb_clamp(x->slope,         0.f, 1.f);
-x->density_amt_s   = jb_clamp(x->density_amt,  -1.f, 5.f);
-x->dispersion_s    = jb_clamp(x->dispersion,   -1.f, 1.f);
-x->offset_amt_s    = jb_clamp(x->offset_amt,   -1.f, 1.f);
-x->collision_amt_s = jb_clamp(x->collision_amt, 0.f, 1.f);
-x->stretch_s       = jb_clamp(x->stretch,      -1.f, 1.f);
-x->warp_s          = jb_clamp(x->warp,         -1.f, 1.f);
-
-x->excite_pos_s    = jb_clamp(x->excite_pos,    0.f, 1.f);
-x->pickup_pos_s    = jb_clamp(x->pickup_pos,    0.f, 1.f);
-x->pos_sharpness_s = jb_clamp(x->pos_sharpness, 0.f, 5.f);
-x->geometry_s      = jb_clamp(x->geometry,     -1.f, 1.f);
-
-x->damping2_s       = jb_clamp(x->damping2,       0.f, 1.f);
-x->brightness2_s    = jb_clamp(x->brightness2,   -1.f, 1.f);
-x->global_decay2_s  = jb_clamp(x->global_decay2,  0.f, 1.f);
-x->slope2_s         = jb_clamp(x->slope2,         0.f, 1.f);
-x->density_amt2_s   = jb_clamp(x->density_amt2,  -1.f, 5.f);
-x->dispersion2_s    = jb_clamp(x->dispersion2,   -1.f, 1.f);
-x->offset_amt2_s    = jb_clamp(x->offset_amt2,   -1.f, 1.f);
-x->collision_amt2_s = jb_clamp(x->collision_amt2, 0.f, 1.f);
-x->stretch2_s       = jb_clamp(x->stretch2,      -1.f, 1.f);
-x->warp2_s          = jb_clamp(x->warp2,         -1.f, 1.f);
-
-x->excite_pos2_s    = jb_clamp(x->excite_pos2,    0.f, 1.f);
-x->pickup_pos2_s    = jb_clamp(x->pickup_pos2,    0.f, 1.f);
-x->pos_sharpness2_s = jb_clamp(x->pos_sharpness2, 0.f, 5.f);
-x->geometry2_s      = jb_clamp(x->geometry2,     -1.f, 1.f);
 
     // LFO + ADSR defaults
     x->lfo_shape = 1.f;   // default: shape 1 (for currently selected LFO)
