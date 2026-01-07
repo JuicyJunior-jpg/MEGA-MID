@@ -2421,6 +2421,11 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     float exc_w_noise = cosf(0.5f * (float)M_PI * exc_t);
     float exc_density   = jb_clamp(x->exc_density, 0.f, 1.f);
     float exc_diffusion = jb_clamp(x->exc_diffusion, 0.f, 1.f);
+    // Energy meter (per voice) used for voice stealing and tail cleanup.
+    // 50ms time constant -> responsive but stable.
+    const float a_energy = expf(-1.0f / (x->sr * 0.050f));
+    const float one_minus_a_energy = 1.f - a_energy;
+    const float tail_energy_thresh = 1e-6f;
 
     // Per-block updates that don't change sample-phase
     for(int vix=0; vix<x->total_voices; ++vix){
@@ -2673,18 +2678,41 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             outL[i] += vOutL;
             outR[i] += vOutR;
 
-            // per-sample release envelope update (decays in V_RELEASE, 20ms..5s)
+            // Energy meter (used for stealing + tail cleanup). Uses abs-sum with 50ms smoothing.
+            {
+                float e_in = fabsf(vOutL) + fabsf(vOutR);
+                if (!jb_isfinitef(e_in)) e_in = 0.f;
+                v->energy = jb_kill_denorm(a_energy * v->energy + one_minus_a_energy * e_in);
+            }
+
+            // Release handling:
+            // - Attack voices (0..max_voices-1): use the classic release_amt fade.
+            // - Tail voices (max_voices..total_voices-1): NO extra fade (natural decay); freed when silent.
             if (v->state == V_RELEASE){
-                float tau1 = 0.02f + 4.98f * jb_clamp(x->release_amt,  0.f, 1.f);
-                float tau2 = 0.02f + 4.98f * jb_clamp(x->release_amt2, 0.f, 1.f);
-                float a_rel1 = expf(-1.0f / (x->sr * tau1));
-                float a_rel2 = expf(-1.0f / (x->sr * tau2));
-                v->rel_env  *= a_rel1;
-                v->rel_env2 *= a_rel2;
-                if (v->rel_env  < 1e-5f) v->rel_env  = 0.f;
-                if (v->rel_env2 < 1e-5f) v->rel_env2 = 0.f;
-                if (v->rel_env == 0.f && v->rel_env2 == 0.f){
-                    v->state = V_IDLE;
+                const int is_tail = (vix >= x->max_voices);
+                if (is_tail){
+                    v->rel_env  = 1.f;
+                    v->rel_env2 = 1.f;
+
+                    // Free tail once the exciter is idle and output energy is essentially gone.
+                    if (v->exc.env.stage == JB_EXC_ENV_IDLE && v->mod_env_stage == 0 && v->energy < tail_energy_thresh){
+                        v->state = V_IDLE;
+                        v->energy = 0.f;
+                        v->coup_b1_prevL = v->coup_b1_prevR = 0.f;
+                        v->coup_b2_prevL = v->coup_b2_prevR = 0.f;
+                    }
+                } else {
+                    float tau1 = 0.02f + 4.98f * jb_clamp(x->release_amt,  0.f, 1.f);
+                    float tau2 = 0.02f + 4.98f * jb_clamp(x->release_amt2, 0.f, 1.f);
+                    float a_rel1 = expf(-1.0f / (x->sr * tau1));
+                    float a_rel2 = expf(-1.0f / (x->sr * tau2));
+                    v->rel_env  *= a_rel1;
+                    v->rel_env2 *= a_rel2;
+                    if (v->rel_env  < 1e-5f) v->rel_env  = 0.f;
+                    if (v->rel_env2 < 1e-5f) v->rel_env2 = 0.f;
+                    if (v->rel_env == 0.f && v->rel_env2 == 0.f){
+                        v->state = V_IDLE;
+                    }
                 }
             } else if (v->state == V_HELD) {
                 v->rel_env  = 1.f;
