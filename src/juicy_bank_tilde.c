@@ -1935,6 +1935,7 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
     float ratio_rel_sorted[JB_MAX_MODES];
     int   idx_sorted[JB_MAX_MODES];
     float order_t[JB_MAX_MODES];
+    float prepos_gain[JB_MAX_MODES];
     int   active_count = 0;
 
     // index-rank of each active mode (0..active_count_idx-1), in ascending index order
@@ -1944,6 +1945,7 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
     for (int i = 0; i < n_modes; ++i){
         order_t[i] = 0.f;
         rank_of_id[i] = -1;
+        prepos_gain[i] = 0.f;
         if (!base[i].active) continue;
         rank_of_id[i] = active_count_idx++;
 
@@ -2060,6 +2062,8 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
             gn_ref *= w_p;
 
         }
+        // RMS reference (pre spatial-coupling / nodes-antinodes)
+        prepos_gain[i] = gn;
 
                 // --- Spatial coupling (excite/pickup + geometry; gain-level only)
         {
@@ -2104,6 +2108,29 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
     if (norm < 0.f) norm = 0.f;
     for (int i = 0; i < n_modes; ++i){
         m[i].gain_now *= norm;
+        prepos_gain[i] *= norm; // keep RMS reference consistent
+    }
+
+    // RMS loudness compensation for nodes/antinodes (spatial coupling):
+    // Make the *post* spatial-coupling gains match the energy of the *pre* spatial-coupling gains.
+    // This stabilizes overall level while keeping the node/antinode spectral sculpting.
+    float sumsq_post = 0.f;
+    float sumsq_pre  = 0.f;
+    for (int i = 0; i < n_modes; ++i){
+        const float gs = m[i].gain_now;
+        const float gp = prepos_gain[i];
+        sumsq_post += gs * gs;
+        sumsq_pre  += gp * gp;
+    }
+
+    float rms_norm = (sumsq_post > 1e-12f) ? sqrtf(sumsq_pre / sumsq_post) : 1.f;
+
+    // Safety clamp: avoid extreme boosts when nearly all modes are cancelled.
+    if (rms_norm < 0.f) rms_norm = 0.f;
+    if (rms_norm > 4.f) rms_norm = 4.f;
+
+    for (int i = 0; i < n_modes; ++i){
+        m[i].gain_now *= rms_norm;
     }
 }
 
