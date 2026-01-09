@@ -397,7 +397,7 @@ typedef struct {
     // release envelope (global per-voice)
     float rel_env;
     // runtime per-mode
-    float ratio_now, decay_ms_now, gain_now;
+    float ratio_now, decay_ms_now, gain_nowL, gain_nowR;
     float t60_s;
 
     // per-ear per-hit randomizations
@@ -584,20 +584,29 @@ float damping, brightness; float global_decay, slope;
         // --- Spatial coupling (node/antinode; gain-level only) ---
     // excitation position, pickup position, and a geometry morph that blends:
     //   closed/clamped (CC-like: sin)  <->  open/free (OO-like: cos)
-    float excite_pos;     // 0..1
-    float pos_sharpness;  // 0..5 (position coupling exponent; 0 disables)
-    float pickup_pos;     // 0..1
-    float geometry;       // -1..+1  (-1=closed, +1=open)
+    float excite_pos;      // 0..1
+    float excite_width;    // 0..1 (0=point, 1=full-length average)
+    float pos_sharpness;   // 0..5 (position coupling exponent; 0 disables)
+    float pickup_posL;     // 0..1
+    float pickup_posR;     // 0..1
+    float pickup_width;    // 0..1 (0=point, 1=full-length average)
+    float geometry;        // -1..+1  (-1=closed, +1=open)
 
-    float excite_pos2;    // bank2
-    float pos_sharpness2; // bank2
-    float pickup_pos2;    // bank2
-    float geometry2;      // bank2
+    float excite_pos2;      // bank2
+    float excite_width2;    // bank2
+    float pos_sharpness2;   // bank2
+    float pickup_posL2;     // bank2
+    float pickup_posR2;     // bank2
+    float pickup_width2;    // bank2
+    float geometry2;        // bank2
 
     // inlet pointers for the above (placed after collision, before partials)
     t_inlet *in_position;
+    t_inlet *in_excite_width;
     t_inlet *in_pos_sharpness;
-    t_inlet *in_pickup;
+    t_inlet *in_pickupL;
+    t_inlet *in_pickupR;
+    t_inlet *in_pickup_width;
     t_inlet *in_geometry;
 
     // --- LFO globals (for modulation matrix UI) ---
@@ -1149,17 +1158,53 @@ static inline float jb_bank_crossring_amt(const t_juicy_bank_tilde *x, int bank)
 static inline float jb_bank_excite_pos(const t_juicy_bank_tilde *x, int bank){
     return bank ? x->excite_pos2 : x->excite_pos;
 }
+static inline float jb_bank_excite_width(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->excite_width2 : x->excite_width;
+}
 static inline float jb_bank_pos_sharpness(const t_juicy_bank_tilde *x, int bank){
     return bank ? x->pos_sharpness2 : x->pos_sharpness;
 }
-static inline float jb_bank_pickup_pos(const t_juicy_bank_tilde *x, int bank){
-    return bank ? x->pickup_pos2 : x->pickup_pos;
+static inline float jb_bank_pickup_posL(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->pickup_posL2 : x->pickup_posL;
+}
+static inline float jb_bank_pickup_posR(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->pickup_posR2 : x->pickup_posR;
+}
+static inline float jb_bank_pickup_width(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->pickup_width2 : x->pickup_width;
 }
 static inline float jb_bank_geometry(const t_juicy_bank_tilde *x, int bank){
     return bank ? x->geometry2 : x->geometry;
-}
-static inline float (*jb_bank_mod_matrix(t_juicy_bank_tilde *x, int bank))[JB_N_MODTGT]{
+}static inline float (*jb_bank_mod_matrix(t_juicy_bank_tilde *x, int bank))[JB_N_MODTGT]{
     return bank ? x->mod_matrix2 : x->mod_matrix;
+}
+
+
+static inline float jb_spatial_avg_sin(float ang, float x, float w){
+    if (w <= 0.f) return sinf(ang * x);
+    float a = x - 0.5f * w;
+    float b = x + 0.5f * w;
+    if (a < 0.f) a = 0.f;
+    if (b > 1.f) b = 1.f;
+    float ww = b - a;
+    if (ww <= 1e-6f || fabsf(ang) <= 1e-6f) return sinf(ang * x);
+    return (cosf(ang * a) - cosf(ang * b)) / (ang * ww);
+}
+static inline float jb_spatial_avg_cos(float ang, float x, float w){
+    if (w <= 0.f) return cosf(ang * x);
+    float a = x - 0.5f * w;
+    float b = x + 0.5f * w;
+    if (a < 0.f) a = 0.f;
+    if (b > 1.f) b = 1.f;
+    float ww = b - a;
+    if (ww <= 1e-6f || fabsf(ang) <= 1e-6f) return cosf(ang * x);
+    return (sinf(ang * b) - sinf(ang * a)) / (ang * ww);
+}
+static inline float jb_spatial_phi(float ang, float x, float w, float open){
+    // open: 0=closed/clamped (sin), 1=open/free (cos)
+    const float s = jb_spatial_avg_sin(ang, x, w);
+    const float c = jb_spatial_avg_cos(ang, x, w);
+    return (1.f - open) * s + open * c;
 }
 
 // ---------- generic bank-safe transforms on ratio_now ----------
@@ -1935,7 +1980,6 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
     float ratio_rel_sorted[JB_MAX_MODES];
     int   idx_sorted[JB_MAX_MODES];
     float order_t[JB_MAX_MODES];
-    float prepos_gain[JB_MAX_MODES];
     int   active_count = 0;
 
     // index-rank of each active mode (0..active_count_idx-1), in ascending index order
@@ -1945,7 +1989,6 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
     for (int i = 0; i < n_modes; ++i){
         order_t[i] = 0.f;
         rank_of_id[i] = -1;
-        prepos_gain[i] = 0.f;
         if (!base[i].active) continue;
         rank_of_id[i] = active_count_idx++;
 
@@ -2009,7 +2052,8 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
 
     for(int i = 0; i < n_modes; ++i){
         if(!base[i].active){
-            m[i].gain_now = 0.f;
+            m[i].gain_nowL = 0.f;
+            m[i].gain_nowR = 0.f;
             continue;
         }
 
@@ -2062,75 +2106,77 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
             gn_ref *= w_p;
 
         }
-        // RMS reference (pre spatial-coupling / nodes-antinodes)
-        prepos_gain[i] = gn;
 
                 // --- Spatial coupling (excite/pickup + geometry; gain-level only)
+        float gnL = gn, gnR = gn;
+        float gn_refL = gn_ref, gn_refR = gn_ref;
         {
+            // Fractional-k method: spatial mode index is derived from relative frequency (k_eff = freq / f0).
+            // This keeps node/antinode behavior stable even when the user edits ratios/spectra.
             const int r = rank_of_id[i];
             if (r >= 0){
-                const int k = r + 1; // modal index (1..N across active modes)
-                float xe = jb_clamp(jb_bank_excite_pos(x, bank), 0.f, 1.f);
-                float xp = jb_clamp(jb_bank_pickup_pos(x, bank), 0.f, 1.f);
-                float gg = jb_clamp(jb_bank_geometry(x, bank), -1.f, 1.f);
+                float k_eff = ratio_rel;
+                if (k_eff < 1e-4f) k_eff = 1e-4f;
+
+                float xe  = jb_clamp(jb_bank_excite_pos(x, bank), 0.f, 1.f);
+                float xew = jb_clamp(jb_bank_excite_width(x, bank), 0.f, 1.f);
+                float xpL = jb_clamp(jb_bank_pickup_posL(x, bank), 0.f, 1.f);
+                float xpR = jb_clamp(jb_bank_pickup_posR(x, bank), 0.f, 1.f);
+                float xpw = jb_clamp(jb_bank_pickup_width(x, bank), 0.f, 1.f);
+                float gg  = jb_clamp(jb_bank_geometry(x, bank), -1.f, 1.f);
 
                 // geometry [-1..+1] : -1=closed (CC), +1=open (OO)
                 const float open = 0.5f * (gg + 1.f); // 0=closed, 1=open
 
-                // avoid exact endpoints to reduce accidental hard mutes at x=0/1
+                // avoid exact endpoints to reduce accidental hard mutes at x=0/1 when width=0
                 const float eps = 1e-4f;
-                if (xe < eps) xe = eps; else if (xe > 1.f - eps) xe = 1.f - eps;
-                if (xp < eps) xp = eps; else if (xp > 1.f - eps) xp = 1.f - eps;
+                if (xe  < eps) xe  = eps; else if (xe  > 1.f - eps) xe  = 1.f - eps;
+                if (xpL < eps) xpL = eps; else if (xpL > 1.f - eps) xpL = 1.f - eps;
+                if (xpR < eps) xpR = eps; else if (xpR > 1.f - eps) xpR = 1.f - eps;
 
-                const float ang = (float)M_PI * (float)k;
-                const float phi_e = (1.f - open) * sinf(ang * xe) + open * cosf(ang * xe);
-                const float phi_p = (1.f - open) * sinf(ang * xp) + open * cosf(ang * xp);
+                const float ang = (float)M_PI * k_eff;
 
-                const float w = fabsf(phi_e * phi_p);
+                // spatial eigenfunctions (averaged across width for realism + smoother control)
+                const float phi_e  = jb_spatial_phi(ang, xe,  xew, open);
+                const float phi_pL = jb_spatial_phi(ang, xpL, xpw, open);
+                const float phi_pR = jb_spatial_phi(ang, xpR, xpw, open);
+
+                // Signed coupling enables polarity / phase inversions at nodes (no more "always positive").
+                const float w_rawL = phi_e * phi_pL;
+                const float w_rawR = phi_e * phi_pR;
+
                 float sh = jb_clamp(jb_bank_pos_sharpness(x, bank), 0.f, 5.f);
-                float wsh;
-                if (sh <= 0.f) wsh = 1.f;
-                else           wsh = powf(w, sh);
-                gn *= wsh;
-                gn_ref *= wsh;
+
+                const float magL = fabsf(w_rawL);
+                const float magR = fabsf(w_rawR);
+                const float wshL = (sh <= 0.f) ? 1.f : powf(magL, sh);
+                const float wshR = (sh <= 0.f) ? 1.f : powf(magR, sh);
+
+                const float sgnL = (w_rawL < 0.f) ? -1.f : 1.f;
+                const float sgnR = (w_rawR < 0.f) ? -1.f : 1.f;
+
+                const float wL = sgnL * wshL;
+                const float wR = sgnR * wshR;
+
+                gnL     *= wL;
+                gnR     *= wR;
+                gn_refL *= wL;
+                gn_refR *= wR;
             }
         }
 
-        gn = (gn < 0.f) ? 0.f : gn;
-        gn_ref = (gn_ref < 0.f) ? 0.f : gn_ref;
-        m[i].gain_now = gn;
-        sum_gain += gn;
-        sum_ref  += gn_ref;
+        m[i].gain_nowL = gnL;
+        m[i].gain_nowR = gnR;
+        sum_gain += 0.5f * (fabsf(gnL) + fabsf(gnR));
+        sum_ref  += 0.5f * (fabsf(gn_refL) + fabsf(gn_refR));
     }
 
     // Apply normalization so brightness redistributes energy without changing overall level.
     float norm = (sum_gain > 1e-12f) ? (sum_ref / sum_gain) : 1.f;
     if (norm < 0.f) norm = 0.f;
     for (int i = 0; i < n_modes; ++i){
-        m[i].gain_now *= norm;
-        prepos_gain[i] *= norm; // keep RMS reference consistent
-    }
-
-    // RMS loudness compensation for nodes/antinodes (spatial coupling):
-    // Make the *post* spatial-coupling gains match the energy of the *pre* spatial-coupling gains.
-    // This stabilizes overall level while keeping the node/antinode spectral sculpting.
-    float sumsq_post = 0.f;
-    float sumsq_pre  = 0.f;
-    for (int i = 0; i < n_modes; ++i){
-        const float gs = m[i].gain_now;
-        const float gp = prepos_gain[i];
-        sumsq_post += gs * gs;
-        sumsq_pre  += gp * gp;
-    }
-
-    float rms_norm = (sumsq_post > 1e-12f) ? sqrtf(sumsq_pre / sumsq_post) : 1.f;
-
-    // Safety clamp: avoid extreme boosts when nearly all modes are cancelled.
-    if (rms_norm < 0.f) rms_norm = 0.f;
-    if (rms_norm > 4.f) rms_norm = 4.f;
-
-    for (int i = 0; i < n_modes; ++i){
-        m[i].gain_now *= rms_norm;
+        m[i].gain_nowL *= norm;
+        m[i].gain_nowR *= norm;
     }
 }
 
@@ -2157,7 +2203,7 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
         jb_mode_rt_t *md=&v->m[i];
         md->ratio_now = x->base[i].base_ratio;
         md->decay_ms_now = x->base[i].base_decay_ms;
-        md->gain_now = x->base[i].base_gain;
+        md->gain_nowL = x->base[i].base_gain; md->gain_nowR = x->base[i].base_gain;
         md->t60_s = md->decay_ms_now*0.001f;
         md->a1L=md->a2L=md->y1L=md->y2L=0.f; md->a1bL=md->a2bL=md->y1bL=md->y2bL=0.f;
         md->a1R=md->a2R=md->y1R=md->y2R=0.f; md->a1bR=md->a2bR=md->y1bR=md->y2bR=0.f;
@@ -2179,7 +2225,7 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
         jb_mode_rt_t *md=&v->m2[i];
         md->ratio_now = x->base2[i].base_ratio;
         md->decay_ms_now = x->base2[i].base_decay_ms;
-        md->gain_now = x->base2[i].base_gain;
+        md->gain_nowL = x->base2[i].base_gain; md->gain_nowR = x->base2[i].base_gain;
         md->t60_s = md->decay_ms_now*0.001f;
         md->a1L=md->a2L=md->y1L=md->y2L=0.f; md->a1bL=md->a2bL=md->y1bL=md->y2bL=0.f;
         md->a1R=md->a2R=md->y1R=md->y2R=0.f; md->a1bR=md->a2bR=md->y1bR=md->y2bR=0.f;
@@ -2653,12 +2699,14 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 for(int m=0;m<x->n_modes2;m++){
                     if(!base2[m].active) continue;
                     jb_mode_rt_t *md=&v->m2[m];
-                    if (md->gain_now<=0.f || md->nyq_kill) continue;
+                    float gL = md->gain_nowL;
+                    float gR = md->gain_nowR;
+                    if ((fabsf(gL) + fabsf(gR)) <= 0.f || md->nyq_kill) continue;
 
                     float y1L=md->y1L, y2L=md->y2L, y1bL=md->y1bL, y2bL=md->y2bL, driveL=md->driveL, envL=md->envL;
                     float y1R=md->y1R, y2R=md->y2R, y1bR=md->y1bR, y2bR=md->y2bR, driveR=md->driveR, envR=md->envR;                    float att_a = 1.f;
-                    float excL = exL * md->gain_now;
-                    float excR = exR * md->gain_now;
+                    float excL = exL * gL;
+                    float excR = exR * gR;
 
                     driveL += att_a*(excL - driveL);
                     float y_linL = (md->a1L*y1L + md->a2L*y2L) + driveL * md->normL;
@@ -2717,12 +2765,14 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 for(int m=0;m<x->n_modes;m++){
                     if(!base1[m].active) continue;
                     jb_mode_rt_t *md=&v->m[m];
-                    if (md->gain_now<=0.f || md->nyq_kill) continue;
+                    float gL = md->gain_nowL;
+                    float gR = md->gain_nowR;
+                    if ((fabsf(gL) + fabsf(gR)) <= 0.f || md->nyq_kill) continue;
 
                     float y1L=md->y1L, y2L=md->y2L, y1bL=md->y1bL, y2bL=md->y2bL, driveL=md->driveL, envL=md->envL;
                     float y1R=md->y1R, y2R=md->y2R, y1bR=md->y1bR, y2bR=md->y2bR, driveR=md->driveR, envR=md->envR;                    float att_a = 1.f;
-                    float excL = exL * md->gain_now;
-                    float excR = exR * md->gain_now;
+                    float excL = exL * gL;
+                    float excR = exR * gR;
 
                     driveL += att_a*(excL - driveL);
                     float y_linL = (md->a1L*y1L + md->a2L*y2L) + driveL * md->normL;
@@ -3036,17 +3086,43 @@ static void juicy_bank_tilde_position(t_juicy_bank_tilde *x, t_floatarg f){
     if (x->edit_bank) x->excite_pos2 = v;
     else              x->excite_pos  = v;
 }
+
+static void juicy_bank_tilde_excite_width(t_juicy_bank_tilde *x, t_floatarg f){
+    // excitation contact width along the 1D object (0..1). 0 = point, 1 = full-length average.
+    float v = jb_clamp(f, 0.f, 1.f);
+    if (x->edit_bank) x->excite_width2 = v;
+    else              x->excite_width  = v;
+}
 static void juicy_bank_tilde_pos_sharpness(t_juicy_bank_tilde *x, t_floatarg f){
     // Position/pickup sharpness exponent (0..5). 0 disables spatial coupling.
     float v = jb_clamp(f, 0.f, 5.f);
     if (x->edit_bank) x->pos_sharpness2 = v;
     else              x->pos_sharpness  = v;
 }
-static void juicy_bank_tilde_pickup(t_juicy_bank_tilde *x, t_floatarg f){
-    // pickup/mic position along the 1D object (0..1)
+
+static void juicy_bank_tilde_pickupL(t_juicy_bank_tilde *x, t_floatarg f){
+    // pickup/mic LEFT position along the 1D object (0..1)
     float v = jb_clamp(f, 0.f, 1.f);
-    if (x->edit_bank) x->pickup_pos2 = v;
-    else              x->pickup_pos  = v;
+    if (x->edit_bank) x->pickup_posL2 = v;
+    else              x->pickup_posL  = v;
+}
+static void juicy_bank_tilde_pickupR(t_juicy_bank_tilde *x, t_floatarg f){
+    // pickup/mic RIGHT position along the 1D object (0..1)
+    float v = jb_clamp(f, 0.f, 1.f);
+    if (x->edit_bank) x->pickup_posR2 = v;
+    else              x->pickup_posR  = v;
+}
+static void juicy_bank_tilde_pickup_width(t_juicy_bank_tilde *x, t_floatarg f){
+    // pickup/mic contact width (0..1). 0 = point, 1 = full-length average.
+    float v = jb_clamp(f, 0.f, 1.f);
+    if (x->edit_bank) x->pickup_width2 = v;
+    else              x->pickup_width  = v;
+}
+static void juicy_bank_tilde_pickup(t_juicy_bank_tilde *x, t_floatarg f){
+    // legacy: set BOTH pickup positions (L and R) along the 1D object (0..1)
+    float v = jb_clamp(f, 0.f, 1.f);
+    if (x->edit_bank){ x->pickup_posL2 = v; x->pickup_posR2 = v; }
+    else             { x->pickup_posL  = v; x->pickup_posR  = v; }
 }
 static void juicy_bank_tilde_geometry(t_juicy_bank_tilde *x, t_floatarg f){
     // geometry/boundary morph (-1..+1):
@@ -3394,9 +3470,13 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
     inlet_free(x->in_offset);
     inlet_free(x->in_collision);
 
-            inlet_free(x->in_stretch);    inlet_free(x->in_position);
+            inlet_free(x->in_stretch);
+    inlet_free(x->in_position);
+    inlet_free(x->in_excite_width);
     inlet_free(x->in_pos_sharpness);
-    inlet_free(x->in_pickup);
+    inlet_free(x->in_pickupL);
+    inlet_free(x->in_pickupR);
+    inlet_free(x->in_pickup_width);
     inlet_free(x->in_geometry);
 inlet_free(x->in_partials); // free 'partials' inlet
 inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
@@ -3506,7 +3586,7 @@ static void *juicy_bank_tilde_new(void){
 // realism defaults
     x->phase_rand=1.f; x->phase_debug=0;
     x->bandwidth=0.1f; x->micro_detune=0.1f;
-    x->excite_pos=0.33f; x->pos_sharpness=2.f; x->pickup_pos=0.33f; x->geometry=-1.f;
+    x->excite_pos=0.33f; x->excite_width=0.f; x->pos_sharpness=2.f; x->pickup_posL=0.33f; x->pickup_posR=0.33f; x->pickup_width=0.f; x->geometry=-1.f;
 // bank 2 defaults: start as a functional copy of bank 1 (bank 2 is still silent by master=0)
 x->n_modes2 = x->n_modes;
 x->active_modes2 = x->active_modes;
@@ -3546,8 +3626,11 @@ x->bloom_amt2       = x->bloom_amt;
 x->crossring_amt2   = x->crossring_amt;
 
 x->excite_pos2    = x->excite_pos;
+x->excite_width2  = x->excite_width;
 x->pos_sharpness2 = x->pos_sharpness;
-x->pickup_pos2    = x->pickup_pos;
+x->pickup_posL2    = x->pickup_posL;
+x->pickup_posR2    = x->pickup_posR;
+x->pickup_width2   = x->pickup_width;
 x->geometry2      = x->geometry;
 
     // LFO + ADSR defaults
@@ -3664,10 +3747,13 @@ x->geometry2      = x->geometry;
     x->in_offset     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("offset"));
     x->in_collision  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("collision"));
     // Spatial coupling controls (node/antinode; gain-level only)
-    x->in_position  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("position")); // excitation pos 0..1
+    x->in_position      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("position"));      // excitation pos 0..1
+    x->in_excite_width  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("excite_width"));  // excitation width 0..1
     x->in_pos_sharpness = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("pos_sharpness")); // 0..5
-    x->in_pickup    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("pickup"));   // pickup pos 0..1
-    x->in_geometry  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("geometry")); // -1..+1 (closed..open)
+    x->in_pickupL       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("pickupL"));       // pickup L pos 0..1
+    x->in_pickupR       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("pickupR"));       // pickup R pos 0..1
+    x->in_pickup_width  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("pickup_width"));  // pickup width 0..1
+    x->in_geometry      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("geometry"));      // -1..+1 (closed..open)
 
 // Individual
 
@@ -4087,10 +4173,15 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_snapshot_undo
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_warp, gensym("warp"), A_FLOAT, 0);
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gensym("release"), A_DEFFLOAT, 0);
 // Spatial coupling methods (excite/pickup + geometry)
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_position, gensym("position"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pos_sharpness, gensym("pos_sharpness"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pickup,   gensym("pickup"),   A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_geometry, gensym("geometry"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_position,      gensym("position"),      A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_excite_width, gensym("excite_width"),  A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pos_sharpness,gensym("pos_sharpness"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pickupL,      gensym("pickupL"),       A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pickupR,      gensym("pickupR"),       A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pickup_width, gensym("pickup_width"),  A_DEFFLOAT, 0);
+    // legacy alias (sets both L and R)
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pickup,       gensym("pickup"),        A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_geometry,    gensym("geometry"),      A_DEFFLOAT, 0);
 
 // LFO + ADSR methods
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo_shape, gensym("lfo_shape"), A_DEFFLOAT, 0);
