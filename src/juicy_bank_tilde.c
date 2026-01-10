@@ -588,19 +588,19 @@ float damping, brightness; float global_decay, slope;
     // - Pickup remains 1D along x only (Elements-style): gp(rank) = sin((rank+1)*pi*mic_x)
     float excite_pos;       // 0..1 (strike X position)
     float excite_pos_y;     // 0..1 (strike Y position)
-    float pickup_posL;      // 0..1 (mic L position, X)
-    float pickup_posR;      // 0..1 (mic R position, X)
+    float pickup_x;      // 0..1 (mic X position)
+    float pickup_y;      // 0..1 (mic Y position)
 
     // Bank 2 (independent spatial positions)
     float excite_pos2;      // 0..1 (strike X position, bank2)
     float excite_pos_y2;    // 0..1 (strike Y position, bank2)
-    float pickup_posL2;     // 0..1 (mic L position, X, bank2)
-    float pickup_posR2;     // 0..1 (mic R position, X, bank2)
+    float pickup_x2;     // 0..1 (mic X position, bank2)
+    float pickup_y2;     // 0..1 (mic Y position, bank2)
     // inlet pointers for spatial position controls
     t_inlet *in_position;
     t_inlet *in_positionY;
-    t_inlet *in_pickupL;
-    t_inlet *in_pickupR;
+    t_inlet *in_pickupX;
+    t_inlet *in_pickupY;
 
     // --- LFO globals (for modulation matrix UI) ---
     // lfo_shape / lfo_rate / lfo_phase always reflect the *currently selected* LFO,
@@ -1177,10 +1177,10 @@ static inline void jb_rank_to_nm(int rank, int *nx, int *ny){
     }
 }
 static inline float jb_bank_pickup_posL(const t_juicy_bank_tilde *x, int bank){
-    return bank ? x->pickup_posL2 : x->pickup_posL;
+    return bank ? x->pickup_x2 : x->pickup_x;
 }
 static inline float jb_bank_pickup_posR(const t_juicy_bank_tilde *x, int bank){
-    return bank ? x->pickup_posR2 : x->pickup_posR;
+    return bank ? x->pickup_y2 : x->pickup_y;
 }
 
 static inline float (*jb_bank_mod_matrix(t_juicy_bank_tilde *x, int bank))[JB_N_MODTGT]{
@@ -2022,8 +2022,8 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
     // Elements-style position/pickup weighting uses pure mode index (n) after ordering by frequency.
     const float posx = jb_clamp(jb_bank_excite_pos(x, bank), 0.f, 1.f);
     float posy = jb_clamp(jb_bank_excite_pos_y(x, bank), 0.f, 1.f);
-    const float micL = jb_clamp(jb_bank_pickup_posL(x, bank), 0.f, 1.f);
-    const float micR = jb_clamp(jb_bank_pickup_posR(x, bank), 0.f, 1.f);
+    const float micX = jb_clamp(jb_bank_pickup_posL(x, bank), 0.f, 1.f);
+    const float micY = jb_clamp(jb_bank_pickup_posR(x, bank), 0.f, 1.f);
 
     float energy_pos = 0.f;
     const float PI   = (float)M_PI;
@@ -2122,14 +2122,13 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
                 jb_rank_to_nm(n, &nx, &ny);
                 const float ge  = (sinf((float)nx * PI * posx) * sinf((float)ny * PI * posy)) * pos_norm;
 
-                // Pickup (mic) reads displacement at the mic position:
-                const float gpL = sinf((float)(n + 1) * PI * micL);
-                const float gpR = sinf((float)(n + 1) * PI * micR);
+                // Pickup (mic) reads displacement at a single 2D mic position (X,Y).
+                // We keep one pickup point for both L/R outputs (no stereo mic spread here).
+                const float gp = sinf((float)nx * PI * micX) * sinf((float)ny * PI * micY);
 
-                const float wL = ge * gpL;
-                const float wR = ge * gpR;
-
-                gnL     *= wL;
+                const float wL = ge * gp;
+                const float wR = ge * gp;
+gnL     *= wL;
                 gnR     *= wR;
                 gn_refL *= wL;
                 gn_refR *= wR;
@@ -3070,22 +3069,22 @@ static void juicy_bank_tilde_position(t_juicy_bank_tilde *x, t_floatarg f){
 
 
 static void juicy_bank_tilde_pickupL(t_juicy_bank_tilde *x, t_floatarg f){
-    // pickup/mic LEFT position along the 1D object (0..1)
+    // pickup/mic X position along the 1D object (0..1)
     float v = jb_clamp(f, 0.f, 1.f);
-    if (x->edit_bank) x->pickup_posL2 = v;
-    else              x->pickup_posL  = v;
+    if (x->edit_bank) x->pickup_x2 = v;
+    else              x->pickup_x  = v;
 }
 static void juicy_bank_tilde_pickupR(t_juicy_bank_tilde *x, t_floatarg f){
-    // pickup/mic RIGHT position along the 1D object (0..1)
+    // pickup/mic Y position along the 1D object (0..1)
     float v = jb_clamp(f, 0.f, 1.f);
-    if (x->edit_bank) x->pickup_posR2 = v;
-    else              x->pickup_posR  = v;
+    if (x->edit_bank) x->pickup_y2 = v;
+    else              x->pickup_y  = v;
 }
 static void juicy_bank_tilde_pickup(t_juicy_bank_tilde *x, t_floatarg f){
-    // legacy: set BOTH pickup positions (L and R) along the 1D object (0..1)
+    // legacy: set BOTH pickup coordinates (X and Y) (0..1)
     float v = jb_clamp(f, 0.f, 1.f);
-    if (x->edit_bank){ x->pickup_posL2 = v; x->pickup_posR2 = v; }
-    else             { x->pickup_posL  = v; x->pickup_posR  = v; }
+    if (x->edit_bank){ x->pickup_x2 = v; x->pickup_y2 = v; }
+    else             { x->pickup_x  = v; x->pickup_y  = v; }
 }
 
 // --- LFO + ADSR param setters (for modulation matrix) ---
@@ -3427,8 +3426,8 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
 
             inlet_free(x->in_stretch);
     inlet_free(x->in_position);
-inlet_free(x->in_pickupL);
-    inlet_free(x->in_pickupR);
+inlet_free(x->in_pickupX);
+    inlet_free(x->in_pickupY);
 inlet_free(x->in_partials); // free 'partials' inlet
 inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     inlet_free(x->in_decay); inlet_free(x->in_keytrack);
@@ -3537,7 +3536,7 @@ static void *juicy_bank_tilde_new(void){
 // realism defaults
     x->phase_rand=1.f; x->phase_debug=0;
     x->bandwidth=0.1f; x->micro_detune=0.1f;
-    x->excite_pos=0.33f; x->excite_pos_y=0.33f; x->pickup_posL=0.33f; x->pickup_posR=0.33f;
+    x->excite_pos=0.33f; x->excite_pos_y=0.33f; x->pickup_x=0.33f; x->pickup_y=0.33f;
 // bank 2 defaults: start as a functional copy of bank 1 (bank 2 is still silent by master=0)
 x->n_modes2 = x->n_modes;
 x->active_modes2 = x->active_modes;
@@ -3578,8 +3577,8 @@ x->crossring_amt2   = x->crossring_amt;
 
 x->excite_pos2    = x->excite_pos;
 x->excite_pos_y2  = x->excite_pos_y;
-    x->pickup_posL2   = x->pickup_posL;
-    x->pickup_posR2   = x->pickup_posR;
+    x->pickup_x2   = x->pickup_x;
+    x->pickup_y2   = x->pickup_y;
 
     // LFO + ADSR defaults
     x->lfo_shape = 1.f;   // default: shape 1 (for currently selected LFO)
@@ -3699,8 +3698,8 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->in_positionY     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("position_y"));    // excitation Y pos 0..1
 // excitation width 0..1
 // 0..5
-    x->in_pickupL       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("pickupL"));       // pickup L pos 0..1
-    x->in_pickupR       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("pickupR"));       // pickup R pos 0..1
+    x->in_pickupX       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("pickup_x"));       // pickup X pos 0..1
+    x->in_pickupY       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("pickup_y"));       // pickup Y pos 0..1
 // pickup width 0..1
 // -1..+1 (closed..open)
 
@@ -4125,9 +4124,9 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gens
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_position,      gensym("position"),      A_DEFFLOAT, 0);
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_position_x,    gensym("position_x"),    A_DEFFLOAT, 0);
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_position_y,    gensym("position_y"),    A_DEFFLOAT, 0);
-class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pickupL,      gensym("pickupL"),       A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pickupR,      gensym("pickupR"),       A_DEFFLOAT, 0);
-// legacy alias (sets both L and R)
+class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pickupL,      gensym("pickup_x"),       A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pickupR,      gensym("pickup_y"),       A_DEFFLOAT, 0);
+// legacy alias (sets both X and Y)
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pickup,       gensym("pickup"),        A_DEFFLOAT, 0);
 // LFO + ADSR methods
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo_shape, gensym("lfo_shape"), A_DEFFLOAT, 0);
