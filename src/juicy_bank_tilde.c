@@ -114,8 +114,20 @@ static inline float jb_exc_expmap01(float t, float lo, float hi){
     return lo * powf(hi/lo, t);
 }
 static inline float jb_exc_midi_to_vel01(float v){
-    // accept either 0..1 or 0..127
-    if (v > 1.5f) return jb_clamp(v / 127.f, 0.f, 1.f);
+    // Accept either normalized 0..1 or MIDI-style 0..127.
+    // NOTE: MIDI velocities can be 1 or 2 (very soft) — do NOT treat those as "full scale".
+    if (v <= 0.f) return 0.f;
+
+    // If the value is (very nearly) an integer in the MIDI range, treat it as MIDI.
+    float vr = roundf(v);
+    if (fabsf(v - vr) < 1e-6f && vr >= 0.f && vr <= 127.f){
+        return jb_clamp(vr / 127.f, 0.f, 1.f);
+    }
+
+    // Otherwise, interpret values >1 as MIDI, <=1 as already-normalized.
+    if (v > 1.f){
+        return jb_clamp(v / 127.f, 0.f, 1.f);
+    }
     return jb_clamp(v, 0.f, 1.f);
 }
 
@@ -1430,9 +1442,9 @@ float *disp_last_p = jb_bank_dispersion_last(x, bank);
     if (*disp_last_p < 0.f){ *disp_last_p = -1.f; }
 
     for(int i=0;i<n_modes;i++){
-        if (!base[i].active || i==0){ disp_target_p[i]=0.f; continue; }
-        float sig = base[i].disp_signature;
-        disp_target_p[i] = jb_clamp(sig * total_disp, -1.f, 1.f);
+        // Quantize-only mode: we no longer apply dispersion-based random ratio offsets.
+        // Keep targets at 0 so disp_offset remains 0.
+        disp_target_p[i] = 0.f;
     }
 }
 static void jb_project_behavior_into_voice(t_juicy_bank_tilde *x, jb_voice_t *v){
@@ -1814,8 +1826,9 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
         }
 
         float ratio_base = md->ratio_now + disp_offset[i];
-        if (disp < 0.f){
-            float a = jb_clamp(-disp, 0.f, 1.f);
+        // Quantize: snap ratios toward whole integers (0..1).
+        if (disp > 0.f){
+            float a = jb_clamp(disp, 0.f, 1.f);
             float nearest = roundf(ratio_base);
             ratio_base = (1.f - a)*ratio_base + a*nearest;
         }
@@ -2813,28 +2826,34 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             // - Tail voices (max_voices..total_voices-1): NO extra fade (natural decay); freed when silent.
             if (v->state == V_RELEASE){
                 const int is_tail = (vix >= x->max_voices);
-                if (is_tail){
-                    v->rel_env  = 1.f;
-                    v->rel_env2 = 1.f;
 
-                    // Free tail once the exciter is idle and output energy is essentially gone.
+                // Apply release envelope to ALL voices (including tails), so the RELEASE control
+                // behaves consistently even during fast re-triggers that migrate voices into the tail pool.
+                float tau1 = 0.02f + 4.98f * jb_clamp(x->release_amt,  0.f, 1.f);
+                float tau2 = 0.02f + 4.98f * jb_clamp(x->release_amt2, 0.f, 1.f);
+                float a_rel1 = expf(-1.0f / (x->sr * tau1));
+                float a_rel2 = expf(-1.0f / (x->sr * tau2));
+
+                v->rel_env  *= a_rel1;
+                v->rel_env2 *= a_rel2;
+                if (v->rel_env  < 1e-5f) v->rel_env  = 0.f;
+                if (v->rel_env2 < 1e-5f) v->rel_env2 = 0.f;
+
+                // Fast path: if envelopes hit zero, free immediately.
+                if (v->rel_env == 0.f && v->rel_env2 == 0.f){
+                    v->state = V_IDLE;
+                    if (is_tail){
+                        v->energy = 0.f;
+                        v->coup_b1_prevL = v->coup_b1_prevR = 0.f;
+                        v->coup_b2_prevL = v->coup_b2_prevR = 0.f;
+                    }
+                } else if (is_tail){
+                    // Safety: also free a tail once the exciter + mod env are idle and output energy is gone.
                     if (v->exc.env.stage == JB_EXC_ENV_IDLE && v->mod_env_stage == 0 && v->energy < tail_energy_thresh){
                         v->state = V_IDLE;
                         v->energy = 0.f;
                         v->coup_b1_prevL = v->coup_b1_prevR = 0.f;
                         v->coup_b2_prevL = v->coup_b2_prevR = 0.f;
-                    }
-                } else {
-                    float tau1 = 0.02f + 4.98f * jb_clamp(x->release_amt,  0.f, 1.f);
-                    float tau2 = 0.02f + 4.98f * jb_clamp(x->release_amt2, 0.f, 1.f);
-                    float a_rel1 = expf(-1.0f / (x->sr * tau1));
-                    float a_rel2 = expf(-1.0f / (x->sr * tau2));
-                    v->rel_env  *= a_rel1;
-                    v->rel_env2 *= a_rel2;
-                    if (v->rel_env  < 1e-5f) v->rel_env  = 0.f;
-                    if (v->rel_env2 < 1e-5f) v->rel_env2 = 0.f;
-                    if (v->rel_env == 0.f && v->rel_env2 == 0.f){
-                        v->state = V_IDLE;
                     }
                 }
             } else if (v->state == V_HELD) {
@@ -3269,22 +3288,16 @@ static void juicy_bank_tilde_collision(t_juicy_bank_tilde *x, t_floatarg f){
 // dispersion & seeds
 
 static void juicy_bank_tilde_dispersion(t_juicy_bank_tilde *x, t_floatarg f){
-    float v = jb_clamp(f, -1.f, 1.f);
-    float pos = (v > 0.f) ? v : 0.f;
-
-    int *n_modes_p = x->edit_bank ? &x->n_modes2 : &x->n_modes;
-    jb_mode_base_t *base = x->edit_bank ? x->base2 : x->base;
-
-    float *last_p = x->edit_bank ? &x->dispersion_last2 : &x->dispersion_last;
-    float *disp_p = x->edit_bank ? &x->dispersion2      : &x->dispersion;
-
-    if (*last_p < 0.f || fabsf(pos - *last_p) > 1e-6f){
-        for(int i=0; i<*n_modes_p; i++){
-            base[i].disp_signature = (i==0) ? 0.f : jb_rng_bi(&x->rng);
-        }
-        *last_p = pos;
-    }
+    // Legacy name kept for backward compatibility.
+    // This parameter is now QUANTIZE: 0..1, snaps ratios toward whole integers.
+    float v = jb_clamp(f, 0.f, 1.f);
+    float *disp_p = x->edit_bank ? &x->dispersion2 : &x->dispersion;
     *disp_p = v;
+}
+
+static void juicy_bank_tilde_quantize(t_juicy_bank_tilde *x, t_floatarg f){
+    // Preferred name: quantize 0..1
+    juicy_bank_tilde_dispersion(x, f);
 }
 static void juicy_bank_tilde_seed(t_juicy_bank_tilde *x, t_floatarg f){
     int *n_modes_p = x->edit_bank ? &x->n_modes2 : &x->n_modes;
@@ -3690,7 +3703,7 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->in_density    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("density"));
     x->in_stretch    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("stretch"));
     x->in_warp       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("warp"));
-    x->in_dispersion = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("dispersion"));
+    x->in_dispersion = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("quantize"));
     x->in_offset     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("offset"));
     x->in_collision  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("collision"));
     // Spatial coupling controls (node/antinode; gain-level only)
@@ -4110,7 +4123,8 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_snapshot_undo
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_density, gensym("density"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_density_pivot, gensym("density_pivot"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_density_individual, gensym("density_individual"), 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_dispersion, gensym("dispersion"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_quantize, gensym("quantize"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_dispersion, gensym("dispersion"), A_DEFFLOAT, 0); // legacy alias
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_offset, gensym("offset"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_collision, gensym("collision"), A_DEFFLOAT, 0);
 
