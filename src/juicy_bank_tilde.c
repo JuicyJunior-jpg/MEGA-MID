@@ -586,9 +586,12 @@ float damping, brightness; float global_decay, slope;
     // Mode shapes are evaluated as sin((n+1)*pi*x) / cos(pi/2+(n+1)*pi*x) with signed polarity.
     float excite_pos;      // 0..1 (strike position)
     float pickup_posL;     // 0..1 (mic L position)
-    float pickup_posR;     // 0..1 (mic R position)    float excite_pos2;      // bank2
-    float pickup_posL2;     // bank2
-    float pickup_posR2;     // bank2
+    float pickup_posR;     // 0..1 (mic R position)
+
+    // Bank 2 (independent spatial positions)
+    float excite_pos2;     // 0..1 (strike position, bank2)
+    float pickup_posL2;    // 0..1 (mic L position, bank2)
+    float pickup_posR2;    // 0..1 (mic R position, bank2)
     // inlet pointers for spatial position controls
     t_inlet *in_position;
     t_inlet *in_pickupL;
