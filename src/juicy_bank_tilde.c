@@ -592,12 +592,12 @@ float damping, brightness; float global_decay, slope;
 // Body controls (damping, brightness, density, dispersion, anisotropy)
     t_inlet *in_damping, *in_global_decay, *in_slope, *in_brightness, *in_density, *in_stretch, *in_warp, *in_dispersion, *in_offset, *in_collision;
     // Individual
-    t_inlet *in_index, *in_ratio, *in_gain, *in_decay, *in_keytrack;
+    t_inlet *in_index, *in_ratio, *in_gain, *in_decay;
         // --- Spatial coupling (node/antinode; gain-level only) ---
     // Spatial excitation & pickup positions
     // - Excitation is 2D (x,y) using a simple membrane/plate-style shape product:
     //      ge(rank) = sin(nx*pi*x) * sin(ny*pi*y)    with (nx,ny) assigned per rank (diagonal mapping)
-    // - Pickup remains 1D along x only (Elements-style): gp(rank) = sin((rank+1)*pi*mic_x)
+    // - Pickup is also 2D at a single mic point (x,y): gp(rank) = sin(nx*pi*x) * sin(ny*pi*y)
     float excite_pos;       // 0..1 (strike X position)
     float excite_pos_y;     // 0..1 (strike Y position)
     float pickup_x;      // 0..1 (mic X position)
@@ -2048,6 +2048,17 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
     }
     const float pos_norm = 1.f / sqrtf(energy_pos + 1e-5f);
 
+    // Matching RSS normalization for pickup: keep output level stable as the mic point moves.
+    // (Signed gains preserved; only the overall energy is normalized.)
+    float energy_mic = 0.f;
+    for (int rank = 0; rank < active_count; ++rank){
+        int nx, ny;
+        jb_rank_to_nm(rank, &nx, &ny);
+        const float gp0 = sinf((float)nx * PI * micX) * sinf((float)ny * PI * micY);
+        energy_mic += gp0 * gp0;
+    }
+    const float mic_norm = 1.f / sqrtf(energy_mic + 1e-5f);
+
 
     float brightness_v = bank ? v->brightness_v2 : v->brightness_v;
 
@@ -2124,7 +2135,7 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
             gn_ref *= w_p;
 
         }
-        // --- Spatial coupling (2D excitation, 1D pickup; signed) ---
+        // --- Spatial coupling (2D excitation, 2D pickup; signed) ---
         float gnL = gn, gnR = gn;
         float gn_refL = gn_ref, gn_refR = gn_ref;
         {
@@ -2137,7 +2148,7 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
 
                 // Pickup (mic) reads displacement at a single 2D mic position (X,Y).
                 // We keep one pickup point for both L/R outputs (no stereo mic spread here).
-                const float gp = sinf((float)nx * PI * micX) * sinf((float)ny * PI * micY);
+                const float gp = (sinf((float)nx * PI * micX) * sinf((float)ny * PI * micY)) * mic_norm;
 
                 const float wL = ge * gp;
                 const float wR = ge * gp;
@@ -2966,15 +2977,6 @@ static void juicy_bank_tilde_decay_i(t_juicy_bank_tilde *x, t_floatarg ms){
     if (i < 0 || i >= *n_modes_p) return;
     base[i].base_decay_ms = (ms < 0.f) ? 0.f : ms;
 }
-static void juicy_bank_tilde_keytrack_i(t_juicy_bank_tilde *x, t_floatarg kt){
-    int *n_modes_p   = x->edit_bank ? &x->n_modes2  : &x->n_modes;
-    int *edit_idx_p  = x->edit_bank ? &x->edit_idx2 : &x->edit_idx;
-    jb_mode_base_t *base = x->edit_bank ? x->base2 : x->base;
-
-    int i = *edit_idx_p;
-    if (i < 0 || i >= *n_modes_p) return;
-    base[i].keytrack = (kt > 0.f) ? 1 : 0;
-}
 
 // Per-mode lists
 static void juicy_bank_tilde_freq(t_juicy_bank_tilde *x, t_symbol *s, int argc, t_atom *argv){
@@ -3439,11 +3441,12 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
 
             inlet_free(x->in_stretch);
     inlet_free(x->in_position);
+    inlet_free(x->in_positionY);
 inlet_free(x->in_pickupX);
     inlet_free(x->in_pickupY);
 inlet_free(x->in_partials); // free 'partials' inlet
 inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
-    inlet_free(x->in_decay); inlet_free(x->in_keytrack);
+    inlet_free(x->in_decay);
 
     // Internal exciter inlets (Fusion STEP 1)
     if (x->in_exc_fader) inlet_free(x->in_exc_fader);
@@ -3734,9 +3737,7 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->in_ratio      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("ratio"));
     x->in_gain       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("gain"));
     x->in_decay      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("decay"));   // alias of decay
-    x->in_keytrack   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("keytrack"));
-
-    // Internal EXCITER params (12 inlets, left->right like juicy_exciter~ v2.3)
+// Internal EXCITER params (12 inlets, left->right like juicy_exciter~ v2.3)
     // NOTE: These are simple float inlets bound directly to x->exc_* fields.
     x->in_exc_fader         = floatinlet_new(&x->x_obj, &x->exc_fader);
 
@@ -4160,9 +4161,7 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pickupL,     
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_gain_i, gensym("gain"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_decay_i, gensym("decay"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_decay_i, gensym("decya"), A_DEFFLOAT, 0); // alias
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_keytrack_i, gensym("keytrack"), A_DEFFLOAT, 0);
-
-    // Lists & misc
+// Lists & misc
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_modes, gensym("modes"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_active, gensym("active"), A_DEFFLOAT, A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_freq, gensym("freq"), A_GIMME, 0);
