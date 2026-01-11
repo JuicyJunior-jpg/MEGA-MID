@@ -279,31 +279,17 @@ typedef struct {
 
 // NOTE: Velocity scaling is applied uniformly in jb_exc_process_sample()
 // so the impulse and noise branches share the same per-voice velocity->loudness law.
-static inline void jb_exc_pulse_trigger(jb_exc_pulse_t *p, float sr, float freq01){
-    float t_short = 0.00015915f;
-    float t_long  = 0.015915f;
-    float tau2 = jb_exc_expmap01(1.f - jb_clamp(freq01,0.f,1.f), t_short, t_long);
-    float hard01 = 0.5f;
-    float tau1 = tau2 * (0.35f - 0.25f*jb_clamp(hard01,0.f,1.f));
-    if (tau1 < 0.0002f) tau1 = 0.0002f;
-    p->a1 = 1.f/tau1 / sr;
-    p->a2 = 1.f/tau2 / sr;
-    p->k2 = tau1 / tau2;
-    float vol = 0.25f;
-    // Keep impulse base level here; per-voice velocity is applied later in the shared exciter scaler.
-    p->A  = vol;
-    int len = (int)(sr * (6.f * tau2));
-    if (len < 16) len = 16;
-    if (len > (int)(sr*0.05f)) len = (int)(sr*0.05f);
-    p->samples_left = len;
+static inline void jb_exc_pulse_trigger(jb_exc_pulse_t *p){
+    // Mathematically-correct impulse (delta): one sample with unit amplitude.
+    // Any overall strike strength is applied later via per-voice velocity and gain scaling.
+    p->A = 1.0f;
+    p->samples_left = 1;
     p->n = 0.f;
 }
 static inline float jb_exc_pulse_next(jb_exc_pulse_t *p){
     if (p->samples_left <= 0) return 0.f;
-    float y = p->A * (expf(-p->n * p->a1) - p->k2 * expf(-p->n * p->a2));
-    p->n += 1.f;
     p->samples_left--;
-    return y;
+    return p->A;
 }
 
 // Per-voice exciter runtime state (stereo)
@@ -315,6 +301,9 @@ typedef struct {
 
     jb_exc_hp1_t hpL, hpR;
     jb_exc_lp1_t lpL, lpR;
+    // Separate filter states for impulse branch (so it can be shaped identically to noise)
+    jb_exc_hp1_t hpImpL, hpImpR;
+    jb_exc_lp1_t lpImpL, lpImpR;
 
     jb_exc_adsr_t env;
     jb_exc_pulse_t pulseL, pulseR;
@@ -353,6 +342,11 @@ static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long se
     jb_exc_hp1_set(&v->hpR, sr, 0.f);
     jb_exc_lp1_set(&v->lpL, sr, 0.f);
     jb_exc_lp1_set(&v->lpR, sr, 0.f);
+    // impulse branch filters start identical but keep their own state
+    jb_exc_hp1_set(&v->hpImpL, sr, 0.f);
+    jb_exc_hp1_set(&v->hpImpR, sr, 0.f);
+    jb_exc_lp1_set(&v->lpImpL, sr, 0.f);
+    jb_exc_lp1_set(&v->lpImpR, sr, 0.f);
 
     v->gainL = 1.f;
     v->gainR = 1.f;
@@ -680,8 +674,7 @@ float damping, brightness; float global_decay, slope;
     float exc_decay_ms,  exc_decay_curve;
     float exc_sustain;
     float exc_release_ms, exc_release_curve;
-    float exc_density, exc_shape, exc_diffusion, exc_freq;
-    float exc_freq_eff; // effective impulse freq (after LFO1 mod), 0..1
+    float exc_density, exc_shape, exc_diffusion;
 
     // --- INTERNAL EXCITER inlets (created after keytrack, before LFO) ---
     t_inlet *in_exc_fader;
@@ -695,7 +688,6 @@ float damping, brightness; float global_decay, slope;
     t_inlet *in_exc_density;
     t_inlet *in_exc_shape;
     t_inlet *in_exc_diffusion;
-    t_inlet *in_exc_freq;
 
     // --- MOD SECTION inlets (targets/amounts; actual wiring added next step) ---
     t_inlet *in_lfo_index;
@@ -885,6 +877,11 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
         jb_exc_hp1_set(&e->hpR, sr, hp_hz);
         jb_exc_lp1_set(&e->lpL, sr, lp_hz);
         jb_exc_lp1_set(&e->lpR, sr, lp_hz);
+        // impulse branch uses the same cutoff but its own filter state
+        jb_exc_hp1_set(&e->hpImpL, sr, hp_hz);
+        jb_exc_hp1_set(&e->hpImpR, sr, hp_hz);
+        jb_exc_lp1_set(&e->lpImpL, sr, lp_hz);
+        jb_exc_lp1_set(&e->lpImpR, sr, lp_hz);
 
         // env
         e->env.curveA = aC;
@@ -1005,11 +1002,13 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
         pR = wetR;
     }
 
-    // Match the impulse branch to the same per-voice scaler used by the noise branch.
-    // This guarantees a consistent velocity->loudness relationship for the full exciter,
-    // and makes the impulse/noise crossfade behave predictably.
-    pL *= env * e->vel_on * e->gainL;
-    pR *= env * e->vel_on * e->gainR;
+    // Shape the impulse with the same HP/LP settings as noise (via separate filter state)
+    pL = jb_exc_lp1_run(&e->lpImpL, jb_exc_hp1_run(&e->hpImpL, pL));
+    pR = jb_exc_lp1_run(&e->lpImpR, jb_exc_hp1_run(&e->hpImpR, pR));
+
+    // Impulse is NOT governed by the exciter ADSR (noise is). We still scale by velocity and per-voice micro-variation.
+    pL *= e->vel_on * e->gainL;
+    pR *= e->vel_on * e->gainR;
 
     // --- Loudness matching: impulse branch gain follows noise branch (pre-resonator) ---
     // Track smoothed power for both branches (RMS follower) and set a smoothed
@@ -2357,8 +2356,8 @@ static inline void jb_exc_note_on(t_juicy_bank_tilde *x, jb_voice_t *v, float ve
         e->gainL = 1.f + 0.02f * jb_exc_noise_tpdf(&e->rngL);
         e->gainR = 1.f + 0.02f * jb_exc_noise_tpdf(&e->rngR);
 
-        jb_exc_pulse_trigger(&e->pulseL, x->sr, x->exc_freq_eff);
-        jb_exc_pulse_trigger(&e->pulseR, x->sr, x->exc_freq_eff);
+        jb_exc_pulse_trigger(&e->pulseL);
+        jb_exc_pulse_trigger(&e->pulseR);
     }else{
         jb_exc_adsr_note_off(&e->env);
     }
@@ -2599,8 +2598,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         x->exc_shape = jb_clamp(exc_shape_saved + lfo1_out, 0.f, 1.f);
     }
 
-    // LFO1 no longer modulates impulse frequency.
-    x->exc_freq_eff = jb_clamp(x->exc_freq, 0.f, 1.f);
+    // (Exciter has no impulse-frequency parameter.)
 
     // Internal exciter: update shared params -> per-voice filters + ADSR times/curves
     jb_exc_update_block(x);
@@ -3529,7 +3527,6 @@ inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     if (x->in_exc_density) inlet_free(x->in_exc_density);
     if (x->in_exc_shape) inlet_free(x->in_exc_shape);
     if (x->in_exc_diffusion) inlet_free(x->in_exc_diffusion);
-    if (x->in_exc_freq) inlet_free(x->in_exc_freq);
 
     // MOD SECTION inlets
     if (x->in_lfo_index) inlet_free(x->in_lfo_index);
@@ -3685,9 +3682,6 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->exc_shape     = 0.5f;
     x->exc_density   = 1.f;
     x->exc_diffusion = 0.f;
-    x->exc_freq      = 0.5f;
-
-        x->exc_freq_eff = x->exc_freq;
 // initialise per-LFO parameter and runtime state
     for (int li = 0; li < JB_N_LFO; ++li){
         x->lfo_shape_v[li]      = 1.f;
@@ -3824,10 +3818,9 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->in_exc_density       = floatinlet_new(&x->x_obj, &x->exc_density);
     x->in_exc_shape         = floatinlet_new(&x->x_obj, &x->exc_shape);
     x->in_exc_diffusion     = floatinlet_new(&x->x_obj, &x->exc_diffusion);
-    x->in_exc_freq          = floatinlet_new(&x->x_obj, &x->exc_freq);
 
     // LFO + ADSR inlets (for future modulation matrix)
-    // --- MOD SECTION (starts after exciter impulse freq inlet) ---
+    // --- MOD SECTION (starts after exciter controls) ---
     x->in_lfo_index  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_index"));
     x->in_lfo_shape  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_shape"));
     x->in_lfo_rate   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_rate"));
