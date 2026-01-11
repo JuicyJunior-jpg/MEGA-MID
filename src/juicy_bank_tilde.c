@@ -321,6 +321,13 @@ typedef struct {
 
     float gainL, gainR;
 
+    // Exciter branch loudness matching (noise vs impulse) - per voice.
+    // We track smoothed power (RMS follower) for each branch and apply
+    // a smoothed gain to the impulse branch so the exciter fader is fair.
+    float pwr_noise;
+    float pwr_imp;
+    float imp_match;
+
     int   particle_samples_left;
     float diff_bufL[JB_EXC_DIFF_LEN];
     float diff_bufR[JB_EXC_DIFF_LEN];
@@ -349,6 +356,12 @@ static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long se
 
     v->gainL = 1.f;
     v->gainR = 1.f;
+
+    // branch matching state
+    v->pwr_noise = 0.f;
+    v->pwr_imp   = 0.f;
+    v->imp_match = 1.f;
+
     v->diff_idx = 0;
     v->particle_samples_left = 0;
     memset(v->diff_bufL, 0, sizeof(v->diff_bufL));
@@ -371,6 +384,11 @@ static inline void jb_exc_voice_reset_runtime(jb_exc_voice_t *e){
     // pulses
     e->pulseL.samples_left = 0; e->pulseL.n = 0.f;
     e->pulseR.samples_left = 0; e->pulseR.n = 0.f;
+
+    // branch matching state
+    e->pwr_noise = 0.f;
+    e->pwr_imp   = 0.f;
+    e->imp_match = 1.f;
 
     // particle gating + diffusion
     e->particle_samples_left = 0;
@@ -916,6 +934,8 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
                                          jb_voice_t *v,
                                          float w_imp, float w_noise,
                                          float density, float diffusion,
+                                         float a_pwr, float one_minus_a_pwr,
+                                         float a_match, float one_minus_a_match,
                                          float *outL, float *outR)
 {
     jb_exc_voice_t *e = &v->exc;
@@ -990,6 +1010,43 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
     // and makes the impulse/noise crossfade behave predictably.
     pL *= env * e->vel_on * e->gainL;
     pR *= env * e->vel_on * e->gainR;
+
+    // --- Loudness matching: impulse branch gain follows noise branch (pre-resonator) ---
+    // Track smoothed power for both branches (RMS follower) and set a smoothed
+    // impulse gain so that RMS(impulse) ~= RMS(noise). This makes the fader feel fair.
+    {
+        // Branch power (mono) in the same domain we will inject into the resonator.
+        float p_noise = 0.5f * (yL*yL + yR*yR);
+        float p_imp   = 0.5f * (pL*pL + pR*pR);
+
+        // Smooth powers (one-pole)
+        e->pwr_noise = a_pwr * e->pwr_noise + one_minus_a_pwr * p_noise;
+        e->pwr_imp   = a_pwr * e->pwr_imp   + one_minus_a_pwr * p_imp;
+
+        // Convert to RMS for ratio. Add epsilon to avoid division by zero.
+        const float eps = 1e-12f;
+        float rms_noise = sqrtf(e->pwr_noise + eps);
+        float rms_imp   = sqrtf(e->pwr_imp   + eps);
+
+        // If impulse is effectively silent, don't chase the ratio (prevents runaway).
+        float target = e->imp_match;
+        if (rms_noise > 1e-7f && rms_imp > 1e-7f){
+            target = rms_noise / rms_imp;
+        }
+
+        // Clamp for safety (avoid huge boosts on sparse impulses)
+        const float kMin = 0.125f;
+        const float kMax = 8.0f;
+        if (target < kMin) target = kMin;
+        if (target > kMax) target = kMax;
+
+        // Smooth the gain itself (separate time-constant from RMS follower)
+        e->imp_match = a_match * e->imp_match + one_minus_a_match * target;
+
+        // Apply matched gain to impulse branch
+        pL *= e->imp_match;
+        pR *= e->imp_match;
+    }
 
     // mix (fader crossfade between noise and impulse)
     *outL = w_noise * yL + w_imp * pL;
@@ -2570,6 +2627,13 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     const float one_minus_a_energy = 1.f - a_energy;
     const float tail_energy_thresh = 1e-6f;
 
+    // Exciter loudness matching (noise vs impulse) is done pre-resonator.
+    // We use an RMS follower for each branch and then smooth the gain ratio.
+    const float a_exc_pwr = expf(-1.0f / (x->sr * 0.030f));   // 30ms power follower
+    const float one_minus_a_exc_pwr = 1.f - a_exc_pwr;
+    const float a_exc_match = expf(-1.0f / (x->sr * 0.100f)); // 100ms gain smoothing
+    const float one_minus_a_exc_match = 1.f - a_exc_match;
+
     // Per-block updates that don't change sample-phase
     for(int vix=0; vix<x->total_voices; ++vix){
         jb_voice_t *v = &x->v[vix];
@@ -2670,7 +2734,12 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
             // Internal exciter (stereo) — one sample per voice per frame
             float exL = 0.f, exR = 0.f;
-            jb_exc_process_sample(x, v, exc_w_imp, exc_w_noise, exc_density, exc_diffusion, &exL, &exR);
+            jb_exc_process_sample(x, v,
+                                 exc_w_imp, exc_w_noise,
+                                 exc_density, exc_diffusion,
+                                 a_exc_pwr, one_minus_a_exc_pwr,
+                                 a_exc_match, one_minus_a_exc_match,
+                                 &exL, &exR);
             exL = jb_kill_denorm(exL);
             exR = jb_kill_denorm(exR);
             if (!jb_isfinitef(exL) || !jb_isfinitef(exR)) { exL = 0.f; exR = 0.f; }
