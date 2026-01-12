@@ -676,6 +676,8 @@ float damping, brightness; float global_decay, slope;
     float exc_release_ms, exc_release_curve;
     float exc_density, exc_shape, exc_diffusion;
 
+    float noise_scale;   // user trim (linear amp), default 1.0
+    float impulse_scale; // user trim (linear amp), default 1.0
     // --- INTERNAL EXCITER inlets (created after keytrack, before LFO) ---
     t_inlet *in_exc_fader;
     t_inlet *in_exc_attack;
@@ -1048,8 +1050,8 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
     }
 
     // mix (fader crossfade between noise and impulse)
-    *outL = w_noise * yL + w_imp * pL;
-    *outR = w_noise * yR + w_imp * pR;
+    *outL = w_noise * (yL * x->noise_scale) + w_imp * (pL * x->impulse_scale);
+    *outR = w_noise * (yR * x->noise_scale) + w_imp * (pR * x->impulse_scale);
 }
 // ---------- helpers ----------
 static float jb_bright_gain(float ratio_rel, float b){
@@ -3682,6 +3684,8 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->exc_shape     = 0.5f;
     x->exc_density   = 1.f;
     x->exc_diffusion = 0.f;
+    x->noise_scale  = 1.f;
+    x->impulse_scale = 1.f;
 // initialise per-LFO parameter and runtime state
     for (int li = 0; li < JB_N_LFO; ++li){
         x->lfo_shape_v[li]      = 1.f;
@@ -3918,6 +3922,18 @@ static void juicy_bank_tilde_topology(t_juicy_bank_tilde *x, t_floatarg f){
 static void juicy_bank_tilde_coupling(t_juicy_bank_tilde *x, t_floatarg f){
     // 0..1 coupling strength (used when topology is 1/2/3; ignored in topology 0)
     x->coupling = jb_clamp(f, 0.f, 1.f);
+}
+
+// --- exciter trim (manual calibration) ---
+static void juicy_bank_tilde_noise_scale(t_juicy_bank_tilde *x, t_floatarg f){
+    // Linear amplitude trim for the noise exciter branch (pre-resonator). Default 1.0.
+    // Kept intentionally simple so you can find a sweet spot quickly.
+    x->noise_scale = jb_clamp(f, 0.f, 16.f);
+}
+
+static void juicy_bank_tilde_impulse_scale(t_juicy_bank_tilde *x, t_floatarg f){
+    // Linear amplitude trim for the impulse exciter branch (pre-resonator). Default 1.0.
+    x->impulse_scale = jb_clamp(f, 0.f, 16.f);
 }
 
 // master: per-bank output gain (0..1), written to selected bank
@@ -4259,6 +4275,8 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pickupL,     
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_preset_recall, gensym("recall"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_INIT, gensym("INIT"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_init_alias, gensym("init"), 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_noise_scale, gensym("noise_scale"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_impulse_scale, gensym("impulse_scale"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_partials, gensym("partials"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_master,   gensym("master"),   A_DEFFLOAT, 0);
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_octave,   gensym("octave"),   A_DEFFLOAT, 0);
