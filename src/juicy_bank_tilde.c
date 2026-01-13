@@ -676,8 +676,8 @@ float damping, brightness; float global_decay, slope;
     float exc_release_ms, exc_release_curve;
     float exc_density, exc_shape, exc_diffusion;
 
-    float noise_scale;   // user trim (linear amp), default 1.0
-    float impulse_scale; // user trim (linear amp), default 1.0
+    float noise_scale;   // factory trim (linear amp)
+    float impulse_scale; // factory trim (linear amp)
     // --- INTERNAL EXCITER inlets (created after keytrack, before LFO) ---
     t_inlet *in_exc_fader;
     t_inlet *in_exc_attack;
@@ -3684,8 +3684,8 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->exc_shape     = 0.5f;
     x->exc_density   = 1.f;
     x->exc_diffusion = 0.f;
-    x->noise_scale  = 1.f;
-    x->impulse_scale = 1.f;
+    x->noise_scale  = 0.4f; // factory sweetspot
+    x->impulse_scale = 10.f; // factory sweetspot
 // initialise per-LFO parameter and runtime state
     for (int li = 0; li < JB_N_LFO; ++li){
         x->lfo_shape_v[li]      = 1.f;
@@ -3924,17 +3924,6 @@ static void juicy_bank_tilde_coupling(t_juicy_bank_tilde *x, t_floatarg f){
     x->coupling = jb_clamp(f, 0.f, 1.f);
 }
 
-// --- exciter trim (manual calibration) ---
-static void juicy_bank_tilde_noise_scale(t_juicy_bank_tilde *x, t_floatarg f){
-    // Linear amplitude trim for the noise exciter branch (pre-resonator). Default 1.0.
-    // Kept intentionally simple so you can find a sweet spot quickly.
-    x->noise_scale = jb_clamp(f, 0.f, 16.f);
-}
-
-static void juicy_bank_tilde_impulse_scale(t_juicy_bank_tilde *x, t_floatarg f){
-    // Linear amplitude trim for the impulse exciter branch (pre-resonator). Default 1.0.
-    x->impulse_scale = jb_clamp(f, 0.f, 16.f);
-}
 
 // master: per-bank output gain (0..1), written to selected bank
 static void juicy_bank_tilde_master(t_juicy_bank_tilde *x, t_floatarg f){
@@ -4275,9 +4264,7 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pickupL,     
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_preset_recall, gensym("recall"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_INIT, gensym("INIT"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_init_alias, gensym("init"), 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_noise_scale, gensym("noise_scale"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_impulse_scale, gensym("impulse_scale"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_partials, gensym("partials"), A_DEFFLOAT, 0);
+class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_partials, gensym("partials"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_master,   gensym("master"),   A_DEFFLOAT, 0);
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_octave,   gensym("octave"),   A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_semitone, gensym("semitone"), A_DEFFLOAT, 0);
