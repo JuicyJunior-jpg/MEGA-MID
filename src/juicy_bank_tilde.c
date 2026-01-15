@@ -417,7 +417,11 @@ typedef struct {
 
 typedef struct {
     // runtime per-mode
-    float ratio_now, decay_ms_now, gain_nowL, gain_nowR;
+    float ratio_now, decay_ms_now;
+    // gain_now*: excitation coupling (b_k * ge). Applied to exciter signal before modal update.
+    float gain_nowL, gain_nowR;
+    // out_w*: pickup weights (c_k). Applied to modal state on output sum.
+    float out_wL, out_wR;
     float t60_s;
 
     // Discrete-Time Complex Modal Oscillator pole
@@ -1853,7 +1857,10 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
 
         // --- Global decay (base T60) ---
         float gdecay01 = jb_clamp(broad_total, 0.f, 1.f);
-        float T60 = jb_expmap01(gdecay01, JB_GLOBAL_DECAY_MIN_S, JB_GLOBAL_DECAY_MAX_S);
+        // Base per-mode decay (ms) is the primary T60 definition. Global decay acts as a musical multiplier.
+        float base_decay_s = (base[i].base_decay_ms > 0.f) ? (0.001f * base[i].base_decay_ms) : 0.001f;
+        float decay_mult   = jb_expmap01(gdecay01, 0.25f, 4.0f);
+        float T60 = base_decay_s * decay_mult;
 
         float decay_pitch_mul = bank ? v->decay_pitch_mul2 : v->decay_pitch_mul;
         float decay_vel_mul   = bank ? v->decay_vel_mul2   : v->decay_vel_mul;
@@ -1904,11 +1911,12 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
         md->pole_re = r * cosf(w);
         md->pole_im = r * sinf(w);
 
-        // Injection gain: keep burst/noise excitation from becoming whisper-quiet for long decays.
-        // A simple, stable choice is sqrt(1 - r^2) (constant injected power vs decay).
+        // Injection gain: avoid 'whisper-quiet' long decays while remaining stable for continuous noise.
+        // We keep a floor so r->1 still gets meaningful injection, and blend toward sqrt(1-r^2) for short decays.
         float q = 1.f - r*r;
         if (q < 0.f) q = 0.f;
         float inj = sqrtf(q);
+        inj = 0.35f + 0.65f * inj;
         md->injL = md->injR = inj;
     }
 }
@@ -2051,6 +2059,8 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
         if(!base[i].active){
             m[i].gain_nowL = 0.f;
             m[i].gain_nowR = 0.f;
+            m[i].out_wL = 0.f;
+            m[i].out_wR = 0.f;
             continue;
         }
 
@@ -2106,31 +2116,30 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
         // --- Spatial coupling (2D excitation, 2D pickup; signed) ---
         float gnL = gn, gnR = gn;
         float gn_refL = gn_ref, gn_refR = gn_ref;
+        float gp_store = 0.f;
         {
             const int n = freq_rank_of_id[i]; // 0..active_count-1 (ascending frequency)
             if (n >= 0){
-                // Excitation is 2D: ge = sin(nx*pi*posx) * sin(ny*pi*posy)
                 int nx, ny;
                 jb_rank_to_nm(n, &nx, &ny);
-                const float ge  = (sinf((float)nx * PI * posx) * sinf((float)ny * PI * posy)) * pos_norm;
-
-                // Pickup (mic) reads displacement at a single 2D mic position (X,Y).
-                // We keep one pickup point for both L/R outputs (no stereo mic spread here).
+                const float ge = (sinf((float)nx * PI * posx) * sinf((float)ny * PI * posy)) * pos_norm;
                 const float gp = (sinf((float)nx * PI * micX) * sinf((float)ny * PI * micY)) * mic_norm;
-
-                const float wL = ge * gp;
-                const float wR = ge * gp;
-gnL     *= wL;
-                gnR     *= wR;
-                gn_refL *= wL;
-                gn_refR *= wR;
+                gp_store = gp;
+                // Excitation coupling uses ge only; pickup is applied at output sum.
+                gnL     *= ge;
+                gnR     *= ge;
+                gn_refL *= ge;
+                gn_refR *= ge;
             }
         }
+        m[i].out_wL = gp_store;
+        m[i].out_wR = gp_store;
 
         m[i].gain_nowL = gnL;
         m[i].gain_nowR = gnR;
-        sum_gain += 0.5f * (fabsf(gnL) + fabsf(gnR));
-        sum_ref  += 0.5f * (fabsf(gn_refL) + fabsf(gn_refR));
+        // Loudness normalization is based on the full excitation*pickup product (old behavior).
+        sum_gain += 0.5f * (fabsf(gnL * gp_store) + fabsf(gnR * gp_store));
+        sum_ref  += 0.5f * (fabsf(gn_refL * gp_store) + fabsf(gn_refR * gp_store));
     }
 
     // Apply normalization so brightness redistributes energy without changing overall level.
@@ -2166,6 +2175,7 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
         md->ratio_now = x->base[i].base_ratio;
         md->decay_ms_now = x->base[i].base_decay_ms;
         md->gain_nowL = x->base[i].base_gain; md->gain_nowR = x->base[i].base_gain;
+        md->out_wL = 1.f; md->out_wR = 1.f;
         md->t60_s = md->decay_ms_now*0.001f;
         md->pole_re = md->pole_im = 0.f;
         md->st_reL = md->st_imL = 0.f;
@@ -2184,6 +2194,7 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
         md->ratio_now = x->base2[i].base_ratio;
         md->decay_ms_now = x->base2[i].base_decay_ms;
         md->gain_nowL = x->base2[i].base_gain; md->gain_nowR = x->base2[i].base_gain;
+        md->out_wL = 1.f; md->out_wR = 1.f;
         md->t60_s = md->decay_ms_now*0.001f;
         md->pole_re = md->pole_im = 0.f;
         md->st_reL = md->st_imL = 0.f;
@@ -2675,8 +2686,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     if (md->nyq_kill) continue;
                     float gL = md->gain_nowL;
                     float gR = md->gain_nowR;
-                    if ((fabsf(gL) + fabsf(gR)) <= 0.f) continue;
-
                     float inL = ex2L * gL;
                     float inR = ex2R * gR;
 
@@ -2701,8 +2710,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     if (md->nyq_kill) continue;
                     float gL = md->gain_nowL;
                     float gR = md->gain_nowR;
-                    if ((fabsf(gL) + fabsf(gR)) <= 0.f) continue;
-
                     float inL = ex1L * gL;
                     float inR = ex1R * gR;
 
@@ -2780,8 +2787,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     if (!base2[m].active) continue;
                     jb_mode_rt_t *md = &v->m2[m];
                     if (md->nyq_kill) continue;
-                    float yL = md->st_reL;
-                    float yR = md->st_reR;
+                    float yL = md->st_reL * md->out_wL;
+                    float yR = md->st_reR * md->out_wR;
                     yL *= env2; yR *= env2;
                     vOutL += yL * wL2 * bank_gain2;
                     vOutR += yR * wR2 * bank_gain2;
@@ -2794,8 +2801,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     if (!base1[m].active) continue;
                     jb_mode_rt_t *md = &v->m[m];
                     if (md->nyq_kill) continue;
-                    float yL = md->st_reL;
-                    float yR = md->st_reR;
+                    float yL = md->st_reL * md->out_wL;
+                    float yR = md->st_reR * md->out_wR;
                     yL *= env1; yR *= env1;
                     vOutL += yL * wL1 * bank_gain1;
                     vOutR += yR * wR1 * bank_gain1;
