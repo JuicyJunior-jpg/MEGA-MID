@@ -403,120 +403,6 @@ static inline void jb_exc_voice_reset_runtime(jb_exc_voice_t *e){
 static int jb_is_near_integer(float x, float eps){ float n=roundf(x); return fabsf(x-n)<=eps; }
 static inline float jb_midi_to_hz(float n){ return 440.f * powf(2.f, (n-69.f)/12.f); }
 
-// ---------- Matrix-based energy redistribution (cross-bank coupling) ----------
-
-static inline float jb_mode_power_proxy(const jb_mode_rt_t *md){
-    // Power proxy from resonator biquad state (phase-free). Using main (non-broadness) states.
-    // This is not a physical energy, but behaves well for redistribution and preserves phase.
-    const float pL = md->y1L*md->y1L + md->y2L*md->y2L;
-    const float pR = md->y1R*md->y1R + md->y2R*md->y2R;
-    return pL + pR;
-}
-
-static void jb_coupling_update_matrix(t_juicy_bank_tilde *x){
-    const int n1 = x->n_modes;
-    const int n2 = x->n_modes2;
-    const float spread = jb_clamp(x->coupling_spread, 0.f, 1.f);
-
-    // If nothing changed, keep.
-    if (x->coupling_spread_w_valid &&
-        x->coupling_spread_w_n1_last == n1 &&
-        x->coupling_spread_w_n2_last == n2 &&
-        fabsf(x->coupling_spread_w_spread_last - spread) < 1e-6f){
-        return;
-    }
-
-    // Clear
-    for (int i=0; i<JB_MAX_MODES; ++i){
-        for (int j=0; j<JB_MAX_MODES; ++j){
-            x->coupling_spread_w12[i][j] = 0.f;
-            x->coupling_spread_w21[i][j] = 0.f;
-        }
-    }
-
-    if (n1 <= 0 || n2 <= 0){
-        x->coupling_spread_w_valid = 1;
-        x->coupling_spread_w_n1_last = n1;
-        x->coupling_spread_w_n2_last = n2;
-        x->coupling_spread_w_spread_last = spread;
-        return;
-    }
-
-    // Spread==0 => nearest-neighbor mapping (crisp, deterministic)
-    if (spread <= 0.f || n1==1 || n2==1){
-        for (int j=0; j<n1; ++j){
-            int i = (n1==1) ? 0 : (int)lroundf((float)j * (float)(n2-1) / (float)(n1-1));
-            if (i < 0) i = 0; else if (i > n2-1) i = n2-1;
-            x->coupling_spread_w12[i][j] = 1.f;
-        }
-        for (int j=0; j<n2; ++j){
-            int i = (n2==1) ? 0 : (int)lroundf((float)j * (float)(n1-1) / (float)(n2-1));
-            if (i < 0) i = 0; else if (i > n1-1) i = n1-1;
-            x->coupling_spread_w21[i][j] = 1.f;
-        }
-        x->coupling_spread_w_valid = 1;
-        x->coupling_spread_w_n1_last = n1;
-        x->coupling_spread_w_n2_last = n2;
-        x->coupling_spread_w_spread_last = spread;
-        return;
-    }
-
-    // Spread>0 => Gaussian kernel in normalized mode-rank space
-    const float sigma = 0.02f + spread * 0.40f; // normalized (0..1) domain
-    const float inv2sig2 = 1.f / (2.f * sigma * sigma);
-
-    // Build unnormalized weights
-    for (int j=0; j<n1; ++j){
-        const float tj = (n1==1) ? 0.f : (float)j / (float)(n1-1);
-        for (int i=0; i<n2; ++i){
-            const float ti = (n2==1) ? 0.f : (float)i / (float)(n2-1);
-            const float d = ti - tj;
-            const float w = expf(-(d*d) * inv2sig2);
-            x->coupling_spread_w12[i][j] = w;
-        }
-    }
-    for (int j=0; j<n2; ++j){
-        const float tj = (n2==1) ? 0.f : (float)j / (float)(n2-1);
-        for (int i=0; i<n1; ++i){
-            const float ti = (n1==1) ? 0.f : (float)i / (float)(n1-1);
-            const float d = ti - tj;
-            const float w = expf(-(d*d) * inv2sig2);
-            x->coupling_spread_w21[i][j] = w;
-        }
-    }
-
-    // Column-normalize (per sender): sum_i aij = 1
-    for (int j=0; j<n1; ++j){
-        float s = 0.f;
-        for (int i=0; i<n2; ++i) s += x->coupling_spread_w12[i][j];
-        if (s <= 0.f){
-            int i = (int)lroundf((float)j * (float)(n2-1) / (float)(n1-1));
-            if (i < 0) i = 0; else if (i > n2-1) i = n2-1;
-            x->coupling_spread_w12[i][j] = 1.f;
-        }else{
-            const float invs = 1.f / s;
-            for (int i=0; i<n2; ++i) x->coupling_spread_w12[i][j] *= invs;
-        }
-    }
-    for (int j=0; j<n2; ++j){
-        float s = 0.f;
-        for (int i=0; i<n1; ++i) s += x->coupling_spread_w21[i][j];
-        if (s <= 0.f){
-            int i = (int)lroundf((float)j * (float)(n1-1) / (float)(n2-1));
-            if (i < 0) i = 0; else if (i > n1-1) i = n1-1;
-            x->coupling_spread_w21[i][j] = 1.f;
-        }else{
-            const float invs = 1.f / s;
-            for (int i=0; i<n1; ++i) x->coupling_spread_w21[i][j] *= invs;
-        }
-    }
-
-    x->coupling_spread_w_valid = 1;
-    x->coupling_spread_w_n1_last = n1;
-    x->coupling_spread_w_n2_last = n2;
-    x->coupling_spread_w_spread_last = spread;
-}
-
 typedef enum { DENSITY_PIVOT=0, DENSITY_INDIV=1 } jb_density_mode;
 
 typedef struct {
@@ -839,6 +725,125 @@ float _undo_base_gain[JB_MAX_MODES];
 float _undo_base_decay_ms[JB_MAX_MODES];
 } t_juicy_bank_tilde;
 
+
+// ---------- Matrix-based energy redistribution (cross-bank coupling) ----------
+// We couple the TWO modal banks by redistributing *per-mode power* through a column-normalized
+// matrix (per sender mode). This avoids phase cancellation because we never inject raw audio.
+// Formalism:
+//   P1_new = (1-λ) P1 + λ · W21 · P2
+//   P2_new = (1-λ) P2 + λ · W12 · P1
+// where W12 maps Bank1->Bank2 and W21 maps Bank2->Bank1, and each column of W sums to 1.
+
+static inline float jb_mode_power_proxy(const jb_mode_rt_t *md){
+    // Phase-free power proxy from resonator state (main biquad states).
+    // Using y1/y2 (both ears) works well and is cheap.
+    const float pL = md->y1L*md->y1L + md->y2L*md->y2L;
+    const float pR = md->y1R*md->y1R + md->y2R*md->y2R;
+    return pL + pR;
+}
+
+static void jb_coupling_update_matrix(t_juicy_bank_tilde *x){
+    const int n1 = x->n_modes;
+    const int n2 = x->n_modes2;
+    const float spread = jb_clamp(x->coupling_spread, 0.f, 1.f);
+
+    // Cache: rebuild only when mode counts or spread changed.
+    if (x->coupling_w_valid &&
+        x->coupling_w_n1_last == n1 &&
+        x->coupling_w_n2_last == n2 &&
+        fabsf(x->coupling_w_spread_last - spread) < 1e-6f){
+        return;
+    }
+
+    // Clear full matrices (fixed max size for simplicity).
+    for (int i=0; i<JB_MAX_MODES; ++i){
+        for (int j=0; j<JB_MAX_MODES; ++j){
+            x->coupling_w12[i][j] = 0.f;
+            x->coupling_w21[i][j] = 0.f;
+        }
+    }
+
+    if (n1 <= 0 || n2 <= 0){
+        x->coupling_w_valid = 1;
+        x->coupling_w_n1_last = n1;
+        x->coupling_w_n2_last = n2;
+        x->coupling_w_spread_last = spread;
+        return;
+    }
+
+    // Spread==0 => nearest mapping in normalized mode-rank space.
+    if (spread <= 0.f || n1 == 1 || n2 == 1){
+        for (int j=0; j<n1; ++j){
+            int i = (n1==1) ? 0 : (int)lroundf((float)j * (float)(n2-1) / (float)(n1-1));
+            if (i < 0) i = 0; else if (i > n2-1) i = n2-1;
+            x->coupling_w12[i][j] = 1.f;
+        }
+        for (int j=0; j<n2; ++j){
+            int i = (n2==1) ? 0 : (int)lroundf((float)j * (float)(n1-1) / (float)(n2-1));
+            if (i < 0) i = 0; else if (i > n1-1) i = n1-1;
+            x->coupling_w21[i][j] = 1.f;
+        }
+        x->coupling_w_valid = 1;
+        x->coupling_w_n1_last = n1;
+        x->coupling_w_n2_last = n2;
+        x->coupling_w_spread_last = spread;
+        return;
+    }
+
+    // Spread>0 => Gaussian kernel in normalized (0..1) rank space.
+    // sigma maps spread 0..1 -> ~[0.02..0.42] in normalized distance.
+    const float sigma = 0.02f + spread * 0.40f;
+    const float inv2sig2 = 1.f / (2.f * sigma * sigma);
+
+    // Unnormalized weights
+    for (int j=0; j<n1; ++j){
+        const float tj = (n1==1) ? 0.f : (float)j / (float)(n1-1);
+        for (int i=0; i<n2; ++i){
+            const float ti = (n2==1) ? 0.f : (float)i / (float)(n2-1);
+            const float d = ti - tj;
+            x->coupling_w12[i][j] = expf(-(d*d) * inv2sig2);
+        }
+    }
+    for (int j=0; j<n2; ++j){
+        const float tj = (n2==1) ? 0.f : (float)j / (float)(n2-1);
+        for (int i=0; i<n1; ++i){
+            const float ti = (n1==1) ? 0.f : (float)i / (float)(n1-1);
+            const float d = ti - tj;
+            x->coupling_w21[i][j] = expf(-(d*d) * inv2sig2);
+        }
+    }
+
+    // Column-normalize (per sender): sum_i W[i][j] = 1
+    for (int j=0; j<n1; ++j){
+        float s = 0.f;
+        for (int i=0; i<n2; ++i) s += x->coupling_w12[i][j];
+        if (s <= 0.f){
+            int i = (int)lroundf((float)j * (float)(n2-1) / (float)(n1-1));
+            if (i < 0) i = 0; else if (i > n2-1) i = n2-1;
+            x->coupling_w12[i][j] = 1.f;
+        } else {
+            const float invs = 1.f / s;
+            for (int i=0; i<n2; ++i) x->coupling_w12[i][j] *= invs;
+        }
+    }
+    for (int j=0; j<n2; ++j){
+        float s = 0.f;
+        for (int i=0; i<n1; ++i) s += x->coupling_w21[i][j];
+        if (s <= 0.f){
+            int i = (int)lroundf((float)j * (float)(n1-1) / (float)(n2-1));
+            if (i < 0) i = 0; else if (i > n1-1) i = n1-1;
+            x->coupling_w21[i][j] = 1.f;
+        } else {
+            const float invs = 1.f / s;
+            for (int i=0; i<n1; ++i) x->coupling_w21[i][j] *= invs;
+        }
+    }
+
+    x->coupling_w_valid = 1;
+    x->coupling_w_n1_last = n1;
+    x->coupling_w_n2_last = n2;
+    x->coupling_w_spread_last = spread;
+}
 // ---------- LFO runtime update (per block) ----------
 // Updates both LFOs for this block. Outputs live in x->lfo_val[0..JB_N_LFO-1],
 // normalised to -1..+1 for all shapes.
@@ -2724,7 +2729,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     x->exc_shape = exc_shape_saved;
     jb_mod_adsr_update_block(x);
     // Matrix-based energy redistribution params (λ) and matrix update
-    float coup = jb_clamp(x->coupling_spread_amt, 0.f, 1.f);
+    float coup = jb_clamp(x->coupling_amt, 0.f, 1.f);
     if (lfo1_out != 0.f && lfo1_tgt == gensym("coupling_amt")){
         coup = jb_clamp(coup + lfo1_out, 0.f, 1.f);
     }
@@ -3935,12 +3940,12 @@ x->excite_pos_y2  = x->excite_pos_y;
 // Individual
 
     // Matrix coupling defaults
-    x->coupling_spread_amt = 0.f;
+    x->coupling_amt = 0.f;
     x->coupling_spread = 0.f;
-    x->coupling_spread_w_valid = 0;
-    x->coupling_spread_w_spread_last = -999.f;
-    x->coupling_spread_w_n1_last = -1;
-    x->coupling_spread_w_n2_last = -1;
+    x->coupling_w_valid = 0;
+    x->coupling_w_spread_last = -999.f;
+    x->coupling_w_n1_last = -1;
+    x->coupling_w_n2_last = -1;
 
     x->in_partials   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("partials"));
     x->in_master     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("master"));
@@ -4058,13 +4063,13 @@ static void juicy_bank_tilde_bank(t_juicy_bank_tilde *x, t_floatarg f){
 }
 
 static void juicy_bank_tilde_coupling_amt(t_juicy_bank_tilde *x, t_floatarg f){
-    x->coupling_spread_amt = jb_clamp((float)f, 0.f, 1.f);
+    x->coupling_amt = jb_clamp((float)f, 0.f, 1.f);
 }
 
 
 static void juicy_bank_tilde_spread(t_juicy_bank_tilde *x, t_floatarg f){
     x->coupling_spread = jb_clamp((float)f, 0.f, 1.f);
-    x->coupling_spread_w_valid = 0; // rebuild on next block
+    x->coupling_w_valid = 0; // rebuild on next block
 }
 
 
