@@ -99,6 +99,13 @@ static inline float jb_kill_denorm(float x){
     return (fabsf(x) < 1e-20f) ? 0.f : x;
 }
 
+
+static inline void jb_rot2(float *a, float *b, float s, float c){
+    const float a0 = *a;
+    const float b0 = *b;
+    *a = c*a0 + s*b0;
+    *b = -s*a0 + c*b0;
+}
 // ---------- INTERNAL EXCITER (Fusion STEP 1) ----------
 // This is the former juicy_exciter~ DSP engine embedded into juicy_bank~.
 // STEP 1: adds exciter DSP structs + helpers + per-voice exciter state storage + param inlets.
@@ -520,7 +527,7 @@ typedef struct _juicy_bank_tilde {
     int   bank_octave[2];          // per-bank octave (-2..+2, snapped)
     float bank_tune_cents[2];     // per-bank cents detune (-100..+100)
 
-    // --- MATRIX-BASED ENERGY REDISTRIBUTION (cross-bank coupling) ---
+    // --- STATE-BASED MODAL COUPLING (cross-bank) ---
     // Based on the coupled-filter redistribution formalism (e.g., DAFx23 Poirot et al.).
     // We operate in 'energy' space (per-mode power proxy) and redistribute between banks
     // without touching phase: P_new = (1-λ)P + λ·A_norm·P_other, where A_norm is a
@@ -726,21 +733,13 @@ float _undo_base_decay_ms[JB_MAX_MODES];
 } t_juicy_bank_tilde;
 
 
-// ---------- Matrix-based energy redistribution (cross-bank coupling) ----------
+// ---------- State-based modal coupling (cross-bank coupling) ----------
 // We couple the TWO modal banks by redistributing *per-mode power* through a column-normalized
 // matrix (per sender mode). This avoids phase cancellation because we never inject raw audio.
 // Formalism:
 //   P1_new = (1-λ) P1 + λ · W21 · P2
 //   P2_new = (1-λ) P2 + λ · W12 · P1
 // where W12 maps Bank1->Bank2 and W21 maps Bank2->Bank1, and each column of W sums to 1.
-
-static inline float jb_mode_power_proxy(const jb_mode_rt_t *md){
-    // Phase-free power proxy from resonator state (main biquad states).
-    // Using y1/y2 (both ears) works well and is cheap.
-    const float pL = md->y1L*md->y1L + md->y2L*md->y2L;
-    const float pR = md->y1R*md->y1R + md->y2R*md->y2R;
-    return pL + pR;
-}
 
 static void jb_coupling_update_matrix(t_juicy_bank_tilde *x){
     const int n1 = x->n_modes;
@@ -2728,7 +2727,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     jb_exc_update_block(x);
     x->exc_shape = exc_shape_saved;
     jb_mod_adsr_update_block(x);
-    // Matrix-based energy redistribution params (λ) and matrix update
+    // State-based modal coupling params (λ) and matrix update
     float coup = jb_clamp(x->coupling_amt, 0.f, 1.f);
     if (lfo1_out != 0.f && lfo1_tgt == gensym("coupling_amt")){
         coup = jb_clamp(coup + lfo1_out, 0.f, 1.f);
@@ -2977,7 +2976,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             outL[i] += vOutL;
             outR[i] += vOutR;
 
-            // --- Matrix-based energy redistribution (cross-bank) ---
+            // --- State-based modal coupling (cross-bank) ---
             // (moved to block end for stability)
 
 
@@ -3029,7 +3028,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             }
 
         } // end samples
-        // --- Matrix-based energy redistribution (cross-bank, block-rate) ---
+        // --- State-based modal coupling (cross-bank, block-rate) ---
         // Implements: t = M [p - tau]_+, with M = eta*lambda*A_norm - lambda*I (energy-non-increasing for eta<=1).
         if (coup > 0.f){
             const int n1 = x->n_modes;
@@ -3039,165 +3038,56 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     jb_coupling_update_matrix(x);
                 }
 
-                float P1[JB_MAX_MODES];
-                float P2[JB_MAX_MODES];
-                float E1[JB_MAX_MODES];
-                float E2[JB_MAX_MODES];
-                float R1[JB_MAX_MODES]; // incoming from Bank2 -> Bank1
-                float R2[JB_MAX_MODES]; // incoming from Bank1 -> Bank2
+                // --- State-based modal coupling (stable) ---
+                // We couple the *oscillatory state* of modes (signed filter states), not a positive-only "energy" envelope.
+                // This uses orthogonal 2x2 rotations between Bank1 and Bank2 mode states, so total state energy cannot grow
+                // from coupling alone (no runaway feedback). Existing per-mode damping still dissipates energy naturally.
+                const float amt = jb_clamp(coup, 0.f, 1.f);
+                const float theta_max = 0.55f; // radians per block at amt=1, distributed by weights
 
-                float sumP = 0.f;
-                for (int i=0; i<n1; ++i){
-                    if (!x->base[i].active){
-                        P1[i]=E1[i]=R1[i]=0.f;
-                        continue;
-                    }
-                    P1[i] = jb_mode_power_proxy(&v->m[i]);
-                    if (!jb_isfinitef(P1[i]) || P1[i] < 0.f) P1[i] = 0.f;
-                    E1[i] = 0.f; R1[i] = 0.f;
-                    sumP += P1[i];
-                }
-                for (int i=0; i<n2; ++i){
-                    if (!x->base2[i].active){
-                        P2[i]=E2[i]=R2[i]=0.f;
-                        continue;
-                    }
-                    P2[i] = jb_mode_power_proxy(&v->m2[i]);
-                    if (!jb_isfinitef(P2[i]) || P2[i] < 0.f) P2[i] = 0.f;
-                    E2[i] = 0.f; R2[i] = 0.f;
-                    sumP += P2[i];
-                }
+                for (int j = 0; j < n2; ++j){
+                    if (!x->base2[j].active) continue;
+                    jb_mode_rt_t *m2 = &v->m2[j];
 
-                const float meanP = (n1+n2 > 0) ? (sumP / (float)(n1 + n2)) : 0.f;
+                    for (int i = 0; i < n1; ++i){
+                        if (!x->base[i].active) continue;
 
-                // Threshold τ: only redistribute "excess" power. Level-following keeps it musical across dynamics.
-                const float tau_floor = 1e-18f;
-                const float tau_rel   = 0.05f; // 5% of mean power (tames constant transfers)
-                const float tau = tau_floor + tau_rel * meanP;
+                        // Symmetric weight between (Bank1 mode i) and (Bank2 mode j)
+                        const float k = 0.5f * (x->coupling_w12[j][i] + x->coupling_w21[i][j]);
+                        if (k <= 0.f) continue;
 
-                // Efficiency η: lossy transfer (eta<1) prevents runaway and models imperfect coupling.
-                const float spread = jb_clamp(x->coupling_spread, 0.f, 1.f);
-                float eta = 0.92f - 0.10f * spread; // 0.82..0.92 (lossy = stable)
-                eta = jb_clamp(eta, 0.75f, 0.95f);
+                        const float theta = amt * theta_max * k;
+                        if (theta == 0.f) continue;
 
-                const float lambda = jb_clamp(coup, 0.f, 1.f);
+                        const float s = sinf(theta);
+                        const float c = cosf(theta);
 
-                // Excess vectors [p - tau]_+
-                for (int i=0; i<n1; ++i){
-                    const float e = P1[i] - tau;
-                    E1[i] = (e > 0.f) ? e : 0.f;
-                }
-                for (int i=0; i<n2; ++i){
-                    const float e = P2[i] - tau;
-                    E2[i] = (e > 0.f) ? e : 0.f;
-                }
+                        jb_mode_rt_t *m1 = &v->m[i];
 
-                // Incoming redistributed excess:
-                // R1 = A21 * E2, where A21 is column-normalized per sender (Bank2 mode j distributes to Bank1 i).
-                // R2 = A12 * E1.
-                for (int j=0; j<n2; ++j){
-                    const float ej = E2[j];
-                    if (ej == 0.f) continue;
-                    for (int i=0; i<n1; ++i){
-                        R1[i] += x->coupling_w21[i][j] * ej;
-                    }
-                }
-                for (int j=0; j<n1; ++j){
-                    const float ej = E1[j];
-                    if (ej == 0.f) continue;
-                    for (int i=0; i<n2; ++i){
-                        R2[i] += x->coupling_w12[i][j] * ej;
-                    }
-                }
+                        // Rotate state components (preserves sum of squares per component pair)
+                        jb_rot2(&m1->y1L,  &m2->y1L,  s, c);
+                        jb_rot2(&m1->y2L,  &m2->y2L,  s, c);
+                        jb_rot2(&m1->y1R,  &m2->y1R,  s, c);
+                        jb_rot2(&m1->y2R,  &m2->y2R,  s, c);
 
-                // Apply transfers: P_new = P + eta*lambda*R_in - lambda*E_self
-                // Total power change = (eta-1)*lambda*(sum(E1)+sum(E2)) <= 0, so energy will not increase (eta<=1).
-                
-                // Compute per-mode new powers first, then apply a global non-increase constraint.
-                // This is defensive: our "power proxy" may not match true physical energy perfectly.
-                float PN1[JB_MAX_MODES];
-                float PN2[JB_MAX_MODES];
-                float sumNew = 0.f;
+                        jb_rot2(&m1->y1bL, &m2->y1bL, s, c);
+                        jb_rot2(&m1->y2bL, &m2->y2bL, s, c);
+                        jb_rot2(&m1->y1bR, &m2->y1bR, s, c);
+                        jb_rot2(&m1->y2bR, &m2->y2bR, s, c);
 
-                for (int i=0; i<n1; ++i){
-                    if (!x->base[i].active){ PN1[i] = 0.f; continue; }
-                    const float p_old = P1[i];
-                    float p_new = p_old + (eta * lambda) * R1[i] - lambda * E1[i];
-                    if (!jb_isfinitef(p_new) || p_new < 0.f) p_new = 0.f;
-                    PN1[i] = p_new;
-                    sumNew += p_new;
-                }
-                for (int i=0; i<n2; ++i){
-                    if (!x->base2[i].active){ PN2[i] = 0.f; continue; }
-                    const float p_old = P2[i];
-                    float p_new = p_old + (eta * lambda) * R2[i] - lambda * E2[i];
-                    if (!jb_isfinitef(p_new) || p_new < 0.f) p_new = 0.f;
-                    PN2[i] = p_new;
-                    sumNew += p_new;
-                }
+                        // Do NOT couple env/drive/norm: those are not oscillatory state variables.
 
-                // Enforce total power non-increase across both banks for this voice (prevents runaway).
-                float global_scale = 1.f;
-                if (sumNew > sumP && sumNew > 0.f){
-                    global_scale = sumP / sumNew;
-                }
-const float eps = 1e-30f;
-                const float gmax = logf(1.15f); // per-block gain clamp (~15% amplitude)
-                for (int i=0; i<n1; ++i){
-                    if (!x->base[i].active) continue;
-                    const float p_old = P1[i];
-                    const float p_new = PN1[i] * global_scale;
-
-                    // Convert desired power change into a phase-preserving state scaling.
-                    float lr = 0.f;
-                    if (p_old > 0.f){
-                        lr = 0.5f * logf((p_new + eps) / (p_old + eps));
-                    } else {
-                        lr = 0.f;
-                    }
-                    if (lr >  gmax) lr =  gmax;
-                    if (lr < -gmax) lr = -gmax;
-                    const float g = expf(lr);
-
-                    jb_mode_rt_t *md = &v->m[i];
-                    md->y1L *= g; md->y2L *= g; md->y1R *= g; md->y2R *= g;
-                    md->y1bL *= g; md->y2bL *= g; md->y1bR *= g; md->y2bR *= g;
-                    
-                    // Safety: if anything blows up, panic-reset the voice.
-                    if (!jb_isfinitef(md->y1L) || !jb_isfinitef(md->y1R) ||
-                        fabsf(md->y1L) > JB_PANIC_ABS_MAX || fabsf(md->y1R) > JB_PANIC_ABS_MAX){
-                        jb_voice_panic_reset(x, v);
-                        break;
-                    }
-                }
-
-                for (int i=0; i<n2; ++i){
-                    if (!x->base2[i].active) continue;
-                    const float p_old = P2[i];
-                    const float p_new = PN2[i] * global_scale;
-
-                    float lr = 0.f;
-                    if (p_old > 0.f){
-                        lr = 0.5f * logf((p_new + eps) / (p_old + eps));
-                    } else {
-                        lr = 0.f;
-                    }
-                    if (lr >  gmax) lr =  gmax;
-                    if (lr < -gmax) lr = -gmax;
-                    const float g = expf(lr);
-
-                    jb_mode_rt_t *md = &v->m2[i];
-                    md->y1L *= g; md->y2L *= g; md->y1R *= g; md->y2R *= g;
-                    md->y1bL *= g; md->y2bL *= g; md->y1bR *= g; md->y2bR *= g;
-                    
-                    if (!jb_isfinitef(md->y1L) || !jb_isfinitef(md->y1R) ||
-                        fabsf(md->y1L) > JB_PANIC_ABS_MAX || fabsf(md->y1R) > JB_PANIC_ABS_MAX){
-                        jb_voice_panic_reset(x, v);
-                        break;
+                        // Safety: if anything blows up, panic-reset this voice.
+                        if (!jb_isfinitef(m1->y1L) || !jb_isfinitef(m2->y1L) ||
+                            fabsf(m1->y1L) > JB_PANIC_ABS_MAX || fabsf(m2->y1L) > JB_PANIC_ABS_MAX){
+                            jb_voice_panic_reset(x, v);
+                            j = n2; // break outer loop
+                            break;
+                        }
                     }
                 }
             }
-        }
+}
 
 
     } // end voices
