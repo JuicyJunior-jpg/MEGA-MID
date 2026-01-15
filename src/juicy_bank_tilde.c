@@ -1431,12 +1431,10 @@ static void jb_project_behavior_into_voice_bank(t_juicy_bank_tilde *x, jb_voice_
     if (xfac < 1e-6f) xfac = 1e-6f;
     v->pitch_x = xfac;
 
-    const jb_mode_base_t *base = jb_bank_base(x, bank);
-    int n_modes = jb_bank_nmodes(x, bank);
-
-    float stiffen_amt = jb_bank_stiffen_amt(x, bank);
-    float shortscale_amt = jb_bank_shortscale_amt(x, bank);
-    float linger_amt = jb_bank_linger_amt(x, bank);
+    const int n_modes = jb_bank_nmodes(x, bank);
+    float *bandwidth_v_p = bank ? &v->bandwidth_v2 : &v->bandwidth_v;
+    float *disp_target_p = bank ? v->disp_target2 : v->disp_target;
+    float *disp_last_p   = jb_bank_dispersion_last(x, bank);
 
     // Bandwidth: user-controlled (0..1).
     // In the complex modal oscillator, we interpret this as *extra damping / broadeness*
@@ -1445,11 +1443,8 @@ static void jb_project_behavior_into_voice_bank(t_juicy_bank_tilde *x, jb_voice_
     float addBW  = 0.15f * jb_clamp(v->vel,0.f,1.f);
     *bandwidth_v_p = jb_clamp(baseBW + addBW, 0.f, 1.f);
 
-    // per-mode dispersion targets (ignore fundamental)
-    float disp_base = jb_clamp(jb_bank_dispersion(x, bank), 0.f, 1.f);
-    // LFO1 dispersion modulation removed (not a supported target anymore).
-    float total_disp = jb_clamp(disp_base + *stiffen_add_p, 0.f, 1.f);
-float *disp_last_p = jb_bank_dispersion_last(x, bank);
+    // Dispersion morph targets are currently disabled for the complex resonator path
+    // (kept for compatibility with existing parameter plumbing).
     if (*disp_last_p < 0.f){ *disp_last_p = -1.f; }
 
     for(int i=0;i<n_modes;i++){
@@ -3042,11 +3037,6 @@ static void juicy_bank_tilde_release(t_juicy_bank_tilde *x, t_floatarg f){
 }
 
 // realism & misc
-static void juicy_bank_tilde_phase_debug(t_juicy_bank_tilde *x, t_floatarg on){
-    int v = (on > 0.f) ? 1 : 0;
-    if (x->edit_bank) x->phase_debug2 = v;
-    else              x->phase_debug  = v;
-}
 static void juicy_bank_tilde_bandwidth(t_juicy_bank_tilde *x, t_floatarg f){
     if (x->edit_bank) x->bandwidth2 = jb_clamp(f, 0.f, 1.f);
     else              x->bandwidth  = jb_clamp(f, 0.f, 1.f);
@@ -4138,7 +4128,6 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pickupL,     
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_dispersion_reroll, gensym("dispersion_reroll"), 0);
 
     // realism & misc
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_phase_debug, gensym("phase_debug"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bandwidth, gensym("bandwidth"), A_DEFFLOAT, 0);
 
     // notes/poly (non-voice-specific)
