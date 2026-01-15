@@ -3023,89 +3023,128 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 v->rel_env  = 0.f;
                 v->rel_env2 = 0.f;
             }
+        } // end samples
 
+// --- Matrix-based energy redistribution (cross-bank) ---
+// Apply ONCE per block per voice (NOT per-sample). This avoids runaway "control feedback"
+// and keeps the coupling stable and musically usable.
+if (coup > 0.f){
+    const float lambda = coup; // already clamped 0..1 (and optionally LFO-modulated)
+    const int n1 = x->n_modes;
+    const int n2 = x->n_modes2;
 
+    // Matrices are built once per block (above) when lambda>0, but keep a guard anyway.
+    if (n1 > 0 && n2 > 0){
+        if (!x->coupling_w_valid){
+            jb_coupling_update_matrix(x);
+        }
 
-        // --- Matrix-based energy redistribution (cross-bank) ---
-        // Once per block per voice: redistribute per-mode power proxies between banks.
-        // This is energy-domain coupling (phase-free), so it won't cancel with polarity/position.
-        if (coup > 0.f){
-            const int n1 = x->n_modes;
-            const int n2 = x->n_modes2;
-            if (n1 > 0 && n2 > 0){
-                if (!x->coupling_w_valid){
-                    jb_coupling_update_matrix(x);
-                }
-                float P1[JB_MAX_MODES];
-                float P2[JB_MAX_MODES];
-                float In1[JB_MAX_MODES];
-                float In2[JB_MAX_MODES];
+        float P1[JB_MAX_MODES];
+        float P2[JB_MAX_MODES];
+        float In1[JB_MAX_MODES];
+        float In2[JB_MAX_MODES];
 
-                for (int i=0; i<n1; ++i){ P1[i] = 0.f; In1[i] = 0.f; }
-                for (int i=0; i<n2; ++i){ P2[i] = 0.f; In2[i] = 0.f; }
+        for (int i=0; i<n1; ++i){ P1[i]=0.f; In1[i]=0.f; }
+        for (int i=0; i<n2; ++i){ P2[i]=0.f; In2[i]=0.f; }
 
-                for (int j=0; j<n1; ++j){
-                    if (!x->base[j].active) { P1[j] = 0.f; continue; }
-                    P1[j] = jb_mode_power_proxy(&v->m[j]);
-                }
-                for (int j=0; j<n2; ++j){
-                    if (!x->base2[j].active) { P2[j] = 0.f; continue; }
-                    P2[j] = jb_mode_power_proxy(&v->m2[j]);
-                }
+        // Per-mode "power" proxies (phase-free)
+        for (int j=0; j<n1; ++j){
+            if (!x->base[j].active) continue;
+            P1[j] = jb_mode_power_proxy(&v->m[j]);
+        }
+        for (int j=0; j<n2; ++j){
+            if (!x->base2[j].active) continue;
+            P2[j] = jb_mode_power_proxy(&v->m2[j]);
+        }
 
-                // Incoming redistributed power from other bank: In1 = W21 * P2 ; In2 = W12 * P1
-                for (int j=0; j<n2; ++j){
-                    const float pj = P2[j];
-                    if (pj == 0.f) continue;
-                    for (int i=0; i<n1; ++i){
-                        In1[i] += x->coupling_w21[i][j] * pj;
-                    }
-                }
-                for (int j=0; j<n1; ++j){
-                    const float pj = P1[j];
-                    if (pj == 0.f) continue;
-                    for (int i=0; i<n2; ++i){
-                        In2[i] += x->coupling_w12[i][j] * pj;
-                    }
-                }
-
-                const float one_minus = 1.f - coup;
-                const float eps = 1e-20f;
-                const float p_floor = 1e-12f; // prevents huge gains when a mode is nearly silent
-                const float g_max = 2.0f;     // hard safety clamp (prevents block-to-block blowups)
-
-                // IMPORTANT: only scale resonator states (y1/y2 + bandwidth states). Do NOT scale drive/env.
-                for (int i=0; i<n1; ++i){
-                    if (!x->base[i].active) continue;
-                    const float p_old = P1[i];
-                    float p_new = one_minus * p_old + coup * In1[i];
-                    if (p_new < 0.f) p_new = 0.f;
-                    const float denom = (p_old > p_floor) ? p_old : p_floor;
-                    float g = sqrtf((p_new + eps) / (denom + eps));
-                    if (g > g_max) g = g_max;
-                    if (!jb_isfinitef(g) || g < 0.f) g = 0.f;
-                    jb_mode_rt_t *md = &v->m[i];
-                    md->y1L *= g; md->y2L *= g; md->y1R *= g; md->y2R *= g;
-                    md->y1bL *= g; md->y2bL *= g; md->y1bR *= g; md->y2bR *= g;
-                    md->y_pre_lastL *= g; md->y_pre_lastR *= g;
-                }
-                for (int i=0; i<n2; ++i){
-                    if (!x->base2[i].active) continue;
-                    const float p_old = P2[i];
-                    float p_new = one_minus * p_old + coup * In2[i];
-                    if (p_new < 0.f) p_new = 0.f;
-                    const float denom = (p_old > p_floor) ? p_old : p_floor;
-                    float g = sqrtf((p_new + eps) / (denom + eps));
-                    if (g > g_max) g = g_max;
-                    if (!jb_isfinitef(g) || g < 0.f) g = 0.f;
-                    jb_mode_rt_t *md = &v->m2[i];
-                    md->y1L *= g; md->y2L *= g; md->y1R *= g; md->y2R *= g;
-                    md->y1bL *= g; md->y2bL *= g; md->y1bR *= g; md->y2bR *= g;
-                    md->y_pre_lastL *= g; md->y_pre_lastR *= g;
-                }
+        // Incoming redistributed power from the OTHER bank:
+        //   In1 = W21 * P2  (Bank2 -> Bank1)
+        //   In2 = W12 * P1  (Bank1 -> Bank2)
+        for (int j=0; j<n2; ++j){
+            const float pj = P2[j];
+            if (pj == 0.f) continue;
+            for (int i=0; i<n1; ++i){
+                In1[i] += x->coupling_w21[i][j] * pj;
             }
         }
-        } // end samples
+        for (int j=0; j<n1; ++j){
+            const float pj = P1[j];
+            if (pj == 0.f) continue;
+            for (int i=0; i<n2; ++i){
+                In2[i] += x->coupling_w12[i][j] * pj;
+            }
+        }
+
+        const float one_minus = 1.f - lambda;
+        const float eps = 1e-20f;
+
+        // Stability: limit how much any single block can rescale a mode.
+        // (+/- ~2 dB per block is plenty; prevents explosive growth even if proxies get weird)
+        float gmax = 1.05f + 0.20f * lambda;
+        if (gmax > 1.25f) gmax = 1.25f;
+        const float log_gmax = logf(gmax);
+
+        // IMPORTANT:
+        // We only rescale resonator STATE (biquad + bandwidth + pre-last).
+        // We do NOT touch drive/env, because those are part of the excitation path and can explode.
+        for (int i=0; i<n1; ++i){
+            if (!x->base[i].active) continue;
+
+            const float p_old = P1[i];
+            float p_new = one_minus * p_old + lambda * In1[i];
+            if (p_new < 0.f) p_new = 0.f;
+
+            float lr = 0.5f * logf((p_new + eps) / (p_old + eps));
+            if (lr >  log_gmax) lr =  log_gmax;
+            if (lr < -log_gmax) lr = -log_gmax;
+
+            float g = expf(lr);
+            if (!jb_isfinitef(g) || g <= 0.f) g = 1.f;
+
+            jb_mode_rt_t *md = &v->m[i];
+            md->y1L *= g; md->y2L *= g; md->y1R *= g; md->y2R *= g;
+            md->y1bL *= g; md->y2bL *= g; md->y1bR *= g; md->y2bR *= g;
+            md->y_pre_lastL *= g; md->y_pre_lastR *= g;
+        }
+
+        for (int i=0; i<n2; ++i){
+            if (!x->base2[i].active) continue;
+
+            const float p_old = P2[i];
+            float p_new = one_minus * p_old + lambda * In2[i];
+            if (p_new < 0.f) p_new = 0.f;
+
+            float lr = 0.5f * logf((p_new + eps) / (p_old + eps));
+            if (lr >  log_gmax) lr =  log_gmax;
+            if (lr < -log_gmax) lr = -log_gmax;
+
+            float g = expf(lr);
+            if (!jb_isfinitef(g) || g <= 0.f) g = 1.f;
+
+            jb_mode_rt_t *md = &v->m2[i];
+            md->y1L *= g; md->y2L *= g; md->y1R *= g; md->y2R *= g;
+            md->y1bL *= g; md->y2bL *= g; md->y1bR *= g; md->y2bR *= g;
+            md->y_pre_lastL *= g; md->y_pre_lastR *= g;
+        }
+
+        // Post-coupling sanity: if anything went non-finite, hard-reset this voice.
+        int bad = 0;
+        for (int k=0; k<n1 && !bad; ++k){
+            if (!x->base[k].active) continue;
+            jb_mode_rt_t *mdd = &v->m[k];
+            if (!jb_isfinitef(mdd->y1L) || !jb_isfinitef(mdd->y2L) || !jb_isfinitef(mdd->y1R) || !jb_isfinitef(mdd->y2R)) bad = 1;
+        }
+        for (int k=0; k<n2 && !bad; ++k){
+            if (!x->base2[k].active) continue;
+            jb_mode_rt_t *mdd = &v->m2[k];
+            if (!jb_isfinitef(mdd->y1L) || !jb_isfinitef(mdd->y2L) || !jb_isfinitef(mdd->y1R) || !jb_isfinitef(mdd->y2R)) bad = 1;
+        }
+        if (bad){
+            jb_voice_panic_reset(x, v);
+        }
+
+    }
+}
     } // end voices
 
 
