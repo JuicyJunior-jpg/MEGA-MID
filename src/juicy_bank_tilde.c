@@ -3072,13 +3072,13 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
                 // Threshold τ: only redistribute "excess" power. Level-following keeps it musical across dynamics.
                 const float tau_floor = 1e-18f;
-                const float tau_rel   = 0.01f; // 1% of mean power
+                const float tau_rel   = 0.05f; // 5% of mean power (tames constant transfers)
                 const float tau = tau_floor + tau_rel * meanP;
 
                 // Efficiency η: lossy transfer (eta<1) prevents runaway and models imperfect coupling.
                 const float spread = jb_clamp(x->coupling_spread, 0.f, 1.f);
-                float eta = 0.97f - 0.07f * spread; // 0.90..0.97 typical
-                eta = jb_clamp(eta, 0.85f, 0.99f);
+                float eta = 0.92f - 0.10f * spread; // 0.82..0.92 (lossy = stable)
+                eta = jb_clamp(eta, 0.75f, 0.95f);
 
                 const float lambda = jb_clamp(coup, 0.f, 1.f);
 
@@ -3112,13 +3112,41 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
                 // Apply transfers: P_new = P + eta*lambda*R_in - lambda*E_self
                 // Total power change = (eta-1)*lambda*(sum(E1)+sum(E2)) <= 0, so energy will not increase (eta<=1).
-                const float eps = 1e-30f;
-                const float gmax = logf(2.0f); // per-block gain clamp (<=2x amplitude)
+                
+                // Compute per-mode new powers first, then apply a global non-increase constraint.
+                // This is defensive: our "power proxy" may not match true physical energy perfectly.
+                float PN1[JB_MAX_MODES];
+                float PN2[JB_MAX_MODES];
+                float sumNew = 0.f;
+
                 for (int i=0; i<n1; ++i){
-                    if (!x->base[i].active) continue;
+                    if (!x->base[i].active){ PN1[i] = 0.f; continue; }
                     const float p_old = P1[i];
                     float p_new = p_old + (eta * lambda) * R1[i] - lambda * E1[i];
                     if (!jb_isfinitef(p_new) || p_new < 0.f) p_new = 0.f;
+                    PN1[i] = p_new;
+                    sumNew += p_new;
+                }
+                for (int i=0; i<n2; ++i){
+                    if (!x->base2[i].active){ PN2[i] = 0.f; continue; }
+                    const float p_old = P2[i];
+                    float p_new = p_old + (eta * lambda) * R2[i] - lambda * E2[i];
+                    if (!jb_isfinitef(p_new) || p_new < 0.f) p_new = 0.f;
+                    PN2[i] = p_new;
+                    sumNew += p_new;
+                }
+
+                // Enforce total power non-increase across both banks for this voice (prevents runaway).
+                float global_scale = 1.f;
+                if (sumNew > sumP && sumNew > 0.f){
+                    global_scale = sumP / sumNew;
+                }
+const float eps = 1e-30f;
+                const float gmax = logf(1.15f); // per-block gain clamp (~15% amplitude)
+                for (int i=0; i<n1; ++i){
+                    if (!x->base[i].active) continue;
+                    const float p_old = P1[i];
+                    const float p_new = PN1[i] * global_scale;
 
                     // Convert desired power change into a phase-preserving state scaling.
                     float lr = 0.f;
@@ -3134,8 +3162,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     jb_mode_rt_t *md = &v->m[i];
                     md->y1L *= g; md->y2L *= g; md->y1R *= g; md->y2R *= g;
                     md->y1bL *= g; md->y2bL *= g; md->y1bR *= g; md->y2bR *= g;
-                    md->y_pre_lastL *= g; md->y_pre_lastR *= g;
-
+                    
                     // Safety: if anything blows up, panic-reset the voice.
                     if (!jb_isfinitef(md->y1L) || !jb_isfinitef(md->y1R) ||
                         fabsf(md->y1L) > JB_PANIC_ABS_MAX || fabsf(md->y1R) > JB_PANIC_ABS_MAX){
@@ -3147,8 +3174,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 for (int i=0; i<n2; ++i){
                     if (!x->base2[i].active) continue;
                     const float p_old = P2[i];
-                    float p_new = p_old + (eta * lambda) * R2[i] - lambda * E2[i];
-                    if (!jb_isfinitef(p_new) || p_new < 0.f) p_new = 0.f;
+                    const float p_new = PN2[i] * global_scale;
 
                     float lr = 0.f;
                     if (p_old > 0.f){
@@ -3163,8 +3189,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     jb_mode_rt_t *md = &v->m2[i];
                     md->y1L *= g; md->y2L *= g; md->y1R *= g; md->y2R *= g;
                     md->y1bL *= g; md->y2bL *= g; md->y1bR *= g; md->y2bR *= g;
-                    md->y_pre_lastL *= g; md->y_pre_lastR *= g;
-
+                    
                     if (!jb_isfinitef(md->y1L) || !jb_isfinitef(md->y1R) ||
                         fabsf(md->y1L) > JB_PANIC_ABS_MAX || fabsf(md->y1R) > JB_PANIC_ABS_MAX){
                         jb_voice_panic_reset(x, v);
