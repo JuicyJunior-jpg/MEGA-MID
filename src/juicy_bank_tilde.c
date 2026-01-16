@@ -2678,7 +2678,37 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             float wL2 = sqrtf(0.5f * (1.f - p2));
             float wR2 = sqrtf(0.5f * (1.f + p2));
 
-            // 1) Update modal states for both banks (no output yet)
+                        // 1) Sum outputs from *previous* modal state (no direct feedthrough)
+            //    y[n] = c^T x[n] ; x[n+1] = A x[n] + b u[n]
+            if (bank_gain2 > 0.f && v->rel_env2 > 0.f){
+                float env2 = v->rel_env2;
+                for (int m = 0; m < x->n_modes2; ++m){
+                    if (!base2[m].active) continue;
+                    jb_mode_rt_t *md = &v->m2[m];
+                    if (md->nyq_kill) continue;
+                    float yL = md->st_reL * md->out_wL;
+                    float yR = md->st_reR * md->out_wR;
+                    yL *= env2; yR *= env2;
+                    vOutL += yL * wL2 * bank_gain2;
+                    vOutR += yR * wR2 * bank_gain2;
+                }
+            }
+
+            if (bank_gain1 > 0.f && v->rel_env > 0.f){
+                float env1 = v->rel_env;
+                for (int m = 0; m < x->n_modes; ++m){
+                    if (!base1[m].active) continue;
+                    jb_mode_rt_t *md = &v->m[m];
+                    if (md->nyq_kill) continue;
+                    float yL = md->st_reL * md->out_wL;
+                    float yR = md->st_reR * md->out_wR;
+                    yL *= env1; yR *= env1;
+                    vOutL += yL * wL1 * bank_gain1;
+                    vOutR += yR * wR1 * bank_gain1;
+                }
+            }
+
+            // 2) Update modal states for both banks (writes x[n+1])
             if (v->rel_env2 > 0.f){
                 for (int m = 0; m < x->n_modes2; ++m){
                     if (!base2[m].active) continue;
@@ -2725,7 +2755,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 }
             }
 
-            // 2) Modal state coupling (energy-safe mixing; no audio feedback loop)
+
+            // 3) Modal state coupling (energy-safe mixing; no audio feedback loop)
             if (coup > 0.f && topo != 0){
                 int nmin = x->n_modes < x->n_modes2 ? x->n_modes : x->n_modes2;
                 if (topo == 1){ // B2 -> B1 (stable convex mix)
@@ -2777,35 +2808,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                         m2->st_reR = c * r2 - s * r1;
                         m2->st_imR = c * i2 - s * i1;
                     }
-                }
-            }
-
-            // 3) Sum outputs (real part of each complex mode state)
-            if (bank_gain2 > 0.f && v->rel_env2 > 0.f){
-                float env2 = v->rel_env2;
-                for (int m = 0; m < x->n_modes2; ++m){
-                    if (!base2[m].active) continue;
-                    jb_mode_rt_t *md = &v->m2[m];
-                    if (md->nyq_kill) continue;
-                    float yL = md->st_reL * md->out_wL;
-                    float yR = md->st_reR * md->out_wR;
-                    yL *= env2; yR *= env2;
-                    vOutL += yL * wL2 * bank_gain2;
-                    vOutR += yR * wR2 * bank_gain2;
-                }
-            }
-
-            if (bank_gain1 > 0.f && v->rel_env > 0.f){
-                float env1 = v->rel_env;
-                for (int m = 0; m < x->n_modes; ++m){
-                    if (!base1[m].active) continue;
-                    jb_mode_rt_t *md = &v->m[m];
-                    if (md->nyq_kill) continue;
-                    float yL = md->st_reL * md->out_wL;
-                    float yR = md->st_reR * md->out_wR;
-                    yL *= env1; yR *= env1;
-                    vOutL += yL * wL1 * bank_gain1;
-                    vOutR += yR * wR1 * bank_gain1;
                 }
             }
 
