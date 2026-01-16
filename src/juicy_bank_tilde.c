@@ -411,31 +411,32 @@ typedef struct {
     int   active;
     int   keytrack; // 1 = track f0 (ratio), 0 = absolute Hz
 
-    // signature (random)
+    // signatures (random)
     float disp_signature;
+    float micro_sig;
 } jb_mode_base_t;
 
 typedef struct {
+    
+    // release envelope (global per-voice)
+    float rel_env;
     // runtime per-mode
-    float ratio_now, decay_ms_now;
-    // gain_now*: excitation coupling (b_k * ge). Applied to exciter signal before modal update.
-    float gain_nowL, gain_nowR;
-    // out_w*: pickup weights (c_k). Applied to modal state on output sum.
-    float out_wL, out_wR;
+    float ratio_now, decay_ms_now, gain_nowL, gain_nowR;
     float t60_s;
 
-    // Discrete-Time Complex Modal Oscillator pole
-    // p = pole_re + j*pole_im = r * (cos(w) + j*sin(w))
-    float pole_re, pole_im;
+    // per-ear per-hit randomizations
+    float md_hit_offsetL, md_hit_offsetR;   // micro detune offsets
+    float bw_hit_ratioL, bw_hit_ratioR;     // twin detune ratios
 
-    // Complex state per output channel
-    float st_reL, st_imL;
-    float st_reR, st_imR;
+    // LEFT states
+    float a1L,a2L, y1L,y2L, a1bL,a2bL, y1bL,y2bL, envL, y_pre_lastL, normL;
+    // RIGHT states
+    float a1R,a2R, y1R,y2R, a1bR,a2bR, y1bR,y2bR, envR, y_pre_lastR, normR;
 
-    // Input injection gain (per channel)
-    float injL, injR;
-
-    int nyq_kill;
+    // drive/hit
+    float driveL, driveR;
+    int   hit_gateL, hit_coolL, hit_gateR, hit_coolR;
+    int   nyq_kill;
 } jb_mode_rt_t;
 
 typedef enum { V_IDLE=0, V_HELD=1, V_RELEASE=2 } jb_vstate;
@@ -487,6 +488,8 @@ typedef struct {
     float rel_env2;
 
     // coupling sends (stored per voice for 1-sample delayed injection)
+    float coup_b1_prevL, coup_b1_prevR; // Bank1 summed output (pre-release env weighting), L/R
+    float coup_b2_prevL, coup_b2_prevR; // Bank2 summed output (pre-release env weighting), L/R
 
     // runtime per-mode — BANK 1/2
     jb_mode_rt_t m[JB_MAX_MODES];
@@ -558,13 +561,17 @@ float damping, brightness; float global_decay, slope;
     float collision_amt2;
 
     // realism/misc
+    float phase_rand; int phase_debug;
+    float phase_rand2; int phase_debug2;
     float bandwidth;        // base for Bloom
+    float micro_detune;     // base for micro detune
     float bandwidth2;        // base for Bloom (bank2)
+    float micro_detune2;     // base for micro detune (bank2)
     float basef0_ref;
 
     // BEHAVIOR depths
-    float stiffen_amt, shortscale_amt, linger_amt, tilt_amt, bite_amt, crossring_amt;
-    float stiffen_amt2, shortscale_amt2, linger_amt2, tilt_amt2, bite_amt2, crossring_amt2;
+    float stiffen_amt, shortscale_amt, linger_amt, tilt_amt, bite_amt, bloom_amt, crossring_amt;
+    float stiffen_amt2, shortscale_amt2, linger_amt2, tilt_amt2, bite_amt2, bloom_amt2, crossring_amt2;
 
     // voices
     int   max_voices;
@@ -1190,6 +1197,9 @@ static inline float jb_bank_brightness(const t_juicy_bank_tilde *x, int bank){
 static inline float jb_bank_bandwidth_base(const t_juicy_bank_tilde *x, int bank){
     return bank ? x->bandwidth2 : x->bandwidth;
 }
+static inline float jb_bank_micro_detune(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->micro_detune2 : x->micro_detune;
+}
 static inline float jb_bank_release_amt(const t_juicy_bank_tilde *x, int bank){
     return bank ? x->release_amt2 : x->release_amt;
 }
@@ -1201,6 +1211,9 @@ static inline float jb_bank_shortscale_amt(const t_juicy_bank_tilde *x, int bank
 }
 static inline float jb_bank_linger_amt(const t_juicy_bank_tilde *x, int bank){
     return bank ? x->linger_amt2 : x->linger_amt;
+}
+static inline float jb_bank_bloom_amt(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->bloom_amt2 : x->bloom_amt;
 }
 static inline float jb_bank_crossring_amt(const t_juicy_bank_tilde *x, int bank){
     return bank ? x->crossring_amt2 : x->crossring_amt;
@@ -1435,20 +1448,55 @@ static void jb_project_behavior_into_voice_bank(t_juicy_bank_tilde *x, jb_voice_
     if (xfac < 1e-6f) xfac = 1e-6f;
     v->pitch_x = xfac;
 
-    const int n_modes = jb_bank_nmodes(x, bank);
-    float *bandwidth_v_p = bank ? &v->bandwidth_v2 : &v->bandwidth_v;
-    float *disp_target_p = bank ? v->disp_target2 : v->disp_target;
-    float *disp_last_p   = jb_bank_dispersion_last(x, bank);
+    const jb_mode_base_t *base = jb_bank_base(x, bank);
+    int n_modes = jb_bank_nmodes(x, bank);
 
-    // Bandwidth: user-controlled (0..1).
-    // In the complex modal oscillator, we interpret this as *extra damping / broadeness*
-    // (i.e. higher bandwidth -> shorter decays).
+    float stiffen_amt = jb_bank_stiffen_amt(x, bank);
+    float shortscale_amt = jb_bank_shortscale_amt(x, bank);
+    float linger_amt = jb_bank_linger_amt(x, bank);
+    float bloom_amt = jb_bank_bloom_amt(x, bank);
+
+    float *stiffen_add_p      = bank ? &v->stiffen_add2      : &v->stiffen_add;
+    float *decay_pitch_mul_p  = bank ? &v->decay_pitch_mul2  : &v->decay_pitch_mul;
+    float *decay_vel_mul_p    = bank ? &v->decay_vel_mul2    : &v->decay_vel_mul;
+    float *brightness_v_p     = bank ? &v->brightness_v2     : &v->brightness_v;
+    float *bandwidth_v_p      = bank ? &v->bandwidth_v2      : &v->bandwidth_v;
+    float *disp_target_p      = bank ? v->disp_target2       : v->disp_target;
+
+    // Stiffen → extra dispersion depth
+    float k_disp = (0.02f + 0.10f * jb_clamp(stiffen_amt,0.f,1.f));
+    float alpha  = 0.60f + 0.20f * stiffen_amt;
+    *stiffen_add_p = k_disp * powf(xfac, alpha);
+
+    // Shortscale → decays shorten with pitch
+    float beta = 0.40f + 0.50f * shortscale_amt;
+    *decay_pitch_mul_p = powf(xfac, -beta);
+
+    // Linger → velocity extends decays
+    *decay_vel_mul_p = (1.f + (0.30f + 1.20f * linger_amt) * jb_clamp(v->vel,0.f,1.f));
+
+    // Brightness: user-controlled
+    {
+        const t_symbol *lfo1_tgt = x->lfo_target[0];
+        const float lfo1 = x->lfo_val[0] * x->lfo_amt_v[0];
+        float b = jb_clamp(jb_bank_brightness(x, bank), -1.f, 1.f);
+        if (lfo1 != 0.f){
+            if ((bank == 0 && lfo1_tgt == gensym("brightness_1")) || (bank != 0 && lfo1_tgt == gensym("brightness_2"))){
+                b = jb_clamp(b + lfo1, -1.f, 1.f);
+            }
+        }
+        *brightness_v_p = b;
+    }
+    // Bloom → bandwidth
     float baseBW = jb_bank_bandwidth_base(x, bank);
-    float addBW  = 0.15f * jb_clamp(v->vel,0.f,1.f);
+    float addBW  = (0.15f + 0.45f * bloom_amt) * jb_clamp(v->vel,0.f,1.f);
     *bandwidth_v_p = jb_clamp(baseBW + addBW, 0.f, 1.f);
 
-    // Dispersion morph targets are currently disabled for the complex resonator path
-    // (kept for compatibility with existing parameter plumbing).
+    // per-mode dispersion targets (ignore fundamental)
+    float disp_base = jb_clamp(jb_bank_dispersion(x, bank), 0.f, 1.f);
+    // LFO1 dispersion modulation removed (not a supported target anymore).
+    float total_disp = jb_clamp(disp_base + *stiffen_add_p, 0.f, 1.f);
+float *disp_last_p = jb_bank_dispersion_last(x, bank);
     if (*disp_last_p < 0.f){ *disp_last_p = -1.f; }
 
     for(int i=0;i<n_modes;i++){
@@ -1820,47 +1868,59 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
     if (broad_total < 0.f) broad_total = 0.f;
     else if (broad_total > 1.f) broad_total = 1.f;
 
+    float md_amt = jb_clamp(jb_bank_micro_detune(x, bank),0.f,1.f);
+    float bw_amt = bank ? jb_clamp(v->bandwidth_v2, 0.f, 1.f) : jb_clamp(v->bandwidth_v, 0.f, 1.f);
 
     float disp = jb_bank_dispersion(x, bank);
-
-    // Bandwidth (0..1) is interpreted as extra damping / broadeness: higher -> shorter decays.
-    float bw_amt = jb_clamp(bank ? v->bandwidth_v2 : v->bandwidth_v, 0.f, 1.f);
 
     for(int i=0;i<n_modes;i++){
         jb_mode_rt_t *md=&m[i];
         if(!base[i].active){
-            md->pole_re = md->pole_im = 0.f;
-            md->injL = md->injR = 0.f;
-            md->nyq_kill = 1;
+            md->a1L=md->a2L=md->a1bL=md->a2bL=0.f;
+            md->a1R=md->a2R=md->a1bR=md->a2bR=0.f;
+            md->t60_s=0.f;
+            md->normL = md->normR = 1.f;
             continue;
         }
 
-        float ratio = md->ratio_now + disp_offset[i];
+        float ratio_base = md->ratio_now + disp_offset[i];
         // Quantize: snap ratios toward whole integers (0..1).
         if (disp > 0.f){
             float a = jb_clamp(disp, 0.f, 1.f);
-            float nearest = roundf(ratio);
-            ratio = (1.f - a)*ratio + a*nearest;
+            float nearest = roundf(ratio_base);
+            ratio_base = (1.f - a)*ratio_base + a*nearest;
         }
-        if (ratio < 0.01f) ratio = 0.01f;
 
-        float Hz = base[i].keytrack ? (f0_eff * ratio) : ratio;
+        float ratioL = ratio_base;
+        float ratioR = ratio_base;
+        if(i!=0){ ratioL += md_amt * md->md_hit_offsetL; ratioR += md_amt * md->md_hit_offsetR; }
+        if (ratioL < 0.01f) ratioL = 0.01f;
+        if (ratioR < 0.01f) ratioR = 0.01f;
+
+        float HzL = base[i].keytrack ? (f0_eff * ratioL) : ratioL;
+        float HzR = base[i].keytrack ? (f0_eff * ratioR) : ratioR;
         md->nyq_kill = 0;
-        if (Hz >= 0.5f * x->sr){
+        if (HzL >= 0.5f * x->sr || HzR >= 0.5f * x->sr){
             md->nyq_kill = 1;
-            Hz = 0.f;
-        } else if (Hz < 0.f){
-            Hz = 0.f;
+            HzL = HzR = 0.f;
+        } else {
+            if (HzL < 0.f) HzL = 0.f;
+            if (HzR < 0.f) HzR = 0.f;
+        }
+        float wL = 2.f * (float)M_PI * HzL / x->sr;
+        float wR = 2.f * (float)M_PI * HzR / x->sr;
+
+        if (md->nyq_kill){
+            md->a1L=md->a2L=md->a1bL=md->a2bL=0.f;
+            md->a1R=md->a2R=md->a1bR=md->a2bR=0.f;
+            md->normL = md->normR = 1.f;
         }
 
-        float w = 2.f * (float)M_PI * Hz / x->sr;
-
+        
         // --- Global decay (base T60) ---
+        // NOTE: global_decay sets the baseline decay for ALL modes (uniform), before frequency-based damping.
         float gdecay01 = jb_clamp(broad_total, 0.f, 1.f);
-        // Base per-mode decay (ms) is the primary T60 definition. Global decay acts as a musical multiplier.
-        float base_decay_s = (base[i].base_decay_ms > 0.f) ? (0.001f * base[i].base_decay_ms) : 0.001f;
-        float decay_mult   = jb_expmap01(gdecay01, 0.25f, 4.0f);
-        float T60 = base_decay_s * decay_mult;
+        float T60 = jb_expmap01(gdecay01, JB_GLOBAL_DECAY_MIN_S, JB_GLOBAL_DECAY_MAX_S);
 
         float decay_pitch_mul = bank ? v->decay_pitch_mul2 : v->decay_pitch_mul;
         float decay_vel_mul   = bank ? v->decay_vel_mul2   : v->decay_vel_mul;
@@ -1869,17 +1929,16 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
         T60 *= decay_vel_mul;
         T60 *= cr_decay_mul[i];
 
-        // Apply bandwidth -> extra damping (shorten T60).
-        // bw=0 => unchanged, bw=1 => up to 4x shorter.
-        T60 *= (1.f / (1.f + 3.f * bw_amt));
-
         // --- Frequency-based damping ("damper remastered") ---
+        // decay_rate (alpha) = alpha_base + (damper * pow(f_norm, power_law) * alpha_hi_max)
+        // where f_norm is normalized to Nyquist.
         {
             const float LN1000 = 6.907755278982137f; // ln(1000)
             float damper01 = jb_clamp(damping_total, 0.f, 1.f);
             float slope01  = jb_clamp(jb_bank_slope(x, bank), 0.f, 1.f);
             float power_law = jb_slope_to_powerlaw(slope01);
 
+            float Hz = 0.5f * (HzL + HzR);
             float nyq = 0.5f * x->sr;
             float f_norm = (nyq > 0.f) ? (Hz / nyq) : 0.f;
             f_norm = jb_clamp(f_norm, 0.f, 1.f);
@@ -1896,31 +1955,54 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
 
         md->t60_s = T60;
 
-        if (md->nyq_kill){
-            md->pole_re = md->pole_im = 0.f;
-            md->injL = md->injR = 0.f;
-            continue;
-        }
-
-        // Convert T60 -> pole radius.
         float r = (T60 <= 0.f) ? 0.f : powf(10.f, -3.f / (T60 * x->sr));
-        if (r < 0.f) r = 0.f;
-        if (r > 0.999999f) r = 0.999999f;
+        float cL=cosf(wL), cR=cosf(wR);
 
-        // Complex pole p = r * e^{j w}
-        md->pole_re = r * cosf(w);
-        md->pole_im = r * sinf(w);
+        md->a1L=2.f*r*cL; md->a2L=-r*r;
+        md->a1R=2.f*r*cR; md->a2R=-r*r;
+        // Scaling Factor normalization (frequency + decay-aware, constant-energy target):
+// The old choice:
+//   b0 = (1 - r) * sqrt(1 + r^2 - 2 r cos(2 w0))
+// normalizes the *steady-state sinusoid* gain at resonance (|H(e^{jw0})|=1),
+// which makes long decays (r→1) inject very little energy for burst/noise exciters.
+//
+// For burst/noise excitation, a better perceptual target is roughly constant injected
+// power/energy vs decay. Replace (1 - r) with sqrt(1 - r^2).
+float tL = 1.f + r*r - 2.f*r*cosf(2.f*wL);
+float tR = 1.f + r*r - 2.f*r*cosf(2.f*wR);
+if (tL < 0.f) tL = 0.f;
+if (tR < 0.f) tR = 0.f;
 
-        // Injection gain: avoid 'whisper-quiet' long decays while remaining stable for continuous noise.
-        // We keep a floor so r->1 still gets meaningful injection, and blend toward sqrt(1-r^2) for short decays.
-        float q = 1.f - r*r;
-        if (q < 0.f) q = 0.f;
-        float inj = sqrtf(q);
-        inj = 0.35f + 0.65f * inj;
-        md->injL = md->injR = inj;
+float qL = 1.f - r*r;
+float qR = 1.f - r*r;
+if (qL < 0.f) qL = 0.f;
+if (qR < 0.f) qR = 0.f;
+
+float b0L = sqrtf(qL) * sqrtf(tL);
+float b0R = sqrtf(qR) * sqrtf(tR);
+
+if (b0L < 1e-9f) b0L = 1e-9f;
+if (b0R < 1e-9f) b0R = 1e-9f;
+
+md->normL = b0L;
+md->normR = b0R;
+
+        if (bw_amt > 0.f){
+            float mode_scale = (n_modes>1)? ((float)i/(float)(n_modes-1)) : 0.f;
+            float max_det = 0.0005f + 0.0015f * mode_scale;
+            float detL = jb_clamp(md->bw_hit_ratioL, -max_det, max_det) * bw_amt;
+            float detR = jb_clamp(md->bw_hit_ratioR, -max_det, max_det) * bw_amt;
+            float w2L = wL * (1.f + detL);
+            float w2R = wR * (1.f + detR);
+            float c2L = cosf(w2L);
+            float c2R = cosf(w2R);
+            md->a1bL = 2.f*r*c2L; md->a2bL = -r*r;
+            md->a1bR = 2.f*r*c2R; md->a2bR = -r*r;
+        } else {
+            md->a1bL=md->a2bL=0.f; md->a1bR=md->a2bR=0.f;
+        }
     }
 }
-
 static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
     jb_update_voice_coeffs_bank(x, v, 0);
 }
@@ -2059,8 +2141,6 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
         if(!base[i].active){
             m[i].gain_nowL = 0.f;
             m[i].gain_nowR = 0.f;
-            m[i].out_wL = 0.f;
-            m[i].out_wR = 0.f;
             continue;
         }
 
@@ -2116,30 +2196,31 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
         // --- Spatial coupling (2D excitation, 2D pickup; signed) ---
         float gnL = gn, gnR = gn;
         float gn_refL = gn_ref, gn_refR = gn_ref;
-        float gp_store = 0.f;
         {
             const int n = freq_rank_of_id[i]; // 0..active_count-1 (ascending frequency)
             if (n >= 0){
+                // Excitation is 2D: ge = sin(nx*pi*posx) * sin(ny*pi*posy)
                 int nx, ny;
                 jb_rank_to_nm(n, &nx, &ny);
-                const float ge = (sinf((float)nx * PI * posx) * sinf((float)ny * PI * posy)) * pos_norm;
+                const float ge  = (sinf((float)nx * PI * posx) * sinf((float)ny * PI * posy)) * pos_norm;
+
+                // Pickup (mic) reads displacement at a single 2D mic position (X,Y).
+                // We keep one pickup point for both L/R outputs (no stereo mic spread here).
                 const float gp = (sinf((float)nx * PI * micX) * sinf((float)ny * PI * micY)) * mic_norm;
-                gp_store = gp;
-                // Excitation coupling uses ge only; pickup is applied at output sum.
-                gnL     *= ge;
-                gnR     *= ge;
-                gn_refL *= ge;
-                gn_refR *= ge;
+
+                const float wL = ge * gp;
+                const float wR = ge * gp;
+gnL     *= wL;
+                gnR     *= wR;
+                gn_refL *= wL;
+                gn_refR *= wR;
             }
         }
-        m[i].out_wL = gp_store;
-        m[i].out_wR = gp_store;
 
         m[i].gain_nowL = gnL;
         m[i].gain_nowR = gnR;
-        // Loudness normalization is based on the full excitation*pickup product (old behavior).
-        sum_gain += 0.5f * (fabsf(gnL * gp_store) + fabsf(gnR * gp_store));
-        sum_ref  += 0.5f * (fabsf(gn_refL * gp_store) + fabsf(gn_refR * gp_store));
+        sum_gain += 0.5f * (fabsf(gnL) + fabsf(gnR));
+        sum_ref  += 0.5f * (fabsf(gn_refL) + fabsf(gn_refR));
     }
 
     // Apply normalization so brightness redistributes energy without changing overall level.
@@ -2175,12 +2256,15 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
         md->ratio_now = x->base[i].base_ratio;
         md->decay_ms_now = x->base[i].base_decay_ms;
         md->gain_nowL = x->base[i].base_gain; md->gain_nowR = x->base[i].base_gain;
-        md->out_wL = 1.f; md->out_wR = 1.f;
         md->t60_s = md->decay_ms_now*0.001f;
-        md->pole_re = md->pole_im = 0.f;
-        md->st_reL = md->st_imL = 0.f;
-        md->st_reR = md->st_imR = 0.f;
-        md->injL = md->injR = 0.f;
+        md->a1L=md->a2L=md->y1L=md->y2L=0.f; md->a1bL=md->a2bL=md->y1bL=md->y2bL=0.f;
+        md->a1R=md->a2R=md->y1R=md->y2R=0.f; md->a1bR=md->a2bR=md->y1bR=md->y2bR=0.f;
+        md->driveL=md->driveR=0.f; md->envL=md->envR=0.f;
+        md->y_pre_lastL=md->y_pre_lastR=0.f;
+        md->hit_gateL=md->hit_gateR=0; md->hit_coolL=md->hit_coolR=0;
+        md->md_hit_offsetL = 0.f; md->md_hit_offsetR = 0.f;
+        md->bw_hit_ratioL = 0.f;  md->bw_hit_ratioR = 0.f;
+        md->normL = md->normR = 1.f;
         md->nyq_kill = 0;
 
         v->disp_offset[i]=0.f; v->disp_target[i]=0.f;
@@ -2194,12 +2278,15 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
         md->ratio_now = x->base2[i].base_ratio;
         md->decay_ms_now = x->base2[i].base_decay_ms;
         md->gain_nowL = x->base2[i].base_gain; md->gain_nowR = x->base2[i].base_gain;
-        md->out_wL = 1.f; md->out_wR = 1.f;
         md->t60_s = md->decay_ms_now*0.001f;
-        md->pole_re = md->pole_im = 0.f;
-        md->st_reL = md->st_imL = 0.f;
-        md->st_reR = md->st_imR = 0.f;
-        md->injL = md->injR = 0.f;
+        md->a1L=md->a2L=md->y1L=md->y2L=0.f; md->a1bL=md->a2bL=md->y1bL=md->y2bL=0.f;
+        md->a1R=md->a2R=md->y1R=md->y2R=0.f; md->a1bR=md->a2bR=md->y1bR=md->y2bR=0.f;
+        md->driveL=md->driveR=0.f; md->envL=md->envR=0.f;
+        md->y_pre_lastL=md->y_pre_lastR=0.f;
+        md->hit_gateL=md->hit_gateR=0; md->hit_coolL=md->hit_coolR=0;
+        md->md_hit_offsetL = 0.f; md->md_hit_offsetR = 0.f;
+        md->bw_hit_ratioL = 0.f;  md->bw_hit_ratioR = 0.f;
+        md->normL = md->normR = 1.f;
         md->nyq_kill = 0;
 
         v->disp_offset2[i]=0.f; v->disp_target2[i]=0.f;
@@ -2229,6 +2316,8 @@ static void jb_voice_panic_reset(t_juicy_bank_tilde *x, jb_voice_t *v){
     v->rel_env2 = 0.f;
     v->energy = 0.f;
 
+    v->coup_b1_prevL = v->coup_b1_prevR = 0.f;
+    v->coup_b2_prevL = v->coup_b2_prevR = 0.f;
 
     // Internal exciter reset
     jb_exc_voice_reset_runtime(&v->exc);
@@ -2242,13 +2331,19 @@ static void jb_voice_panic_reset(t_juicy_bank_tilde *x, jb_voice_t *v){
     // Clear resonator runtime states (keep ratios/decays/gains as-is so next note is consistent)
     for (int i = 0; i < x->n_modes; ++i){
         jb_mode_rt_t *md = &v->m[i];
-        md->st_reL = md->st_imL = 0.f;
-        md->st_reR = md->st_imR = 0.f;
+        md->y1L = md->y2L = md->y1bL = md->y2bL = 0.f;
+        md->y1R = md->y2R = md->y1bR = md->y2bR = 0.f;
+        md->driveL = md->driveR = 0.f;
+        md->envL = md->envR = 0.f;
+        md->y_pre_lastL = md->y_pre_lastR = 0.f;
     }
     for (int i = 0; i < x->n_modes2; ++i){
         jb_mode_rt_t *md = &v->m2[i];
-        md->st_reL = md->st_imL = 0.f;
-        md->st_reR = md->st_imR = 0.f;
+        md->y1L = md->y2L = md->y1bL = md->y2bL = 0.f;
+        md->y1R = md->y2R = md->y1bR = md->y2bR = 0.f;
+        md->driveL = md->driveR = 0.f;
+        md->envL = md->envR = 0.f;
+        md->y_pre_lastL = md->y_pre_lastR = 0.f;
     }
 }
 
@@ -2561,6 +2656,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         jb_voice_t *v = &x->v[vix];
         if (v->state==V_IDLE) continue;
 
+        const float bw_amt1 = jb_clamp(v->bandwidth_v, 0.f, 1.f);
+        const float bw_amt2 = jb_clamp(v->bandwidth_v2, 0.f, 1.f);        // (STEP 2) Internal exciter replaces external input routing (no more srcL/srcR per voice)
         (void)inL; (void)inR;
 
         // Per-bank master gain (0..1) with modulation-matrix target "master" (index 11).
@@ -2649,167 +2746,142 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
             // Cache raw internal exciter for later (Bank1 may need it even if Bank2 input is replaced)
             const float ex0L = exL, ex0R = exR;
-
-            // --- STATE-SPACE COMPLEX MODAL OSCILLATORS ---
-            // Choose which bank gets direct exciter input for this topology.
-            float ex1L = 0.f, ex1R = 0.f; // bank 1 exciter input
-            float ex2L = 0.f, ex2R = 0.f; // bank 2 exciter input
-            if (topo == 0){
-                ex1L = ex0L; ex1R = ex0R;
-                ex2L = ex0L; ex2R = ex0R;
-            }else if (topo == 1){ // B2 -> B1 : bank2 gets exciter, bank1 gets energy only via coupling
-                ex2L = ex0L; ex2R = ex0R;
-            }else if (topo == 2){ // B1 -> B2
-                ex1L = ex0L; ex1R = ex0R;
-            }else{ // topo == 3 : cross coupling (bidirectional) but only bank2 is directly excited
-                ex2L = ex0L; ex2R = ex0R;
+            // Select what excites BANK 2 for this topology
+            if (topo==2){ // Bank1 excites Bank2 (Bank2 has no direct exciter)
+                exL = coup * v->coup_b1_prevL;
+                exR = coup * v->coup_b1_prevR;
+            } else if (topo==3){ // cross: Bank2 has exciter + coupling from Bank1
+                exL = ex0L + (coup * v->coup_b1_prevL);
+                exR = ex0R + (coup * v->coup_b1_prevR);
             }
 
-            // Pan weights are per-bank (not per-mode).
-            float base_pan1 = 0.f;
-            if (lfo1_out != 0.f && lfo1_tgt == gensym("pan_1")) base_pan1 = jb_clamp(lfo1_out, -1.f, 1.f);
-            float p1 = jb_clamp(base_pan1 + pan_mod1, -1.f, 1.f);
-            float wL1 = sqrtf(0.5f * (1.f - p1));
-            float wR1 = sqrtf(0.5f * (1.f + p1));
-
-            float base_pan2 = 0.f;
-            if (lfo1_out != 0.f && lfo1_tgt == gensym("pan_2")) base_pan2 = jb_clamp(lfo1_out, -1.f, 1.f);
-            float p2 = jb_clamp(base_pan2 + pan_mod2, -1.f, 1.f);
-            float wL2 = sqrtf(0.5f * (1.f - p2));
-            float wR2 = sqrtf(0.5f * (1.f + p2));
-
-                        // 1) Sum outputs from *previous* modal state (no direct feedthrough)
-            //    y[n] = c^T x[n] ; x[n+1] = A x[n] + b u[n]
+            float b2sendL = 0.f, b2sendR = 0.f; // bank2 send (used for topo 1/3 and stored for delayed use)
+            float b1sendL = 0.f, b1sendR = 0.f; // bank1 send (used for topo 2/3 and stored for delayed use)
+            // -------- BANK 2 --------
             if (bank_gain2 > 0.f && v->rel_env2 > 0.f){
-                float env2 = v->rel_env2;
-                for (int m = 0; m < x->n_modes2; ++m){
-                    if (!base2[m].active) continue;
-                    jb_mode_rt_t *md = &v->m2[m];
-                    if (md->nyq_kill) continue;
-                    float yL = md->st_reL * md->out_wL;
-                    float yR = md->st_reR * md->out_wR;
-                    yL *= env2; yR *= env2;
-                    vOutL += yL * wL2 * bank_gain2;
-                    vOutR += yR * wR2 * bank_gain2;
+                for(int m=0;m<x->n_modes2;m++){
+                    if(!base2[m].active) continue;
+                    jb_mode_rt_t *md=&v->m2[m];
+                    float gL = md->gain_nowL;
+                    float gR = md->gain_nowR;
+                    if ((fabsf(gL) + fabsf(gR)) <= 0.f || md->nyq_kill) continue;
+
+                    float y1L=md->y1L, y2L=md->y2L, y1bL=md->y1bL, y2bL=md->y2bL, driveL=md->driveL, envL=md->envL;
+                    float y1R=md->y1R, y2R=md->y2R, y1bR=md->y1bR, y2bR=md->y2bR, driveR=md->driveR, envR=md->envR;                    float att_a = 1.f;
+                    float excL = exL * gL;
+                    float excR = exR * gR;
+
+                    driveL += att_a*(excL - driveL);
+                    float y_linL = (md->a1L*y1L + md->a2L*y2L) + driveL * md->normL;
+                    y2L=y1L; y1L=y_linL;
+
+                    driveR += att_a*(excR - driveR);
+                    float y_linR = (md->a1R*y1R + md->a2R*y2R) + driveR * md->normR;
+                    y2R=y1R; y1R=y_linR;
+
+                    float y_totalL = y_linL;
+                    float y_totalR = y_linR;
+                    if (bw_amt2 > 0.f){
+                        float y_lin_bL = (md->a1bL*y1bL + md->a2bL*y2bL);
+                        y2bL=y1bL; y1bL=y_lin_bL;
+                        y_totalL += 0.12f * bw_amt2 * y_lin_bL;
+
+                        float y_lin_bR = (md->a1bR*y1bR + md->a2bR*y2bR);
+                        y2bR=y1bR; y1bR=y_lin_bR;
+                        y_totalR += 0.12f * bw_amt2 * y_lin_bR;
+                    }
+	                    float base_pan = 0.f;
+	                    // NEW MOD LANES: LFO1 -> pan_2 (bank 2)
+	                    if (lfo1_out != 0.f && lfo1_tgt == gensym("pan_2")) {
+	                        base_pan = jb_clamp(lfo1_out, -1.f, 1.f);
+	                    }
+	                    float p = jb_clamp(base_pan + pan_mod2, -1.f, 1.f);
+                    float wL = sqrtf(0.5f*(1.f - p));
+                    float wR = sqrtf(0.5f*(1.f + p));
+                    if (need_send2){ b2sendL += y_totalL * wL; b2sendR += y_totalR * wR; }
+                    y_totalL *= v->rel_env2; y_totalR *= v->rel_env2;
+                    vOutL += y_totalL * wL * bank_gain2;
+                    vOutR += y_totalR * wR * bank_gain2;
+
+                    md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
+                    md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
                 }
             }
+            // topology selector (BANK 1 input source):
+            // topo 0: normal (both banks excited by internal exciter)
+            // topo 1: B2 -> B1 (B1 gets ONLY Bank2 send, no direct exciter)
+            // topo 2: B1 -> B2 (B1 gets internal exciter)
+            // topo 3: cross (B1 gets delayed Bank2 send; no direct exciter)
+            if (topo==0 || topo==2){
+                exL = ex0L;
+                exR = ex0R;
+            } else if (topo==1){
+                exL = coup * b2sendL;
+                exR = coup * b2sendR;
+            } else if (topo==3){
+                exL = coup * v->coup_b2_prevL;
+                exR = coup * v->coup_b2_prevR;
+            }
 
+// -------- BANK 1 --------
             if (bank_gain1 > 0.f && v->rel_env > 0.f){
-                float env1 = v->rel_env;
-                for (int m = 0; m < x->n_modes; ++m){
-                    if (!base1[m].active) continue;
-                    jb_mode_rt_t *md = &v->m[m];
-                    if (md->nyq_kill) continue;
-                    float yL = md->st_reL * md->out_wL;
-                    float yR = md->st_reR * md->out_wR;
-                    yL *= env1; yR *= env1;
-                    vOutL += yL * wL1 * bank_gain1;
-                    vOutR += yR * wR1 * bank_gain1;
-                }
-            }
-
-            // 2) Update modal states for both banks (writes x[n+1])
-            if (v->rel_env2 > 0.f){
-                for (int m = 0; m < x->n_modes2; ++m){
-                    if (!base2[m].active) continue;
-                    jb_mode_rt_t *md = &v->m2[m];
-                    if (md->nyq_kill) continue;
+                for(int m=0;m<x->n_modes;m++){
+                    if(!base1[m].active) continue;
+                    jb_mode_rt_t *md=&v->m[m];
                     float gL = md->gain_nowL;
                     float gR = md->gain_nowR;
-                    float inL = ex2L * gL;
-                    float inR = ex2R * gR;
+                    if ((fabsf(gL) + fabsf(gR)) <= 0.f || md->nyq_kill) continue;
 
-                    // L state
-                    float re = md->st_reL, im = md->st_imL;
-                    float nre = md->pole_re * re - md->pole_im * im + md->injL * inL;
-                    float nim = md->pole_re * im + md->pole_im * re;
-                    md->st_reL = nre; md->st_imL = nim;
+                    float y1L=md->y1L, y2L=md->y2L, y1bL=md->y1bL, y2bL=md->y2bL, driveL=md->driveL, envL=md->envL;
+                    float y1R=md->y1R, y2R=md->y2R, y1bR=md->y1bR, y2bR=md->y2bR, driveR=md->driveR, envR=md->envR;                    float att_a = 1.f;
+                    float excL = exL * gL;
+                    float excR = exR * gR;
 
-                    // R state
-                    re = md->st_reR; im = md->st_imR;
-                    nre = md->pole_re * re - md->pole_im * im + md->injR * inR;
-                    nim = md->pole_re * im + md->pole_im * re;
-                    md->st_reR = nre; md->st_imR = nim;
+                    driveL += att_a*(excL - driveL);
+                    float y_linL = (md->a1L*y1L + md->a2L*y2L) + driveL * md->normL;
+                    y2L=y1L; y1L=y_linL;
+
+                    driveR += att_a*(excR - driveR);
+                    float y_linR = (md->a1R*y1R + md->a2R*y2R) + driveR * md->normR;
+                    y2R=y1R; y1R=y_linR;
+
+                    float y_totalL = y_linL;
+                    float y_totalR = y_linR;
+                    if (bw_amt1 > 0.f){
+                        float y_lin_bL = (md->a1bL*y1bL + md->a2bL*y2bL);
+                        y2bL=y1bL; y1bL=y_lin_bL;
+                        y_totalL += 0.12f * bw_amt1 * y_lin_bL;
+
+                        float y_lin_bR = (md->a1bR*y1bR + md->a2bR*y2bR);
+                        y2bR=y1bR; y1bR=y_lin_bR;
+                        y_totalR += 0.12f * bw_amt1 * y_lin_bR;
+                    }
+                    float base_pan = 0.f;
+	            if (lfo1_out != 0.f && lfo1_tgt == gensym("pan_1")) {
+	                base_pan = jb_clamp(lfo1_out, -1.f, 1.f);
+	            }
+                    float p = jb_clamp(base_pan + pan_mod1, -1.f, 1.f);
+                    if (p > 1.f) p = 1.f;
+                    else if (p < -1.f) p = -1.f;
+                    float wL = sqrtf(0.5f*(1.f - p));
+                    float wR = sqrtf(0.5f*(1.f + p));
+                    if (need_send1){ b1sendL += y_totalL * wL; b1sendR += y_totalR * wR; }
+
+                    y_totalL *= v->rel_env; y_totalR *= v->rel_env;
+                    vOutL += y_totalL * wL * bank_gain1;
+                    vOutR += y_totalR * wR * bank_gain1;
+
+                    md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
+                    md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
                 }
             }
 
-            if (v->rel_env > 0.f){
-                for (int m = 0; m < x->n_modes; ++m){
-                    if (!base1[m].active) continue;
-                    jb_mode_rt_t *md = &v->m[m];
-                    if (md->nyq_kill) continue;
-                    float gL = md->gain_nowL;
-                    float gR = md->gain_nowR;
-                    float inL = ex1L * gL;
-                    float inR = ex1R * gR;
+            // Store coupling sends for next sample (used by topo 2/3 delayed injection)
+            v->coup_b1_prevL = b1sendL;
+            v->coup_b1_prevR = b1sendR;
+            v->coup_b2_prevL = b2sendL;
+            v->coup_b2_prevR = b2sendR;
 
-                    float re = md->st_reL, im = md->st_imL;
-                    float nre = md->pole_re * re - md->pole_im * im + md->injL * inL;
-                    float nim = md->pole_re * im + md->pole_im * re;
-                    md->st_reL = nre; md->st_imL = nim;
-
-                    re = md->st_reR; im = md->st_imR;
-                    nre = md->pole_re * re - md->pole_im * im + md->injR * inR;
-                    nim = md->pole_re * im + md->pole_im * re;
-                    md->st_reR = nre; md->st_imR = nim;
-                }
-            }
-
-
-            // 3) Modal state coupling (energy-safe mixing; no audio feedback loop)
-            if (coup > 0.f && topo != 0){
-                int nmin = x->n_modes < x->n_modes2 ? x->n_modes : x->n_modes2;
-                if (topo == 1){ // B2 -> B1 (stable convex mix)
-                    float a = 1.f - coup;
-                    for (int m = 0; m < nmin; ++m){
-                        if (!(base1[m].active && base2[m].active)) continue;
-                        jb_mode_rt_t *m1 = &v->m[m];
-                        jb_mode_rt_t *m2 = &v->m2[m];
-                        m1->st_reL = a * m1->st_reL + coup * m2->st_reL;
-                        m1->st_imL = a * m1->st_imL + coup * m2->st_imL;
-                        m1->st_reR = a * m1->st_reR + coup * m2->st_reR;
-                        m1->st_imR = a * m1->st_imR + coup * m2->st_imR;
-                    }
-                }else if (topo == 2){ // B1 -> B2
-                    float a = 1.f - coup;
-                    for (int m = 0; m < nmin; ++m){
-                        if (!(base1[m].active && base2[m].active)) continue;
-                        jb_mode_rt_t *m1 = &v->m[m];
-                        jb_mode_rt_t *m2 = &v->m2[m];
-                        m2->st_reL = a * m2->st_reL + coup * m1->st_reL;
-                        m2->st_imL = a * m2->st_imL + coup * m1->st_imL;
-                        m2->st_reR = a * m2->st_reR + coup * m1->st_reR;
-                        m2->st_imR = a * m2->st_imR + coup * m1->st_imR;
-                    }
-                }else{ // topo == 3 : bidirectional, energy-preserving rotation mix
-                    float alpha = coup * 0.78539816339f; // pi/4 max
-                    float c = cosf(alpha);
-                    float s = sinf(alpha);
-                    for (int m = 0; m < nmin; ++m){
-                        if (!(base1[m].active && base2[m].active)) continue;
-                        jb_mode_rt_t *m1 = &v->m[m];
-                        jb_mode_rt_t *m2 = &v->m2[m];
-
-                        float r1, i1, r2, i2;
-
-                        // L
-                        r1 = m1->st_reL; i1 = m1->st_imL;
-                        r2 = m2->st_reL; i2 = m2->st_imL;
-                        m1->st_reL = c * r1 + s * r2;
-                        m1->st_imL = c * i1 + s * i2;
-                        m2->st_reL = c * r2 - s * r1;
-                        m2->st_imL = c * i2 - s * i1;
-
-                        // R
-                        r1 = m1->st_reR; i1 = m1->st_imR;
-                        r2 = m2->st_reR; i2 = m2->st_imR;
-                        m1->st_reR = c * r1 + s * r2;
-                        m1->st_imR = c * i1 + s * i2;
-                        m2->st_reR = c * r2 - s * r1;
-                        m2->st_imR = c * i2 - s * i1;
-                    }
-                }
-            }
 
             // --- voice output + safety watchdog ---
             // If anything goes unstable (NaN/INF or runaway magnitude), hard-reset this voice.
@@ -2852,12 +2924,16 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     v->state = V_IDLE;
                     if (is_tail){
                         v->energy = 0.f;
+                        v->coup_b1_prevL = v->coup_b1_prevR = 0.f;
+                        v->coup_b2_prevL = v->coup_b2_prevR = 0.f;
                     }
                 } else if (is_tail){
                     // Safety: also free a tail once the exciter + mod env are idle and output energy is gone.
                     if (v->exc.env.stage == JB_EXC_ENV_IDLE && v->mod_env_stage == 0 && v->energy < tail_energy_thresh){
                         v->state = V_IDLE;
                         v->energy = 0.f;
+                        v->coup_b1_prevL = v->coup_b1_prevR = 0.f;
+                        v->coup_b2_prevL = v->coup_b2_prevR = 0.f;
                     }
                 }
             } else if (v->state == V_HELD) {
@@ -3046,9 +3122,22 @@ static void juicy_bank_tilde_release(t_juicy_bank_tilde *x, t_floatarg f){
 }
 
 // realism & misc
+static void juicy_bank_tilde_phase_random(t_juicy_bank_tilde *x, t_floatarg f){
+    if (x->edit_bank) x->phase_rand2 = jb_clamp(f, 0.f, 1.f);
+    else              x->phase_rand  = jb_clamp(f, 0.f, 1.f);
+}
+static void juicy_bank_tilde_phase_debug(t_juicy_bank_tilde *x, t_floatarg on){
+    int v = (on > 0.f) ? 1 : 0;
+    if (x->edit_bank) x->phase_debug2 = v;
+    else              x->phase_debug  = v;
+}
 static void juicy_bank_tilde_bandwidth(t_juicy_bank_tilde *x, t_floatarg f){
     if (x->edit_bank) x->bandwidth2 = jb_clamp(f, 0.f, 1.f);
     else              x->bandwidth  = jb_clamp(f, 0.f, 1.f);
+}
+static void juicy_bank_tilde_micro_detune(t_juicy_bank_tilde *x, t_floatarg f){
+    if (x->edit_bank) x->micro_detune2 = jb_clamp(f, 0.f, 1.f);
+    else              x->micro_detune  = jb_clamp(f, 0.f, 1.f);
 }
 // --- Spatial coupling param setters (gain-level only) ---
 static void juicy_bank_tilde_position_x(t_juicy_bank_tilde *x, t_floatarg f){
@@ -3288,6 +3377,7 @@ static void juicy_bank_tilde_seed(t_juicy_bank_tilde *x, t_floatarg f){
     jb_rng_seed(&x->rng, (unsigned int)((int)f*2654435761u));
     for(int i=0; i<*n_modes_p; i++){
         base[i].disp_signature = (i==0) ? 0.f : jb_rng_bi(&x->rng);
+        base[i].micro_sig      = (i==0) ? 0.f : jb_rng_bi(&x->rng);
     }
     if (x->edit_bank) x->dispersion_last2 = x->dispersion2;
     else              x->dispersion_last  = x->dispersion;
@@ -3332,6 +3422,11 @@ static void juicy_bank_tilde_bite(t_juicy_bank_tilde *x, t_floatarg f){
     float v = jb_clamp(f, 0.f, 1.f);
     if (x->edit_bank) x->bite_amt2 = v;
     else              x->bite_amt  = v;
+}
+static void juicy_bank_tilde_bloom(t_juicy_bank_tilde *x, t_floatarg f){
+    float v = jb_clamp(f, 0.f, 1.f);
+    if (x->edit_bank) x->bloom_amt2 = v;
+    else              x->bloom_amt  = v;
 }
 static void juicy_bank_tilde_crossring(t_juicy_bank_tilde *x, t_floatarg f){
     float v = jb_clamp(f, 0.f, 1.f);
@@ -3483,6 +3578,7 @@ static void jb_apply_default_saw_bank(t_juicy_bank_tilde *x, int bank){
         // Flat per-mode gain by default (brightness defines the spectral slope)
         base[i].base_gain = 1.0f;        base[i].keytrack = 1;
         base[i].disp_signature = 0.f;
+        base[i].micro_sig      = 0.f;
     }
 
     // sensible body defaults (per bank)
@@ -3522,7 +3618,8 @@ static void *juicy_bank_tilde_new(void){
 
         x->warp = 0.f;
 // realism defaults
-    x->bandwidth=0.1f;
+    x->phase_rand=1.f; x->phase_debug=0;
+    x->bandwidth=0.1f; x->micro_detune=0.1f;
     x->excite_pos=0.33f; x->excite_pos_y=0.33f; x->pickup_x=0.33f; x->pickup_y=0.33f;
 // bank 2 defaults: start as a functional copy of bank 1 (bank 2 is still silent by master=0)
 x->n_modes2 = x->n_modes;
@@ -3548,14 +3645,18 @@ x->dispersion_last2 = x->dispersion_last;
 x->offset_amt2    = x->offset_amt;
 x->collision_amt2 = x->collision_amt;
 
+x->phase_rand2    = x->phase_rand;
+x->phase_debug2   = x->phase_debug;
 
 x->bandwidth2     = x->bandwidth;
+x->micro_detune2  = x->micro_detune;
 
 x->stiffen_amt2     = x->stiffen_amt;
 x->shortscale_amt2  = x->shortscale_amt;
 x->linger_amt2      = x->linger_amt;
 x->tilt_amt2        = x->tilt_amt;
 x->bite_amt2        = x->bite_amt;
+x->bloom_amt2       = x->bloom_amt;
 x->crossring_amt2   = x->crossring_amt;
 
 x->excite_pos2    = x->excite_pos;
@@ -3622,11 +3723,12 @@ x->excite_pos_y2  = x->excite_pos_y;
             x->mod_matrix2[i][j] = 0.f;
         }
     x->basef0_ref=261.626f; // C4
-    x->stiffen_amt=x->shortscale_amt=x->linger_amt=x->tilt_amt=x->bite_amt=x->crossring_amt=0.f;
+    x->stiffen_amt=x->shortscale_amt=x->linger_amt=x->tilt_amt=x->bite_amt=x->bloom_amt=x->crossring_amt=0.f;
 
     x->max_voices = JB_ATTACK_VOICES;
     x->total_voices = JB_MAX_VOICES;
     for(int v=0; v<JB_MAX_VOICES; ++v){
+        x->v[v].state=V_IDLE; x->v[v].f0=x->basef0_ref; x->v[v].vel=0.f; x->v[v].energy=0.f; x->v[v].rel_env=0.f; x->v[v].rel_env2=0.f; x->v[v].coup_b1_prevL=0.f; x->v[v].coup_b1_prevR=0.f; x->v[v].coup_b2_prevL=0.f; x->v[v].coup_b2_prevR=0.f;
         for(int i=0;i<JB_MAX_MODES;i++){
             x->v[v].disp_offset[i]=x->v[v].disp_target[i]=0.f;
             x->v[v].disp_offset2[i]=x->v[v].disp_target2[i]=0.f;
@@ -4074,6 +4176,7 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_snapshot_undo
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_linger, gensym("linger"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_tilt, gensym("tilt"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bite, gensym("bite"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bloom, gensym("bloom"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_crossring, gensym("crossring"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gensym("release"), A_DEFFLOAT, 0);
 
@@ -4137,7 +4240,10 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pickupL,     
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_dispersion_reroll, gensym("dispersion_reroll"), 0);
 
     // realism & misc
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_phase_random, gensym("phase_random"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_phase_debug, gensym("phase_debug"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bandwidth, gensym("bandwidth"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_micro_detune, gensym("micro_detune"), A_DEFFLOAT, 0);
 
     // notes/poly (non-voice-specific)
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_note, gensym("note"), A_DEFFLOAT, A_DEFFLOAT, 0);
