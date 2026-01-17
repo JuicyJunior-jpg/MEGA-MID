@@ -2556,106 +2556,6 @@ static void juicy_bank_tilde_off_poly(t_juicy_bank_tilde *x, t_floatarg vix){
     jb_note_off_voice(x, (int)vix);
 }
 
-
-// ---------- mode-coupling helpers (skew-symmetric neighbor coupling) ----------
-
-// Solve a real tridiagonal system using Thomas algorithm.
-// a: subdiagonal (a[0] ignored/0), b: diagonal, c: superdiagonal (c[n-1] ignored/0)
-// d: rhs, x: solution. All arrays length n.
-static inline void jb_tridiag_solve(int n, const float *a, const float *b, const float *c,
-                                   const float *d, float *x){
-    // Forward sweep
-    float cp[JB_MAX_MODES];
-    float dp[JB_MAX_MODES];
-    float denom = b[0];
-    if (fabsf(denom) < 1e-12f) denom = (denom < 0.f ? -1e-12f : 1e-12f);
-    cp[0] = c[0] / denom;
-    dp[0] = d[0] / denom;
-    for (int i=1;i<n;i++){
-        denom = b[i] - a[i]*cp[i-1];
-        if (fabsf(denom) < 1e-12f) denom = (denom < 0.f ? -1e-12f : 1e-12f);
-        cp[i] = (i == n-1) ? 0.f : (c[i] / denom);
-        dp[i] = (d[i] - a[i]*dp[i-1]) / denom;
-    }
-    // Back substitution
-    x[n-1] = dp[n-1];
-    for (int i=n-2;i>=0;i--){
-        x[i] = dp[i] - cp[i]*x[i+1];
-    }
-}
-
-// Build a skew-symmetric neighbor coupling chain between active modes.
-// We store only k[i] for edge between mode i and i+1 in the active list:
-//   K_{i,i+1}=k[i], K_{i+1,i}=-k[i]
-// and we precompute the tridiagonal coefficients for solving:
-//   (I - B0*K) y = rhs
-// where B0 is diagonal of per-mode input gain (here: norm).
-static inline void jb_build_coupling_chain(int n_active,
-                                          const int *idx,
-                                          const jb_mode_rt_t *m,
-                                          int topo,
-                                          float coup,
-                                          float *k_edges,
-                                          float *aL, float *bL, float *cL,
-                                          float *aR, float *bR, float *cR){
-    // topology meaning here:
-    // 0 = none
-    // 1 = neighbor coupling (gentle)
-    // 2 = neighbor coupling (stronger)
-    // 3 = neighbor coupling with alternating sign (more complex but still skew-symmetric)
-    if (n_active <= 1 || coup <= 0.f || topo <= 0){
-        for (int i=0;i<n_active;i++){ aL[i]=0.f; bL[i]=1.f; cL[i]=0.f; aR[i]=0.f; bR[i]=1.f; cR[i]=0.f; }
-        for (int i=0;i<n_active-1;i++) k_edges[i]=0.f;
-        return;
-    }
-    float k_base = 0.22f;
-    if (topo == 2) k_base = 0.35f;
-    if (topo == 3) k_base = 0.28f;
-
-    // Build raw edge couplings based on frequency proximity.
-    for (int i=0;i<n_active-1;i++){
-        const jb_mode_rt_t *m0 = &m[idx[i]];
-        const jb_mode_rt_t *m1 = &m[idx[i+1]];
-        float r0 = m0->ratio_now; if (r0 <= 0.f) r0 = 1.f;
-        float r1 = m1->ratio_now; if (r1 <= 0.f) r1 = 1.f;
-        float d = fabsf(log2f(r1 / r0));
-        // closer modes couple more; exp falloff.
-        float w = expf(-2.2f * d);
-        float sgn = 1.f;
-        if (topo == 3) sgn = (i & 1) ? -1.f : 1.f;
-        k_edges[i] = coup * k_base * w * sgn;
-    }
-
-    // Global gain correction: enforce diagonal dominance for BOTH ears.
-    // Row sum approx: |b0|*(|k_left|+|k_right|) < 1.0
-    float max_row = 0.f;
-    for (int i=0;i<n_active;i++){
-        const jb_mode_rt_t *md = &m[idx[i]];
-        float b0m = fmaxf(fabsf(md->normL), fabsf(md->normR));
-        float left  = (i>0)         ? fabsf(k_edges[i-1]) : 0.f;
-        float right = (i<n_active-1)? fabsf(k_edges[i])   : 0.f;
-        float row = b0m * (left + right);
-        if (row > max_row) max_row = row;
-    }
-    if (max_row > 0.90f){
-        float s = 0.90f / max_row;
-        for (int i=0;i<n_active-1;i++) k_edges[i] *= s;
-    }
-
-    // Build tridiagonal coefficients for L and R.
-    for (int i=0;i<n_active;i++){
-        const jb_mode_rt_t *md = &m[idx[i]];
-        float b0L = md->normL;
-        float b0R = md->normR;
-        bL[i] = 1.f;
-        bR[i] = 1.f;
-        aL[i] = (i>0)          ? (b0L * k_edges[i-1]) : 0.f;
-        cL[i] = (i<n_active-1) ? (-b0L * k_edges[i])  : 0.f;
-        aR[i] = (i>0)          ? (b0R * k_edges[i-1]) : 0.f;
-        cR[i] = (i<n_active-1) ? (-b0R * k_edges[i])  : 0.f;
-    }
-}
-
 // ---------- perform ----------
 
 static t_int *juicy_bank_tilde_perform(t_int *w){
@@ -2706,11 +2606,14 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     jb_exc_update_block(x);
     x->exc_shape = exc_shape_saved;
     jb_mod_adsr_update_block(x);
+
     const int topo = (int)jb_clamp(x->topology, 0.f, 3.f);
     float coup = jb_clamp(x->coupling, 0.f, 1.f);
-    if (lfo1_out != 0.f && lfo1_tgt == gensym("coupling_amt")) {
+    if (lfo1_out != 0.f && lfo1_tgt == gensym("coupling_amt")){
         coup = jb_clamp(coup + lfo1_out, 0.f, 1.f);
     }
+    const int need_send2 = (topo==1 || topo==3); // Bank2 -> Bank1 send needed
+    const int need_send1 = (topo==2 || topo==3); // Bank1 -> Bank2 send needed
     // Internal exciter mix weights (computed once per block)
     float exc_f = jb_clamp(x->exc_fader, -1.f, 1.f);
     float exc_t = 0.5f * (exc_f + 1.f);
@@ -2809,33 +2712,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         const jb_mode_base_t *base1 = x->base;
         const jb_mode_base_t *base2 = x->base2;
 
-
-        // --- Mode-coupling precompute (per voice, per block) ---
-        // We couple only ACTIVE modes in their current order using a skew-symmetric neighbor matrix.
-        // This is solved "instantly" (same sample) via (I - B0*K) y = rhs.
-
-        int idx1[JB_MAX_MODES]; int n1 = 0;
-        for (int m=0; m<x->n_modes; m++){
-            if (!base1[m].active) continue;
-            if (v->m[m].nyq_kill) continue;
-            idx1[n1++] = m;
-        }
-        float k1[JB_MAX_MODES];
-        float a1L[JB_MAX_MODES], b1L[JB_MAX_MODES], c1L[JB_MAX_MODES];
-        float a1R[JB_MAX_MODES], b1R[JB_MAX_MODES], c1R[JB_MAX_MODES];
-        jb_build_coupling_chain(n1, idx1, v->m, topo, coup, k1, a1L, b1L, c1L, a1R, b1R, c1R);
-
-        int idx2[JB_MAX_MODES]; int n2 = 0;
-        for (int m=0; m<x->n_modes2; m++){
-            if (!base2[m].active) continue;
-            if (v->m2[m].nyq_kill) continue;
-            idx2[n2++] = m;
-        }
-        float k2[JB_MAX_MODES];
-        float a2L[JB_MAX_MODES], b2L[JB_MAX_MODES], c2L[JB_MAX_MODES];
-        float a2R[JB_MAX_MODES], b2R[JB_MAX_MODES], c2R[JB_MAX_MODES];
-        jb_build_coupling_chain(n2, idx2, v->m2, topo, coup, k2, a2L, b2L, c2L, a2R, b2R, c2R);
-
         for(int i=0;i<n;i++){
             float vOutL = 0.f;
             float vOutR = 0.f;
@@ -2867,171 +2743,144 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             exL = jb_kill_denorm(exL);
             exR = jb_kill_denorm(exR);
             if (!jb_isfinitef(exL) || !jb_isfinitef(exR)) { exL = 0.f; exR = 0.f; }
-            // Cache raw internal exciter (both banks always use this now; topology is reserved for coupling style)
+
+            // Cache raw internal exciter for later (Bank1 may need it even if Bank2 input is replaced)
             const float ex0L = exL, ex0R = exR;
+            // Select what excites BANK 2 for this topology
+            if (topo==2){ // Bank1 excites Bank2 (Bank2 has no direct exciter)
+                exL = coup * v->coup_b1_prevL;
+                exR = coup * v->coup_b1_prevR;
+            } else if (topo==3){ // cross: Bank2 has exciter + coupling from Bank1
+                exL = ex0L + (coup * v->coup_b1_prevL);
+                exR = ex0R + (coup * v->coup_b1_prevR);
+            }
 
-            // -------- BANK 2 (mode-coupled) --------
-            if (bank_gain2 > 0.f && v->rel_env2 > 0.f && n2 > 0){
-                float rhsL[JB_MAX_MODES], rhsR[JB_MAX_MODES];
-                float ysolL[JB_MAX_MODES], ysolR[JB_MAX_MODES];
-
-                // Assemble RHS from current states + exciter
-                for (int j=0; j<n2; j++){
-                    jb_mode_rt_t *md = &v->m2[idx2[j]];
+            float b2sendL = 0.f, b2sendR = 0.f; // bank2 send (used for topo 1/3 and stored for delayed use)
+            float b1sendL = 0.f, b1sendR = 0.f; // bank1 send (used for topo 2/3 and stored for delayed use)
+            // -------- BANK 2 --------
+            if (bank_gain2 > 0.f && v->rel_env2 > 0.f){
+                for(int m=0;m<x->n_modes2;m++){
+                    if(!base2[m].active) continue;
+                    jb_mode_rt_t *md=&v->m2[m];
                     float gL = md->gain_nowL;
                     float gR = md->gain_nowR;
-                    float inL = ex0L * gL;
-                    float inR = ex0R * gR;
+                    if ((fabsf(gL) + fabsf(gR)) <= 0.f || md->nyq_kill) continue;
 
-                    // Core resonator: y = a1*y1 + a2*y2 + norm * drive
-                    // drive follows the effective input u (exciter + coupled feedback). With att_a=1, drive=u.
-                    const float att_a = 1.f;
-                    float dL = (md->a1L * md->y1L + md->a2L * md->y2L) + md->normL * (1.f - att_a) * md->driveL;
-                    float dR = (md->a1R * md->y1R + md->a2R * md->y2R) + md->normR * (1.f - att_a) * md->driveR;
-                    rhsL[j] = dL + (md->normL * att_a) * inL;
-                    rhsR[j] = dR + (md->normR * att_a) * inR;
-                }
+                    float y1L=md->y1L, y2L=md->y2L, y1bL=md->y1bL, y2bL=md->y2bL, driveL=md->driveL, envL=md->envL;
+                    float y1R=md->y1R, y2R=md->y2R, y1bR=md->y1bR, y2bR=md->y2bR, driveR=md->driveR, envR=md->envR;                    float att_a = 1.f;
+                    float excL = exL * gL;
+                    float excR = exR * gR;
 
-                jb_tridiag_solve(n2, a2L, b2L, c2L, rhsL, ysolL);
-                jb_tridiag_solve(n2, a2R, b2R, c2R, rhsR, ysolR);
+                    driveL += att_a*(excL - driveL);
+                    float y_linL = (md->a1L*y1L + md->a2L*y2L) + driveL * md->normL;
+                    y2L=y1L; y1L=y_linL;
 
-                // Apply to states + accumulate output
-                for (int j=0; j<n2; j++){
-                    int m = idx2[j];
-                    jb_mode_rt_t *md = &v->m2[m];
+                    driveR += att_a*(excR - driveR);
+                    float y_linR = (md->a1R*y1R + md->a2R*y2R) + driveR * md->normR;
+                    y2R=y1R; y1R=y_linR;
 
-                    float y_coreL = ysolL[j];
-                    float y_coreR = ysolR[j];
-
-                    // Coupled feedback term for this row: sum_j K_ij * y_j
-                    float fbL = 0.f, fbR = 0.f;
-                    if (topo > 0 && coup > 0.f){
-                        if (j < n2-1){ fbL += k2[j]   * ysolL[j+1]; fbR += k2[j]   * ysolR[j+1]; }
-                        if (j > 0)    { fbL -= k2[j-1] * ysolL[j-1]; fbR -= k2[j-1] * ysolR[j-1]; }
-                    }
-
-                    // Update drive follower using effective input u
-                    const float att_a = 1.f;
-                    float inL = ex0L * md->gain_nowL;
-                    float inR = ex0R * md->gain_nowR;
-                    float uL = inL + fbL;
-                    float uR = inR + fbR;
-                    md->driveL += att_a * (uL - md->driveL);
-                    md->driveR += att_a * (uR - md->driveR);
-
-                    // Advance core states
-                    md->y2L = md->y1L; md->y1L = y_coreL;
-                    md->y2R = md->y1R; md->y1R = y_coreR;
-
-                    // Bandwidth twin (legacy, optional): free-running neighbor pole contribution
-                    float y_totalL = y_coreL;
-                    float y_totalR = y_coreR;
+                    float y_totalL = y_linL;
+                    float y_totalR = y_linR;
                     if (bw_amt2 > 0.f){
-                        float y_lin_bL = (md->a1bL*md->y1bL + md->a2bL*md->y2bL);
-                        md->y2bL = md->y1bL; md->y1bL = y_lin_bL;
+                        float y_lin_bL = (md->a1bL*y1bL + md->a2bL*y2bL);
+                        y2bL=y1bL; y1bL=y_lin_bL;
                         y_totalL += 0.12f * bw_amt2 * y_lin_bL;
 
-                        float y_lin_bR = (md->a1bR*md->y1bR + md->a2bR*md->y2bR);
-                        md->y2bR = md->y1bR; md->y1bR = y_lin_bR;
+                        float y_lin_bR = (md->a1bR*y1bR + md->a2bR*y2bR);
+                        y2bR=y1bR; y1bR=y_lin_bR;
                         y_totalR += 0.12f * bw_amt2 * y_lin_bR;
                     }
-
-                    // Pan
-                    float base_pan = 0.f;
-                    if (lfo1_out != 0.f && lfo1_tgt == gensym("pan_2")) {
-                        base_pan = jb_clamp(lfo1_out, -1.f, 1.f);
-                    }
-                    float p = jb_clamp(base_pan + pan_mod2, -1.f, 1.f);
+	                    float base_pan = 0.f;
+	                    // NEW MOD LANES: LFO1 -> pan_2 (bank 2)
+	                    if (lfo1_out != 0.f && lfo1_tgt == gensym("pan_2")) {
+	                        base_pan = jb_clamp(lfo1_out, -1.f, 1.f);
+	                    }
+	                    float p = jb_clamp(base_pan + pan_mod2, -1.f, 1.f);
                     float wL = sqrtf(0.5f*(1.f - p));
                     float wR = sqrtf(0.5f*(1.f + p));
+                    if (need_send2){ b2sendL += y_totalL * wL; b2sendR += y_totalR * wR; }
+                    y_totalL *= v->rel_env2; y_totalR *= v->rel_env2;
+                    vOutL += y_totalL * wL * bank_gain2;
+                    vOutR += y_totalR * wR * bank_gain2;
 
-                    // Apply release env + bank master
-                    float y_postL = y_totalL * v->rel_env2;
-                    float y_postR = y_totalR * v->rel_env2;
-                    vOutL += y_postL * wL * bank_gain2;
-                    vOutR += y_postR * wR * bank_gain2;
-
-                    md->y_pre_lastL = y_postL;
-                    md->y_pre_lastR = y_postR;
+                    md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
+                    md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
                 }
             }
+            // topology selector (BANK 1 input source):
+            // topo 0: normal (both banks excited by internal exciter)
+            // topo 1: B2 -> B1 (B1 gets ONLY Bank2 send, no direct exciter)
+            // topo 2: B1 -> B2 (B1 gets internal exciter)
+            // topo 3: cross (B1 gets delayed Bank2 send; no direct exciter)
+            if (topo==0 || topo==2){
+                exL = ex0L;
+                exR = ex0R;
+            } else if (topo==1){
+                exL = coup * b2sendL;
+                exR = coup * b2sendR;
+            } else if (topo==3){
+                exL = coup * v->coup_b2_prevL;
+                exR = coup * v->coup_b2_prevR;
+            }
 
-            // -------- BANK 1 (mode-coupled) --------
-            if (bank_gain1 > 0.f && v->rel_env > 0.f && n1 > 0){
-                float rhsL[JB_MAX_MODES], rhsR[JB_MAX_MODES];
-                float ysolL[JB_MAX_MODES], ysolR[JB_MAX_MODES];
-
-                for (int j=0; j<n1; j++){
-                    jb_mode_rt_t *md = &v->m[idx1[j]];
+// -------- BANK 1 --------
+            if (bank_gain1 > 0.f && v->rel_env > 0.f){
+                for(int m=0;m<x->n_modes;m++){
+                    if(!base1[m].active) continue;
+                    jb_mode_rt_t *md=&v->m[m];
                     float gL = md->gain_nowL;
                     float gR = md->gain_nowR;
-                    float inL = ex0L * gL;
-                    float inR = ex0R * gR;
+                    if ((fabsf(gL) + fabsf(gR)) <= 0.f || md->nyq_kill) continue;
 
-                    const float att_a = 1.f;
-                    float dL = (md->a1L * md->y1L + md->a2L * md->y2L) + md->normL * (1.f - att_a) * md->driveL;
-                    float dR = (md->a1R * md->y1R + md->a2R * md->y2R) + md->normR * (1.f - att_a) * md->driveR;
-                    rhsL[j] = dL + (md->normL * att_a) * inL;
-                    rhsR[j] = dR + (md->normR * att_a) * inR;
-                }
+                    float y1L=md->y1L, y2L=md->y2L, y1bL=md->y1bL, y2bL=md->y2bL, driveL=md->driveL, envL=md->envL;
+                    float y1R=md->y1R, y2R=md->y2R, y1bR=md->y1bR, y2bR=md->y2bR, driveR=md->driveR, envR=md->envR;                    float att_a = 1.f;
+                    float excL = exL * gL;
+                    float excR = exR * gR;
 
-                jb_tridiag_solve(n1, a1L, b1L, c1L, rhsL, ysolL);
-                jb_tridiag_solve(n1, a1R, b1R, c1R, rhsR, ysolR);
+                    driveL += att_a*(excL - driveL);
+                    float y_linL = (md->a1L*y1L + md->a2L*y2L) + driveL * md->normL;
+                    y2L=y1L; y1L=y_linL;
 
-                for (int j=0; j<n1; j++){
-                    int m = idx1[j];
-                    jb_mode_rt_t *md = &v->m[m];
+                    driveR += att_a*(excR - driveR);
+                    float y_linR = (md->a1R*y1R + md->a2R*y2R) + driveR * md->normR;
+                    y2R=y1R; y1R=y_linR;
 
-                    float y_coreL = ysolL[j];
-                    float y_coreR = ysolR[j];
-
-                    float fbL = 0.f, fbR = 0.f;
-                    if (topo > 0 && coup > 0.f){
-                        if (j < n1-1){ fbL += k1[j]   * ysolL[j+1]; fbR += k1[j]   * ysolR[j+1]; }
-                        if (j > 0)    { fbL -= k1[j-1] * ysolL[j-1]; fbR -= k1[j-1] * ysolR[j-1]; }
-                    }
-
-                    const float att_a = 1.f;
-                    float inL = ex0L * md->gain_nowL;
-                    float inR = ex0R * md->gain_nowR;
-                    float uL = inL + fbL;
-                    float uR = inR + fbR;
-                    md->driveL += att_a * (uL - md->driveL);
-                    md->driveR += att_a * (uR - md->driveR);
-
-                    md->y2L = md->y1L; md->y1L = y_coreL;
-                    md->y2R = md->y1R; md->y1R = y_coreR;
-
-                    float y_totalL = y_coreL;
-                    float y_totalR = y_coreR;
+                    float y_totalL = y_linL;
+                    float y_totalR = y_linR;
                     if (bw_amt1 > 0.f){
-                        float y_lin_bL = (md->a1bL*md->y1bL + md->a2bL*md->y2bL);
-                        md->y2bL = md->y1bL; md->y1bL = y_lin_bL;
+                        float y_lin_bL = (md->a1bL*y1bL + md->a2bL*y2bL);
+                        y2bL=y1bL; y1bL=y_lin_bL;
                         y_totalL += 0.12f * bw_amt1 * y_lin_bL;
 
-                        float y_lin_bR = (md->a1bR*md->y1bR + md->a2bR*md->y2bR);
-                        md->y2bR = md->y1bR; md->y1bR = y_lin_bR;
+                        float y_lin_bR = (md->a1bR*y1bR + md->a2bR*y2bR);
+                        y2bR=y1bR; y1bR=y_lin_bR;
                         y_totalR += 0.12f * bw_amt1 * y_lin_bR;
                     }
-
                     float base_pan = 0.f;
-                    if (lfo1_out != 0.f && lfo1_tgt == gensym("pan_1")) {
-                        base_pan = jb_clamp(lfo1_out, -1.f, 1.f);
-                    }
+	            if (lfo1_out != 0.f && lfo1_tgt == gensym("pan_1")) {
+	                base_pan = jb_clamp(lfo1_out, -1.f, 1.f);
+	            }
                     float p = jb_clamp(base_pan + pan_mod1, -1.f, 1.f);
+                    if (p > 1.f) p = 1.f;
+                    else if (p < -1.f) p = -1.f;
                     float wL = sqrtf(0.5f*(1.f - p));
                     float wR = sqrtf(0.5f*(1.f + p));
+                    if (need_send1){ b1sendL += y_totalL * wL; b1sendR += y_totalR * wR; }
 
-                    float y_postL = y_totalL * v->rel_env;
-                    float y_postR = y_totalR * v->rel_env;
-                    vOutL += y_postL * wL * bank_gain1;
-                    vOutR += y_postR * wR * bank_gain1;
+                    y_totalL *= v->rel_env; y_totalR *= v->rel_env;
+                    vOutL += y_totalL * wL * bank_gain1;
+                    vOutR += y_totalR * wR * bank_gain1;
 
-                    md->y_pre_lastL = y_postL;
-                    md->y_pre_lastR = y_postR;
+                    md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
+                    md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
                 }
             }
 
+            // Store coupling sends for next sample (used by topo 2/3 delayed injection)
+            v->coup_b1_prevL = b1sendL;
+            v->coup_b1_prevR = b1sendR;
+            v->coup_b2_prevL = b2sendL;
+            v->coup_b2_prevR = b2sendR;
 
 
             // --- voice output + safety watchdog ---
