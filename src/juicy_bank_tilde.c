@@ -2758,7 +2758,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             float b2sendL = 0.f, b2sendR = 0.f; // bank2 send (used for topo 1/3 and stored for delayed use)
             float b1sendL = 0.f, b1sendR = 0.f; // bank1 send (used for topo 2/3 and stored for delayed use)
             // -------- BANK 2 --------
-            if (bank_gain2 > 0.f && v->rel_env2 > 0.f){
+            if (v->rel_env2 > 0.f && (bank_gain2 > 0.f || need_send2)){
                 for(int m=0;m<x->n_modes2;m++){
                     if(!base2[m].active) continue;
                     jb_mode_rt_t *md=&v->m2[m];
@@ -2824,7 +2824,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             }
 
 // -------- BANK 1 --------
-            if (bank_gain1 > 0.f && v->rel_env > 0.f){
+            if (v->rel_env > 0.f && (bank_gain1 > 0.f || need_send1)){
                 for(int m=0;m<x->n_modes;m++){
                     if(!base1[m].active) continue;
                     jb_mode_rt_t *md=&v->m[m];
