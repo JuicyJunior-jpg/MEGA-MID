@@ -2748,11 +2748,11 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             const float ex0L = exL, ex0R = exR;
             // Select what excites BANK 2 for this topology
             if (topo==2){ // Bank1 excites Bank2 (Bank2 has no direct exciter)
-                exL = coup * v->coup_b1_prevL;
-                exR = coup * v->coup_b1_prevR;
+                exL = coup * fabsf(v->coup_b1_prevL);
+                exR = coup * fabsf(v->coup_b1_prevR);
             } else if (topo==3){ // cross: Bank2 has exciter + coupling from Bank1
-                exL = ex0L + (coup * v->coup_b1_prevL);
-                exR = ex0R + (coup * v->coup_b1_prevR);
+                exL = ex0L + (coup * fabsf(v->coup_b1_prevL));
+                exR = ex0R + (coup * fabsf(v->coup_b1_prevR));
             }
 
             float b2sendL = 0.f, b2sendR = 0.f; // bank2 send (used for topo 1/3 and stored for delayed use)
@@ -2816,11 +2816,11 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 exL = ex0L;
                 exR = ex0R;
             } else if (topo==1){
-                exL = coup * b2sendL;
-                exR = coup * b2sendR;
+                exL = coup * fabsf(b2sendL);
+                exR = coup * fabsf(b2sendR);
             } else if (topo==3){
-                exL = coup * v->coup_b2_prevL;
-                exR = coup * v->coup_b2_prevR;
+                exL = coup * fabsf(v->coup_b2_prevL);
+                exR = coup * fabsf(v->coup_b2_prevR);
             }
 
 // -------- BANK 1 --------
