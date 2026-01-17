@@ -487,10 +487,6 @@ typedef struct {
     float rel_env;
     float rel_env2;
 
-    // coupling sends (stored per voice for 1-sample delayed injection)
-    float coup_b1_prevL, coup_b1_prevR; // Bank1 summed output (pre-release env weighting), L/R
-    float coup_b2_prevL, coup_b2_prevR; // Bank2 summed output (pre-release env weighting), L/R
-
     // runtime per-mode — BANK 1/2
     jb_mode_rt_t m[JB_MAX_MODES];
     jb_mode_rt_t m2[JB_MAX_MODES];
@@ -521,10 +517,11 @@ typedef struct _juicy_bank_tilde {
     int   bank_semitone[2];        // per-bank semitone transpose (-12..+12)
     int   bank_octave[2];          // per-bank octave (-2..+2, snapped)
     float bank_tune_cents[2];     // per-bank cents detune (-100..+100)
-
-    // --- COUPLING TOPOLOGY (global test) ---
-    float topology;               // 0=normal, 1=B2->B1, 2=B1->B2, 3=cross (B2 has exciter)
-    float coupling;               // 0..1 strength
+    // --- BANK INTERACTION + OUTPUT AM ---
+    float topology;               // (repurposed) Ratio midpoint morph 0..1 (0=no morph, 1=both banks converge to per-mode midpoint)
+    float coupling;               // (repurposed) Output AM amount 0..1 (0=off, 1=full ring-mod mix)
+    float am_ratio;               // Output AM ratio 1..5 (AM frequency = am_ratio * fundamental)
+    float am_phase;               // AM oscillator phase (radians)
     // Individual/global inlets
     t_inlet *in_partials;          // message inlet for 'partials' (float 0..n_modes)
     t_inlet *in_master;            // per-bank master (selected bank)
@@ -534,6 +531,7 @@ typedef struct _juicy_bank_tilde {
     t_inlet *in_bank;              // bank selector (1 or 2)
     t_inlet *in_topology;          // topology selector (0=normal, 1=B2->B1, 2=B1->B2, 3=cross)
     t_inlet *in_coupling;          // coupling strength (0..1)
+    t_inlet *in_am_ratio;          // AM ratio (1..5)
     t_outlet *out_index;           // float outlet reporting current selected partial (1-based)
     jb_mode_base_t base[JB_MAX_MODES];
     jb_mode_base_t base2[JB_MAX_MODES];
@@ -1768,6 +1766,28 @@ static void jb_apply_collision(const t_juicy_bank_tilde *x, jb_voice_t *v){
 static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, int bank){
     int n_modes = jb_bank_nmodes(x, bank);
     const jb_mode_base_t *base = jb_bank_base(x, bank);
+    // Ratio midpoint morph (repurposed 'topology' inlet).
+    // morph=0 -> keep each bank's ratios. morph=1 -> both banks converge to per-mode midpoint.
+    float morph = jb_clamp(x->topology, 0.f, 1.f);
+
+    // If morphing is active, build a temporary base array with morphed base_ratio values.
+    jb_mode_base_t base_eff[JB_MAX_MODES];
+    const jb_mode_base_t *base_other = jb_bank_base(x, bank ? 0 : 1);
+    int n_other = jb_bank_nmodes(x, bank ? 0 : 1);
+    const jb_mode_base_t *base_use = base;
+    if (morph > 0.f){
+        float expo = 0.5f * morph; // symmetric convergence
+        for (int i = 0; i < n_modes; ++i){
+            base_eff[i] = base[i];
+            float r_self  = base_use[i].base_ratio;
+            float r_other = (i < n_other) ? base_other[i].base_ratio : r_self;
+            if (r_self  <= 0.f) r_self  = 0.01f;
+            if (r_other <= 0.f) r_other = 0.01f;
+            // r_eff = r_self * (r_other/r_self)^(0.5*morph) -> both banks meet at sqrt(r1*r2) when morph=1
+            base_eff[i].base_ratio = r_self * powf(r_other / r_self, expo);
+        }
+        base_use = base_eff;
+    }
     jb_mode_rt_t *m = bank ? v->m2 : v->m;
     float *disp_offset = bank ? v->disp_offset2 : v->disp_offset;
     float *disp_target = bank ? v->disp_target2 : v->disp_target;
@@ -1787,12 +1807,12 @@ static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, in
                 if (density_amt_eff < -1.f) density_amt_eff = -1.f; // keep existing lower clamp behavior
             }
         }
-        jb_apply_density_generic(n_modes, base, density_amt_eff, m);
+        jb_apply_density_generic(n_modes, base_use, density_amt_eff, m);
     }
-jb_lock_fundamental_generic(n_modes, base, m);
-    jb_apply_stretch_generic(n_modes, base, jb_bank_stretch_amt(x, bank), jb_bank_warp_amt(x, bank), m);
-    jb_apply_offset_generic(n_modes, base, jb_bank_offset_amt(x, bank), m);
-    jb_apply_collision_generic(n_modes, base, jb_bank_collision_amt(x, bank), m);
+jb_lock_fundamental_generic(n_modes, base_use, m);
+    jb_apply_stretch_generic(n_modes, base_use, jb_bank_stretch_amt(x, bank), jb_bank_warp_amt(x, bank), m);
+    jb_apply_offset_generic(n_modes, base_use, jb_bank_offset_amt(x, bank), m);
+    jb_apply_collision_generic(n_modes, base_use, jb_bank_collision_amt(x, bank), m);
 
     // --- pitch base (bank semitone + pitch-mod from matrix) ---
     float f0_eff = v->f0;
@@ -1875,7 +1895,7 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
 
     for(int i=0;i<n_modes;i++){
         jb_mode_rt_t *md=&m[i];
-        if(!base[i].active){
+        if(!base_use[i].active){
             md->a1L=md->a2L=md->a1bL=md->a2bL=0.f;
             md->a1R=md->a2R=md->a1bR=md->a2bR=0.f;
             md->t60_s=0.f;
@@ -1897,8 +1917,8 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
         if (ratioL < 0.01f) ratioL = 0.01f;
         if (ratioR < 0.01f) ratioR = 0.01f;
 
-        float HzL = base[i].keytrack ? (f0_eff * ratioL) : ratioL;
-        float HzR = base[i].keytrack ? (f0_eff * ratioR) : ratioR;
+        float HzL = base_use[i].keytrack ? (f0_eff * ratioL) : ratioL;
+        float HzR = base_use[i].keytrack ? (f0_eff * ratioR) : ratioR;
         md->nyq_kill = 0;
         if (HzL >= 0.5f * x->sr || HzR >= 0.5f * x->sr){
             md->nyq_kill = 1;
@@ -2316,9 +2336,6 @@ static void jb_voice_panic_reset(t_juicy_bank_tilde *x, jb_voice_t *v){
     v->rel_env2 = 0.f;
     v->energy = 0.f;
 
-    v->coup_b1_prevL = v->coup_b1_prevR = 0.f;
-    v->coup_b2_prevL = v->coup_b2_prevR = 0.f;
-
     // Internal exciter reset
     jb_exc_voice_reset_runtime(&v->exc);
     v->exc_env_last = 0.f;
@@ -2607,13 +2624,28 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     x->exc_shape = exc_shape_saved;
     jb_mod_adsr_update_block(x);
 
-    const int topo = (int)jb_clamp(x->topology, 0.f, 3.f);
-    float coup = jb_clamp(x->coupling, 0.f, 1.f);
-    if (lfo1_out != 0.f && lfo1_tgt == gensym("coupling_amt")){
-        coup = jb_clamp(coup + lfo1_out, 0.f, 1.f);
+    // Repurposed params:
+    // - topology inlet: ratio midpoint morph (0..1)
+    // - coupling inlet: output AM amount (0..1)
+    float am_amt = jb_clamp(x->coupling, 0.f, 1.f);
+    if (lfo1_out != 0.f && lfo1_tgt == gensym("coupling_amt")) {
+        am_amt = jb_clamp(am_amt + lfo1_out, 0.f, 1.f);
     }
-    const int need_send2 = (topo==1 || topo==3); // Bank2 -> Bank1 send needed
-    const int need_send1 = (topo==2 || topo==3); // Bank1 -> Bank2 send needed
+    float am_ratio = jb_clamp(x->am_ratio, 1.f, 5.f);
+
+    // Pick a fundamental estimate for output AM: take the loudest active voice's f0 (fallback: basef0_ref).
+    float am_f0 = (x->basef0_ref > 0.f) ? x->basef0_ref : 261.626f;
+    {
+        float bestE = 0.f;
+        for (int vix = 0; vix < x->total_voices; ++vix){
+            const jb_voice_t *vv = &x->v[vix];
+            if (vv->state == V_IDLE) continue;
+            if (vv->energy > bestE && vv->f0 > 0.f){
+                bestE = vv->energy;
+                am_f0 = vv->f0;
+            }
+        }
+    }
     // Internal exciter mix weights (computed once per block)
     float exc_f = jb_clamp(x->exc_fader, -1.f, 1.f);
     float exc_t = 0.5f * (exc_f + 1.f);
@@ -2743,22 +2775,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             exL = jb_kill_denorm(exL);
             exR = jb_kill_denorm(exR);
             if (!jb_isfinitef(exL) || !jb_isfinitef(exR)) { exL = 0.f; exR = 0.f; }
-
-            // Cache raw internal exciter for later (Bank1 may need it even if Bank2 input is replaced)
-            const float ex0L = exL, ex0R = exR;
-            // Select what excites BANK 2 for this topology
-            if (topo==2){ // Bank1 excites Bank2 (Bank2 has no direct exciter)
-                exL = coup * fabsf(v->coup_b1_prevL);
-                exR = coup * fabsf(v->coup_b1_prevR);
-            } else if (topo==3){ // cross: Bank2 has exciter + coupling from Bank1
-                exL = ex0L + (coup * fabsf(v->coup_b1_prevL));
-                exR = ex0R + (coup * fabsf(v->coup_b1_prevR));
-            }
-
-            float b2sendL = 0.f, b2sendR = 0.f; // bank2 send (used for topo 1/3 and stored for delayed use)
-            float b1sendL = 0.f, b1sendR = 0.f; // bank1 send (used for topo 2/3 and stored for delayed use)
             // -------- BANK 2 --------
-            if (v->rel_env2 > 0.f && (bank_gain2 > 0.f || need_send2)){
+            if (bank_gain2 > 0.f && v->rel_env2 > 0.f){
                 for(int m=0;m<x->n_modes2;m++){
                     if(!base2[m].active) continue;
                     jb_mode_rt_t *md=&v->m2[m];
@@ -2798,7 +2816,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 	                    float p = jb_clamp(base_pan + pan_mod2, -1.f, 1.f);
                     float wL = sqrtf(0.5f*(1.f - p));
                     float wR = sqrtf(0.5f*(1.f + p));
-                    if (need_send2){ b2sendL += y_totalL * wL; b2sendR += y_totalR * wR; }
                     y_totalL *= v->rel_env2; y_totalR *= v->rel_env2;
                     vOutL += y_totalL * wL * bank_gain2;
                     vOutR += y_totalR * wR * bank_gain2;
@@ -2807,24 +2824,9 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
                 }
             }
-            // topology selector (BANK 1 input source):
-            // topo 0: normal (both banks excited by internal exciter)
-            // topo 1: B2 -> B1 (B1 gets ONLY Bank2 send, no direct exciter)
-            // topo 2: B1 -> B2 (B1 gets internal exciter)
-            // topo 3: cross (B1 gets delayed Bank2 send; no direct exciter)
-            if (topo==0 || topo==2){
-                exL = ex0L;
-                exR = ex0R;
-            } else if (topo==1){
-                exL = coup * fabsf(b2sendL);
-                exR = coup * fabsf(b2sendR);
-            } else if (topo==3){
-                exL = coup * fabsf(v->coup_b2_prevL);
-                exR = coup * fabsf(v->coup_b2_prevR);
-            }
 
 // -------- BANK 1 --------
-            if (v->rel_env > 0.f && (bank_gain1 > 0.f || need_send1)){
+            if (bank_gain1 > 0.f && v->rel_env > 0.f){
                 for(int m=0;m<x->n_modes;m++){
                     if(!base1[m].active) continue;
                     jb_mode_rt_t *md=&v->m[m];
@@ -2865,7 +2867,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     else if (p < -1.f) p = -1.f;
                     float wL = sqrtf(0.5f*(1.f - p));
                     float wR = sqrtf(0.5f*(1.f + p));
-                    if (need_send1){ b1sendL += y_totalL * wL; b1sendR += y_totalR * wR; }
 
                     y_totalL *= v->rel_env; y_totalR *= v->rel_env;
                     vOutL += y_totalL * wL * bank_gain1;
@@ -2875,13 +2876,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
                 }
             }
-
-            // Store coupling sends for next sample (used by topo 2/3 delayed injection)
-            v->coup_b1_prevL = b1sendL;
-            v->coup_b1_prevR = b1sendR;
-            v->coup_b2_prevL = b2sendL;
-            v->coup_b2_prevR = b2sendR;
-
 
             // --- voice output + safety watchdog ---
             // If anything goes unstable (NaN/INF or runaway magnitude), hard-reset this voice.
@@ -2924,16 +2918,12 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     v->state = V_IDLE;
                     if (is_tail){
                         v->energy = 0.f;
-                        v->coup_b1_prevL = v->coup_b1_prevR = 0.f;
-                        v->coup_b2_prevL = v->coup_b2_prevR = 0.f;
                     }
                 } else if (is_tail){
                     // Safety: also free a tail once the exciter + mod env are idle and output energy is gone.
                     if (v->exc.env.stage == JB_EXC_ENV_IDLE && v->mod_env_stage == 0 && v->energy < tail_energy_thresh){
                         v->state = V_IDLE;
                         v->energy = 0.f;
-                        v->coup_b1_prevL = v->coup_b1_prevR = 0.f;
-                        v->coup_b2_prevL = v->coup_b2_prevR = 0.f;
                     }
                 }
             } else if (v->state == V_HELD) {
@@ -2965,6 +2955,23 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         outL[i]=yl; outR[i]=yr; x1L=xl; y1L=yl; x1R=xr; y1R=yr;
     }
     x->hpL_x1=x1L; x->hpL_y1=y1L; x->hpR_x1=x1R; x->hpR_y1=y1R;
+
+    // ---- Output AM (ring-mod blend) ----
+    if (am_amt > 0.f){
+        float phase = x->am_phase;
+        float inc = 2.f * (float)M_PI * (am_f0 * am_ratio) / x->sr;
+        if (!jb_isfinitef(inc) || inc < 0.f) inc = 0.f;
+        for (int i = 0; i < n; ++i){
+            float m = sinf(phase);
+            float wl = outL[i] * m;
+            float wr = outR[i] * m;
+            outL[i] = outL[i] * (1.f - am_amt) + wl * am_amt;
+            outR[i] = outR[i] * (1.f - am_amt) + wr * am_amt;
+            phase += inc;
+            if (phase > 2.f * (float)M_PI) phase -= 2.f * (float)M_PI;
+        }
+        x->am_phase = phase;
+    }
 
     return (w + 7);
 }
@@ -3728,7 +3735,7 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->max_voices = JB_ATTACK_VOICES;
     x->total_voices = JB_MAX_VOICES;
     for(int v=0; v<JB_MAX_VOICES; ++v){
-        x->v[v].state=V_IDLE; x->v[v].f0=x->basef0_ref; x->v[v].vel=0.f; x->v[v].energy=0.f; x->v[v].rel_env=0.f; x->v[v].rel_env2=0.f; x->v[v].coup_b1_prevL=0.f; x->v[v].coup_b1_prevR=0.f; x->v[v].coup_b2_prevL=0.f; x->v[v].coup_b2_prevR=0.f;
+        x->v[v].state=V_IDLE; x->v[v].f0=x->basef0_ref; x->v[v].vel=0.f; x->v[v].energy=0.f; x->v[v].rel_env=0.f; x->v[v].rel_env2=0.f;
         for(int i=0;i<JB_MAX_MODES;i++){
             x->v[v].disp_offset[i]=x->v[v].disp_target[i]=0.f;
             x->v[v].disp_offset2[i]=x->v[v].disp_target2[i]=0.f;
@@ -3791,6 +3798,8 @@ x->excite_pos_y2  = x->excite_pos_y;
     // Coupling topology defaults
     x->topology = 0.f;
     x->coupling = 0.f;
+    x->am_ratio = 1.f;
+    x->am_phase = 0.f;
 
     x->in_partials   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("partials"));
     x->in_master     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("master"));
@@ -3800,6 +3809,7 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->in_bank       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("bank"));
     x->in_topology   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("topology"));
     x->in_coupling   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("coupling"));
+    x->in_am_ratio  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("am_ratio"));
     x->in_index      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("index"));
     x->in_ratio      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("ratio"));
     x->in_gain       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("gain"));
@@ -3908,20 +3918,18 @@ static void juicy_bank_tilde_bank(t_juicy_bank_tilde *x, t_floatarg f){
 }
 
 static void juicy_bank_tilde_topology(t_juicy_bank_tilde *x, t_floatarg f){
-    // Topology selector (integer encoded as float):
-    //  0 = normal (both banks excited by internal exciter)
-    //  1 = unidirectional: Bank2 excites Bank1 (Bank1 has NO direct exciter)
-    //  2 = unidirectional: Bank1 excites Bank2 (Bank2 has NO direct exciter)
-    //  3 = cross coupling: Bank2 has exciter, and Bank1<->Bank2 exchange energy
-    int t = (int)floorf((float)f + 0.5f);
-    if (t < 0) t = 0;
-    if (t > 3) t = 3;
-    x->topology = (float)t;
+    // Repurposed: ratio midpoint morph (0..1)
+    x->topology = jb_clamp(f, 0.f, 1.f);
 }
 
 static void juicy_bank_tilde_coupling(t_juicy_bank_tilde *x, t_floatarg f){
-    // 0..1 coupling strength (used when topology is 1/2/3; ignored in topology 0)
+    // Repurposed: output AM amount (0..1)
     x->coupling = jb_clamp(f, 0.f, 1.f);
+}
+
+static void juicy_bank_tilde_am_ratio(t_juicy_bank_tilde *x, t_floatarg f){
+    // Output AM ratio (1..5). AM frequency = f0 * am_ratio
+    x->am_ratio = jb_clamp(f, 1.f, 5.f);
 }
 
 
@@ -4272,6 +4280,7 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_octave,   gen
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bank,     gensym("bank"),     A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_topology, gensym("topology"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_coupling, gensym("coupling"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_am_ratio, gensym("am_ratio"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index_forward, gensym("forward"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index_backward, gensym("backward"), 0);
 
