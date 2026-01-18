@@ -110,30 +110,18 @@ static inline float jb_kill_denorm(float x){
 #define JB_EXC_TILT_PIVOT_HZ  1000.f
 #define JB_EXC_TILT_OCT_SPAN  3.f   // approx octaves from pivot to spectral edge
 
-// Elements-style diffuser: 8 Schroeder all-pass stages per ear (fixed prime delays)
+// Elements-style diffuser: 8 Schroeder all-pass stages per ear.
+// "Diffusion" controls the feedback coefficient g; "Space" scales the delay lengths.
 #define JB_EXC_DIFF_STAGES 8
-#define JB_EXC_DIFF_MAX_DELAY 1601
+#define JB_EXC_DIFF_MAX_DELAY 4096
 static const int JB_EXC_DIFF_PRIMES[JB_EXC_DIFF_STAGES] = {149, 307, 563, 827, 1013, 1223, 1447, 1601};
 static const float JB_EXC_DIFF_G_TARGET[JB_EXC_DIFF_STAGES] = {0.995f, 0.995f, 0.993f, 0.993f, 0.991f, 0.991f, 0.989f, 0.989f};
 
 typedef struct {
     float buf[JB_EXC_DIFF_MAX_DELAY];
     int write;
-    int delay;
 } jb_exc_ap_t;
 
-// Schroeder all-pass: y = delayed - g*x; buf = x + g*y
-static inline float jb_exc_ap_run(jb_exc_ap_t *ap, float x, float g){
-    if (g <= 0.f) return x;
-    int w = ap->write;
-    float delayed = ap->buf[w];
-    float y = delayed - g * x;
-    ap->buf[w] = x + g * y;
-    w++;
-    if (w >= ap->delay) w = 0;
-    ap->write = w;
-    return y;
-}
 
 
 #define JB_EXC_AP1_BASE 211
@@ -395,8 +383,6 @@ static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long se
     v->imp_match = 1.f;
     // noise diffusion (Elements-style 8x all-pass per ear)
     for (int i = 0; i < JB_EXC_DIFF_STAGES; ++i){
-        v->diffL[i].delay = JB_EXC_DIFF_PRIMES[i];
-        v->diffR[i].delay = JB_EXC_DIFF_PRIMES[i];
         v->diffL[i].write = 0;
         v->diffR[i].write = 0;
         memset(v->diffL[i].buf, 0, sizeof(v->diffL[i].buf));
@@ -427,8 +413,6 @@ static inline void jb_exc_voice_reset_runtime(jb_exc_voice_t *e){
     e->imp_match = 1.f;
     // noise diffusion (Elements-style 8x all-pass per ear)
     for (int i = 0; i < JB_EXC_DIFF_STAGES; ++i){
-        e->diffL[i].delay = JB_EXC_DIFF_PRIMES[i];
-        e->diffR[i].delay = JB_EXC_DIFF_PRIMES[i];
         e->diffL[i].write = 0;
         e->diffR[i].write = 0;
         memset(e->diffL[i].buf, 0, sizeof(e->diffL[i].buf));
@@ -731,7 +715,7 @@ float damping, brightness; float global_decay, slope;
     float exc_decay_ms,  exc_decay_curve;
     float exc_sustain;
     float exc_release_ms, exc_release_curve;
-    // exc_density: repurposed -> Pressure (feedback amount 0..1, internally capped to k<=0.95)
+    // exc_density: repurposed -> Pressure (feedback amount -1..+1, internally capped to |k|<=0.95)
     float exc_density;
     // exc_imp_shape: impulse-only shape (0..1)
     float exc_imp_shape;
@@ -739,9 +723,14 @@ float damping, brightness; float global_decay, slope;
     float exc_shape;
     // exc_diffusion: repurposed -> Noise Diffusion (0..1)
     float exc_diffusion;
+    // exc_space: scales diffuser delay lengths (0..1)
+    float exc_space;
+    // exc_space: scales the all-pass delay lengths of the noise diffuser (0..1)
+    float exc_space;
     // per-block computed (shared)
     float exc_noise_color_gL, exc_noise_color_gH, exc_noise_color_comp;
     float exc_noise_diff_g_stage[JB_EXC_DIFF_STAGES];
+    float exc_noise_diff_delay_stage[JB_EXC_DIFF_STAGES];
 
     float noise_scale;   // factory trim (linear amp)
     float impulse_scale; // factory trim (linear amp)
@@ -758,6 +747,7 @@ float damping, brightness; float global_decay, slope;
     t_inlet *in_exc_imp_shape;
     t_inlet *in_exc_shape;
     t_inlet *in_exc_diffusion;
+    t_inlet *in_exc_space;
 
     // --- MOD SECTION inlets (targets/amounts; actual wiring added next step) ---
     t_inlet *in_lfo_index;
@@ -945,6 +935,26 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
         x->exc_noise_diff_g_stage[i] = d * JB_EXC_DIFF_G_TARGET[i];
     }
 
+    // Noise diffuser "Space": scale the all-pass delay lengths (0..1).
+    //  space = 0.0 -> 0.25x (tiny, pinched, HF smear)
+    //  space = 0.5 -> 1.00x (Elements-ish default)
+    //  space = 1.0 -> 2.00x (large, airy, LF smear)
+    float space = jb_clamp(x->exc_space, 0.f, 1.f);
+    float scale;
+    if (space <= 0.5f){
+        float t = space * 2.f;          // 0..1
+        scale = 0.25f + t * (1.f - 0.25f);
+    }else{
+        float t = (space - 0.5f) * 2.f; // 0..1
+        scale = 1.f + t * (2.f - 1.f);
+    }
+    for (int i = 0; i < JB_EXC_DIFF_STAGES; ++i){
+        float dly = (float)JB_EXC_DIFF_PRIMES[i] * scale;
+        if (dly < 1.f) dly = 1.f;
+        if (dly > (float)(JB_EXC_DIFF_MAX_DELAY - 2)) dly = (float)(JB_EXC_DIFF_MAX_DELAY - 2);
+        x->exc_noise_diff_delay_stage[i] = dly;
+    }
+
     // ADSR curves + times (applied to all voices)
     float aC = jb_clamp(x->exc_attack_curve,  -1.f, 1.f);
     float dC = jb_clamp(x->exc_decay_curve,   -1.f, 1.f);
@@ -1093,9 +1103,10 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
     float nL = jb_exc_noise_tpdf(&e->rngL);
     float nR = jb_exc_noise_tpdf(&e->rngR);
 
-    // Pressure feedback injection (per voice): added into the noise input before spectral shaping
-    nL += fb_inL;
-    nR += fb_inR;
+    // Pressure feedback injection (per voice): injected into the noise input,
+    // and gated by the noise ADSR so closed envelopes don't "pre-load" the diffuser.
+    nL += fb_inL * env;
+    nR += fb_inR * env;
 
     // Noise Color (tilt EQ): split around pivot using 1-pole LP, then re-weight low/high.
     float lpL = jb_exc_lp1_run(&e->lpL, nL);
@@ -1110,8 +1121,9 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
     if (diff_amt > 0.f){
         for (int i = 0; i < JB_EXC_DIFF_STAGES; ++i){
             const float g = x->exc_noise_diff_g_stage[i];
-            colL = jb_exc_ap_run(&e->diffL[i], colL, g);
-            colR = jb_exc_ap_run(&e->diffR[i], colR, g);
+            const float dly = x->exc_noise_diff_delay_stage[i];
+            colL = jb_exc_apf_run(colL, g, dly, e->diffL[i].buf, &e->diffL[i].write, JB_EXC_DIFF_MAX_DELAY);
+            colR = jb_exc_apf_run(colR, g, dly, e->diffR[i].buf, &e->diffR[i].write, JB_EXC_DIFF_MAX_DELAY);
         }
     }
 
@@ -2744,7 +2756,9 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     float exc_w_imp   = sinf(0.5f * (float)M_PI * exc_t);
     float exc_w_noise = cosf(0.5f * (float)M_PI * exc_t);
     // Pressure (reuses former density inlet): feedback coefficient k = 0..0.95
-    float pressure = jb_clamp(x->exc_density, 0.f, 1.f);
+    // Pressure is bipolar (-1..+1) so you can invert polarity of the feedback injection.
+    // |fb_k| is capped at 0.95 for stability.
+    float pressure = jb_clamp(x->exc_density, -1.f, 1.f);
     float fb_k = 0.95f * pressure;
     float noise_diff    = jb_clamp(x->exc_diffusion, 0.f, 1.f);
     // Energy meter (per voice) used for voice stealing and tail cleanup.
@@ -2859,7 +2873,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             v->mod_env_last = v->mod_env;
             // Pressure feedback input (Bank1+Bank2+Exciter mix from previous sample)
             float fbL = 0.f, fbR = 0.f;
-            if (fb_k > 0.f){
+            if (fabsf(fb_k) > 0.f){
                 fbL = jb_hp1_run_a(v->fb_prevL, x->fb_hp_a, &v->fb_hp_x1L, &v->fb_hp_y1L);
                 fbR = jb_hp1_run_a(v->fb_prevR, x->fb_hp_a, &v->fb_hp_x1R, &v->fb_hp_y1R);
 
@@ -2867,7 +2881,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 fbL = jb_softclip_thresh(fbL, 0.75f);
                 fbR = jb_softclip_thresh(fbR, 0.75f);
 
-                // Strict gain ceiling (k <= 0.95)
+                // Strict gain ceiling (|k| <= 0.95)
                 fbL *= fb_k;
                 fbR *= fb_k;
             }
@@ -3695,6 +3709,7 @@ inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     if (x->in_exc_imp_shape) inlet_free(x->in_exc_imp_shape);
     if (x->in_exc_shape) inlet_free(x->in_exc_shape);
     if (x->in_exc_diffusion) inlet_free(x->in_exc_diffusion);
+    if (x->in_exc_space) inlet_free(x->in_exc_space);
 
     // MOD SECTION inlets
     if (x->in_lfo_index) inlet_free(x->in_lfo_index);
@@ -3847,10 +3862,11 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->exc_release_ms    = 400.f;
     x->exc_release_curve = 0.f;
 
-    x->exc_density    = 0.f;  // Pressure (feedback coefficient 0..1 -> 0..0.95)
+    x->exc_density    = 0.f;  // Pressure (-1..+1 -> -0.95..+0.95)
     x->exc_imp_shape  = 0.5f;  // Impulse-only Shape (old shape logic)
     x->exc_shape      = 0.5f;  // Noise Color (tilt EQ)
     x->exc_diffusion  = 0.f;  // Noise Diffusion
+    x->exc_space      = 0.5f;  // Space (delay-length scale); 0.5 = Elements-ish default
     x->noise_scale  = 0.4f; // factory sweetspot
     x->impulse_scale = 10.f; // factory sweetspot
 // initialise per-LFO parameter and runtime state
@@ -3991,6 +4007,7 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->in_exc_imp_shape    = floatinlet_new(&x->x_obj, &x->exc_imp_shape);
     x->in_exc_shape         = floatinlet_new(&x->x_obj, &x->exc_shape);
     x->in_exc_diffusion     = floatinlet_new(&x->x_obj, &x->exc_diffusion);
+    x->in_exc_space         = floatinlet_new(&x->x_obj, &x->exc_space);
 
     // LFO + ADSR inlets (for future modulation matrix)
     // --- MOD SECTION (starts after exciter controls) ---
