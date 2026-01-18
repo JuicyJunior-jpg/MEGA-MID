@@ -111,12 +111,17 @@ static inline float jb_kill_denorm(float x){
 #define JB_EXC_TILT_OCT_SPAN  3.f   // approx octaves from pivot to spectral edge
 
 
-// Granular noise (shot-noise) constants for the 'Grains' parameter (reuses exc_diffusion inlet)
-#define JB_EXC_GRAIN_RATE_MIN_HZ 7.5f
-#define JB_EXC_GRAIN_RATE_MAX_HZ 2500.f
-#define JB_EXC_GRAIN_LEN_MIN_MS 5.f
-#define JB_EXC_GRAIN_LEN_MAX_MS 20.f
-#define JB_EXC_GRAIN_MAX_PER_CH 128
+// Stochastic pulse noise ("density"/"grains") constants for the repurposed exc_diffusion inlet.
+// The knob maps to a probability threshold on an internal white-noise control stream.
+// Each trigger spawns a fixed 1 ms Hann-window "particle". As density increases, triggers
+// become more frequent and overlap statistically converges toward continuous white noise.
+#define JB_EXC_PULSE_RATE_MIN_HZ 7.5f
+// Upper bound as probability (not Hz). We cap to avoid pathological CPU; still reaches a true noise floor.
+#define JB_EXC_PULSE_PROB_MAX    0.25f
+// Fixed particle length in seconds.
+#define JB_EXC_PULSE_LEN_SEC     0.001f
+// Maximum overlapping particles per channel (safety cap).
+#define JB_EXC_PULSE_MAX_PER_CH  128
 
 static inline float jb_exc_expmap01(float t, float lo, float hi){
     if (t <= 0.f) return lo;
@@ -329,19 +334,18 @@ typedef struct {
     float pwr_imp;
     float imp_match;
 
-    // Granular noise (shot-noise) generator state per channel.
-    // Each trigger spawns a short Hann-windowed pulse; many overlapping grains converge toward white noise.
-    int   grain_waitL, grain_waitR; // samples until next grain trigger
+    // Stochastic density-pulse state per channel.
+    // Each threshold crossing spawns a short Hann-windowed particle; many overlaps converge toward white noise.
     int   grain_nL, grain_nR;       // active grain count (for quick early-out)
-    int   grain_posL[JB_EXC_GRAIN_MAX_PER_CH];
-    int   grain_lenL[JB_EXC_GRAIN_MAX_PER_CH];
-    float grain_ampL[JB_EXC_GRAIN_MAX_PER_CH];
-    unsigned char grain_onL[JB_EXC_GRAIN_MAX_PER_CH];
+    int   grain_posL[JB_EXC_PULSE_MAX_PER_CH];
+    int   grain_lenL[JB_EXC_PULSE_MAX_PER_CH];
+    float grain_ampL[JB_EXC_PULSE_MAX_PER_CH];
+    unsigned char grain_onL[JB_EXC_PULSE_MAX_PER_CH];
 
-    int   grain_posR[JB_EXC_GRAIN_MAX_PER_CH];
-    int   grain_lenR[JB_EXC_GRAIN_MAX_PER_CH];
-    float grain_ampR[JB_EXC_GRAIN_MAX_PER_CH];
-    unsigned char grain_onR[JB_EXC_GRAIN_MAX_PER_CH];
+    int   grain_posR[JB_EXC_PULSE_MAX_PER_CH];
+    int   grain_lenR[JB_EXC_PULSE_MAX_PER_CH];
+    float grain_ampR[JB_EXC_PULSE_MAX_PER_CH];
+    unsigned char grain_onR[JB_EXC_PULSE_MAX_PER_CH];
 } jb_exc_voice_t;
 
 static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long seed_base){
@@ -377,10 +381,9 @@ static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long se
     v->pwr_imp   = 0.f;
     v->imp_match = 1.f;
 
-    // granular grains
-    v->grain_waitL = v->grain_waitR = 0;
+    // stochastic density pulses
     v->grain_nL = v->grain_nR = 0;
-    for (int i=0;i<JB_EXC_GRAIN_MAX_PER_CH;++i){
+    for (int i=0;i<JB_EXC_PULSE_MAX_PER_CH;++i){
         v->grain_onL[i]=0; v->grain_posL[i]=0; v->grain_lenL[i]=0; v->grain_ampL[i]=0.f;
         v->grain_onR[i]=0; v->grain_posR[i]=0; v->grain_lenR[i]=0; v->grain_ampR[i]=0.f;
     }
@@ -408,10 +411,9 @@ static inline void jb_exc_voice_reset_runtime(jb_exc_voice_t *e){
     e->pwr_imp   = 0.f;
     e->imp_match = 1.f;
 
-    // granular grains
-    e->grain_waitL = e->grain_waitR = 0;
+    // stochastic density pulses
     e->grain_nL = e->grain_nR = 0;
-    for (int i=0;i<JB_EXC_GRAIN_MAX_PER_CH;++i){
+    for (int i=0;i<JB_EXC_PULSE_MAX_PER_CH;++i){
         e->grain_onL[i]=0; e->grain_posL[i]=0; e->grain_lenL[i]=0; e->grain_ampL[i]=0.f;
         e->grain_onR[i]=0; e->grain_posR[i]=0; e->grain_lenR[i]=0; e->grain_ampR[i]=0.f;
     }
@@ -718,18 +720,16 @@ float damping, brightness; float global_decay, slope;
     float exc_imp_shape;
     // exc_shape: repurposed -> Noise Color (0..1; red..white..violet)
     float exc_shape;
-    // exc_diffusion: repurposed -> Grains (granular noise density/jitter) (0..1)
+    // exc_diffusion: repurposed -> Density/Grains (0..1). Controls stochastic pulse density in noise path.
     float exc_diffusion;
     // per-block computed (shared)
     float exc_noise_color_gL, exc_noise_color_gH, exc_noise_color_comp;
 
-    // grains (granular noise) computed params
-    float exc_grain_rate_hz;
-    float exc_grain_interval_samps;
-    float exc_grain_jitter;
-    float exc_grain_len_min_samps;
-    float exc_grain_len_max_samps;
-    float exc_grain_amp_scale;
+    // stochastic pulse density computed params (set once per DSP block)
+    float exc_pulse_prob;         // per-sample trigger probability (0..1)
+    float exc_pulse_thresh;       // threshold on uniform control noise in [-1..1]
+    float exc_pulse_len_samps;    // fixed particle length in samples (stored as float for simplicity)
+    float exc_pulse_amp_scale;    // attenuation to keep loudness stable as density increases
 
     float noise_scale;   // factory trim (linear amp)
     float impulse_scale; // factory trim (linear amp)
@@ -928,38 +928,43 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
     x->exc_noise_color_gH = gH;
     x->exc_noise_color_comp = comp;
 
-    // Grains (granular noise) parameters (shared)
-    float g = jb_clamp(x->exc_diffusion, 0.f, 1.f);
+    // Density/Grains (stochastic pulse triggering) parameters (shared)
+    // We generate a uniform control-noise stream in [-1..1] and fire a fixed 1 ms Hann-windowed
+    // "particle" whenever control_noise > threshold. As the knob rises, threshold falls and pulses
+    // occur more frequently (a Poisson-like process), converging toward continuous white noise.
+    float d = jb_clamp(x->exc_diffusion, 0.f, 1.f);
 
-    // Density mapping: exponential rate from ~7.5 Hz to > 2000 Hz
-    float rate = JB_EXC_GRAIN_RATE_MIN_HZ * powf(JB_EXC_GRAIN_RATE_MAX_HZ / JB_EXC_GRAIN_RATE_MIN_HZ, g);
-    if (rate < 1.f) rate = 1.f;
-    x->exc_grain_rate_hz = rate;
-    x->exc_grain_interval_samps = sr / rate;
+    // Map knob -> per-sample probability using an exponential curve so the low end is usable.
+    // At d=0: ~JB_EXC_PULSE_RATE_MIN_HZ triggers/sec
+    // At d=1: ~JB_EXC_PULSE_PROB_MAX probability per sample (very dense, true noise floor)
+    float p_min = JB_EXC_PULSE_RATE_MIN_HZ / (sr + 1e-12f);
+    float p_max = jb_clamp(JB_EXC_PULSE_PROB_MAX, 0.001f, 0.99f);
+    float p = p_min * powf(p_max / p_min, d);
+    if (p > p_max) p = p_max;
+    if (p < 0.f)   p = 0.f;
 
-    // Jitter: 0 -> mostly periodic, 1 -> fully randomized (0..2x interval)
-    x->exc_grain_jitter = g;
+    // Threshold for uniform control noise in [-1..1]. For U~[-1,1], P(U>t)=(1-t)/2 => t = 1-2p
+    float thresh = 1.f - 2.f * p;
+    if (thresh < -1.f) thresh = -1.f;
+    if (thresh > 0.999999f) thresh = 0.999999f;
 
-    // Grain length range (in samples). Bias shorter as density rises so it fuses into noise and stays CPU-safe.
-    float len_lo = (JB_EXC_GRAIN_LEN_MIN_MS * 0.001f) * sr;
-    float len_hi = (JB_EXC_GRAIN_LEN_MAX_MS * 0.001f) * sr;
-    float len_max = len_lo + (len_hi - len_lo) * (1.f - g);
-    if (len_max < len_lo) len_max = len_lo;
-    x->exc_grain_len_min_samps = len_lo;
-    x->exc_grain_len_max_samps = len_max;
+    // Fixed particle length (1 ms) in samples
+    float plen_f = JB_EXC_PULSE_LEN_SEC * sr;
+    int plen = (int)(plen_f + 0.5f);
+    if (plen < 8) plen = 8;
+    if (plen > 256) plen = 256;
 
-    // Amplitude normalization (shot-noise): keep perceived level ~constant as overlap grows.
-    // Expected overlap ~= rate * avg_len / sr. We scale ~ 1/sqrt(overlap).
-    // This avoids the "goes silent at high density" failure mode when overlap is capped.
-    {
-        float avg_len = 0.5f * (len_lo + len_max);
-        float overlap = (rate * avg_len) / (sr + 1e-12f);
-        // Target RMS is handled downstream by x->noise_scale; here we just keep the generator stable.
-        float s = 1.15f / sqrtf(overlap + 1e-4f);
-        if (s > 8.0f)  s = 8.0f;
-        if (s < 0.05f) s = 0.05f;
-        x->exc_grain_amp_scale = s;
-    }
+    // Loudness compensation: as density rises, more particles overlap and total energy rises.
+    // Expected overlap ~= p * plen (since each trigger lasts plen samples). We attenuate ~ 1/sqrt(overlap).
+    // We never BOOST the low end (sparse clicks stay naturally clicky); we only attenuate when overlap > 1.
+    float overlap = p * (float)plen;
+    float denom = (overlap < 1.f) ? 1.f : overlap;
+    float amp_scale = 1.f / sqrtf(denom + 1e-12f);
+
+    x->exc_pulse_prob = p;
+    x->exc_pulse_thresh = thresh;
+    x->exc_pulse_len_samps = (float)plen;
+    x->exc_pulse_amp_scale = amp_scale;
 
     // ADSR curves + times (applied to all voices)
     float aC = jb_clamp(x->exc_attack_curve,  -1.f, 1.f);
@@ -995,8 +1000,6 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
         e->env.curveD = dC;
         e->env.curveR = rC;
         jb_exc_adsr_set_times(&e->env, sr, a_ms, d_ms, sus, r_ms);
-        { int interval=(int)jb_clamp(x->exc_grain_interval_samps,1.f,100000000.f); if(e->grain_waitL>interval) e->grain_waitL=interval; if(e->grain_waitR>interval) e->grain_waitR=interval; }
-
 
     }
 }
@@ -1040,22 +1043,13 @@ static inline void jb_modenv_note_off(jb_voice_t *v){
 
 // 1-pole high-pass (stateful): y[n] = a*(y[n-1] + x[n] - x[n-1])
 
-// ---------- granular grains (shot-noise) helpers ----------
+// ---------- stochastic pulse (density) helpers ----------
 
-static inline int jb_exc_irand_range(jb_exc_rng64_t *r, int lo, int hi){
-    if (hi <= lo) return lo;
-    float u = jb_exc_rng64_uni(r);
-    int v = lo + (int)((hi - lo + 1) * u);
-    if (v < lo) v = lo;
-    if (v > hi) v = hi;
-    return v;
-}
-
-static inline int jb_exc_find_free_grain(unsigned char *on){
-    for (int i=0;i<JB_EXC_GRAIN_MAX_PER_CH;++i){
+static inline int jb_exc_find_free_pulse(unsigned char *on){
+    for (int i=0;i<JB_EXC_PULSE_MAX_PER_CH;++i){
         if (!on[i]) return i;
     }
-    return 0; // steal slot 0 (rare at sane densities)
+    return 0; // steal slot 0 (safety)
 }
 
 static inline float jb_exc_hann_env(int pos, int len){
@@ -1064,38 +1058,24 @@ static inline float jb_exc_hann_env(int pos, int len){
     return 0.5f - 0.5f * cosf(2.f * (float)M_PI * t);
 }
 
-static inline float jb_exc_grains_next_L(jb_exc_voice_t *e, const t_juicy_bank_tilde *x){
-    // countdown to next trigger
-    if (e->grain_waitL > 0) e->grain_waitL--;
-    if (e->grain_waitL <= 0){
-        // trigger a grain
-        int slot = jb_exc_find_free_grain(e->grain_onL);
+static inline float jb_exc_pulses_next_L(jb_exc_voice_t *e, const t_juicy_bank_tilde *x){
+    // Poisson-like triggering: fire when a uniform control-noise sample crosses the threshold.
+    // Control noise U ~ [-1,1]. Probability is set by x->exc_pulse_thresh.
+    float u = 2.f * jb_exc_rng64_uni(&e->rngL) - 1.f;
+    if (u > x->exc_pulse_thresh){
+        int slot = jb_exc_find_free_pulse(e->grain_onL);
         e->grain_onL[slot] = 1;
         e->grain_posL[slot] = 0;
-
-        int len_min = (int)jb_clamp(x->exc_grain_len_min_samps, 1.f, 100000.f);
-        int len_max = (int)jb_clamp(x->exc_grain_len_max_samps, (float)len_min, 100000.f);
-        int glen = jb_exc_irand_range(&e->rngL, len_min, len_max);
-        if (glen < 1) glen = 1;
-        e->grain_lenL[slot] = glen;
-
-        float amp = jb_exc_noise_tpdf(&e->rngL) * x->exc_grain_amp_scale;
-        e->grain_ampL[slot] = amp;
-
-        // schedule next trigger with jitter. At jitter=0 -> periodic, at jitter=1 -> uniform 0..2x interval.
-        float base = x->exc_grain_interval_samps;
-        float u = jb_exc_rng64_uni(&e->rngL) * 2.f; // 0..2
-        float jit = x->exc_grain_jitter;
-        float fac = (1.f - jit) + (jit * u);
-        float nxt = base * fac;
-        if (nxt < 1.f) nxt = 1.f;
-        e->grain_waitL = (int)nxt;
+        int plen = (int)jb_clamp(x->exc_pulse_len_samps, 8.f, 256.f);
+        e->grain_lenL[slot] = plen;
+        // Random-amplitude pulse; gain-compensated by exc_pulse_amp_scale so loudness stays stable.
+        e->grain_ampL[slot] = jb_exc_noise_tpdf(&e->rngL) * x->exc_pulse_amp_scale;
     }
 
     // sum active grains
     float y = 0.f;
     int active = 0;
-    for (int i=0;i<JB_EXC_GRAIN_MAX_PER_CH;++i){
+    for (int i=0;i<JB_EXC_PULSE_MAX_PER_CH;++i){
         if (!e->grain_onL[i]) continue;
         int pos = e->grain_posL[i];
         int len = e->grain_lenL[i];
@@ -1111,34 +1091,20 @@ static inline float jb_exc_grains_next_L(jb_exc_voice_t *e, const t_juicy_bank_t
     return y;
 }
 
-static inline float jb_exc_grains_next_R(jb_exc_voice_t *e, const t_juicy_bank_tilde *x){
-    if (e->grain_waitR > 0) e->grain_waitR--;
-    if (e->grain_waitR <= 0){
-        int slot = jb_exc_find_free_grain(e->grain_onR);
+static inline float jb_exc_pulses_next_R(jb_exc_voice_t *e, const t_juicy_bank_tilde *x){
+    float u = 2.f * jb_exc_rng64_uni(&e->rngR) - 1.f;
+    if (u > x->exc_pulse_thresh){
+        int slot = jb_exc_find_free_pulse(e->grain_onR);
         e->grain_onR[slot] = 1;
         e->grain_posR[slot] = 0;
-
-        int len_min = (int)jb_clamp(x->exc_grain_len_min_samps, 1.f, 100000.f);
-        int len_max = (int)jb_clamp(x->exc_grain_len_max_samps, (float)len_min, 100000.f);
-        int glen = jb_exc_irand_range(&e->rngR, len_min, len_max);
-        if (glen < 1) glen = 1;
-        e->grain_lenR[slot] = glen;
-
-        float amp = jb_exc_noise_tpdf(&e->rngR) * x->exc_grain_amp_scale;
-        e->grain_ampR[slot] = amp;
-
-        float base = x->exc_grain_interval_samps;
-        float u = jb_exc_rng64_uni(&e->rngR) * 2.f;
-        float jit = x->exc_grain_jitter;
-        float fac = (1.f - jit) + (jit * u);
-        float nxt = base * fac;
-        if (nxt < 1.f) nxt = 1.f;
-        e->grain_waitR = (int)nxt;
+        int plen = (int)jb_clamp(x->exc_pulse_len_samps, 8.f, 256.f);
+        e->grain_lenR[slot] = plen;
+        e->grain_ampR[slot] = jb_exc_noise_tpdf(&e->rngR) * x->exc_pulse_amp_scale;
     }
 
     float y = 0.f;
     int active = 0;
-    for (int i=0;i<JB_EXC_GRAIN_MAX_PER_CH;++i){
+    for (int i=0;i<JB_EXC_PULSE_MAX_PER_CH;++i){
         if (!e->grain_onR[i]) continue;
         int pos = e->grain_posR[i];
         int len = e->grain_lenR[i];
@@ -1198,9 +1164,10 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
     }
 
     // ---------- NOISE BRANCH ----------
-    // 'Grains' replaces diffusion: stochastic Hann-windowed pulses that converge to white noise at high density.
-    float nL = jb_exc_grains_next_L(e, x);
-    float nR = jb_exc_grains_next_R(e, x);
+    // Density/Grains (repurposed Diffusion): stochastic pulse triggering via probability-threshold.
+    // Each trigger spawns a fixed 1 ms Hann-windowed particle; high density overlaps converge to noise.
+    float nL = jb_exc_pulses_next_L(e, x);
+    float nR = jb_exc_pulses_next_R(e, x);
 
     // Pressure feedback injection (per voice): added into the noise input before spectral shaping
     nL += fb_inL;
@@ -2581,10 +2548,9 @@ static inline void jb_exc_note_on(t_juicy_bank_tilde *x, jb_voice_t *v, float ve
         jb_exc_pulse_trigger(&e->pulseL);
         jb_exc_pulse_trigger(&e->pulseR);
 
-        // reset granular grains so Grains parameter is audible immediately on note-on
-        e->grain_waitL = e->grain_waitR = 0;
+        // reset density pulses so the Density/Grains parameter is audible immediately on note-on
         e->grain_nL = e->grain_nR = 0;
-        for (int i=0; i<JB_EXC_GRAIN_MAX_PER_CH; ++i){
+        for (int i=0; i<JB_EXC_PULSE_MAX_PER_CH; ++i){
             e->grain_onL[i]=0; e->grain_posL[i]=0; e->grain_lenL[i]=0; e->grain_ampL[i]=0.f;
             e->grain_onR[i]=0; e->grain_posR[i]=0; e->grain_lenR[i]=0; e->grain_ampR[i]=0.f;
         }
