@@ -114,7 +114,7 @@ static inline float jb_kill_denorm(float x){
 #define JB_EXC_DIFF_STAGES 8
 #define JB_EXC_DIFF_MAX_DELAY 1601
 static const int JB_EXC_DIFF_PRIMES[JB_EXC_DIFF_STAGES] = {149, 307, 563, 827, 1013, 1223, 1447, 1601};
-static const float JB_EXC_DIFF_G_TARGET[JB_EXC_DIFF_STAGES] = {0.75f, 0.75f, 0.73f, 0.73f, 0.71f, 0.71f, 0.69f, 0.69f};
+static const float JB_EXC_DIFF_G_TARGET[JB_EXC_DIFF_STAGES] = {0.92f, 0.92f, 0.90f, 0.90f, 0.88f, 0.88f, 0.86f, 0.86f};
 
 typedef struct {
     float buf[JB_EXC_DIFF_MAX_DELAY];
