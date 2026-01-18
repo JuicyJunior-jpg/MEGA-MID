@@ -725,8 +725,6 @@ float damping, brightness; float global_decay, slope;
     float exc_diffusion;
     // exc_space: scales diffuser delay lengths (0..1)
     float exc_space;
-    // exc_space: scales the all-pass delay lengths of the noise diffuser (0..1)
-    float exc_space;
     // per-block computed (shared)
     float exc_noise_color_gL, exc_noise_color_gH, exc_noise_color_comp;
     float exc_noise_diff_g_stage[JB_EXC_DIFF_STAGES];
