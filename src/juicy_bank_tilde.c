@@ -986,6 +986,9 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
         e->env.curveD = dC;
         e->env.curveR = rC;
         jb_exc_adsr_set_times(&e->env, sr, a_ms, d_ms, sus, r_ms);
+        { int interval=(int)jb_clamp(x->exc_grain_interval_samps,1.f,100000000.f); if(e->grain_waitL>interval) e->grain_waitL=interval; if(e->grain_waitR>interval) e->grain_waitR=interval; }
+
+
     }
 }
 
@@ -2568,6 +2571,14 @@ static inline void jb_exc_note_on(t_juicy_bank_tilde *x, jb_voice_t *v, float ve
 
         jb_exc_pulse_trigger(&e->pulseL);
         jb_exc_pulse_trigger(&e->pulseR);
+
+        // reset granular grains so Grains parameter is audible immediately on note-on
+        e->grain_waitL = e->grain_waitR = 0;
+        e->grain_nL = e->grain_nR = 0;
+        for (int i=0; i<JB_EXC_GRAIN_MAX_PER_CH; ++i){
+            e->grain_onL[i]=0; e->grain_posL[i]=0; e->grain_lenL[i]=0; e->grain_ampL[i]=0.f;
+            e->grain_onR[i]=0; e->grain_posR[i]=0; e->grain_lenR[i]=0; e->grain_ampR[i]=0.f;
+        }
     }else{
         jb_exc_adsr_note_off(&e->env);
     }
