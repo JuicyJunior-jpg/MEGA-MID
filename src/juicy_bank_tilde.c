@@ -1161,6 +1161,7 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
                                          jb_voice_t *v,
                                          float w_imp, float w_noise,
                                          float fb_inL, float fb_inR, float noise_diff,
+                                         float pressure_mix,
                                          float a_pwr, float one_minus_a_pwr,
                                          float a_match, float one_minus_a_match,
                                          float *outL, float *outR)
@@ -1178,16 +1179,25 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
     }
 
     // ---------- NOISE BRANCH ----------
-    float nL = jb_exc_noise_tpdf(&e->rngL);
-    float nR = jb_exc_noise_tpdf(&e->rngR);
+    // Raw broadband noise (for Pressure=0 behavior)
+    float nL_raw = jb_exc_noise_tpdf(&e->rngL);
+    float nR_raw = jb_exc_noise_tpdf(&e->rngR);
 
-    // Pressure feedback injection (per voice): added into the noise input before the tracking BPF
-    nL += fb_inL;
-    nR += fb_inR;
+    // Pressure feedback injection is routed into the INPUT of the tracking BPF.
+    // To preserve the spec that Pressure=0 is "raw and sharp", we blend between:
+    //  - raw broadband noise (mix=0)
+    //  - BPF-shaped noise+feedback (mix=1)
+    float mix = jb_clamp(pressure_mix, 0.f, 1.f);
+    float nL_in = nL_raw + fb_inL;
+    float nR_in = nR_raw + fb_inR;
 
-    // Tracking Band-Pass Filter: centers noise energy at the fundamental (phase-lock anchor)
-    nL = jb_exc_bq_run(&e->bpfL, nL);
-    nR = jb_exc_bq_run(&e->bpfR, nR);
+    // Tracking Band-Pass Filter: centers energy at the fundamental (phase-lock anchor)
+    float nL_bpf = jb_exc_bq_run(&e->bpfL, nL_in);
+    float nR_bpf = jb_exc_bq_run(&e->bpfR, nR_in);
+
+    // Crossfade preserves audible broadband noise at low Pressure.
+    float nL = (1.f - mix) * nL_raw + mix * nL_bpf;
+    float nR = (1.f - mix) * nR_raw + mix * nR_bpf;
 
     // Noise Color (tilt EQ): split around pivot using 1-pole LP, then re-weight low/high.
     float lpL = jb_exc_lp1_run(&e->lpL, nL);
@@ -2980,6 +2990,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             jb_exc_process_sample(x, v,
                                  exc_w_imp, exc_w_noise,
                                  fbL, fbR, noise_diff,
+                                 pressure,
                                  a_exc_pwr, one_minus_a_exc_pwr,
                                  a_exc_match, one_minus_a_exc_match,
                                  &exL, &exR);
