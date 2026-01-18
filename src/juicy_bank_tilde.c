@@ -106,7 +106,19 @@ static inline float jb_kill_denorm(float x){
 //         exciter into BOTH banks (pre-modal injection), and feeds per-voice env into mod matrix.
 
 #define JB_EXC_NVOICES   JB_MAX_VOICES
-#define JB_EXC_DIFF_LEN  64  // power-of-two for cheap wrap
+// Noise diffusion (all-pass) + color tilt constants
+#define JB_EXC_TILT_PIVOT_HZ  1000.f
+#define JB_EXC_TILT_OCT_SPAN  3.f   // approx octaves from pivot to spectral edge
+
+#define JB_EXC_AP1_BASE 211
+#define JB_EXC_AP2_BASE 503
+#define JB_EXC_AP3_BASE 883
+#define JB_EXC_AP4_BASE 1217
+// max delay = base * 2.0 (tscale max) + 8 safety
+#define JB_EXC_AP1_MAX (JB_EXC_AP1_BASE*2 + 8)
+#define JB_EXC_AP2_MAX (JB_EXC_AP2_BASE*2 + 8)
+#define JB_EXC_AP3_MAX (JB_EXC_AP3_BASE*2 + 8)
+#define JB_EXC_AP4_MAX (JB_EXC_AP4_BASE*2 + 8)
 
 static inline float jb_exc_expmap01(float t, float lo, float hi){
     if (t <= 0.f) return lo;
@@ -299,11 +311,20 @@ typedef struct {
     float pitch; // reserved for future pitch-shaped excitation
     jb_exc_rng64_t rngL, rngR;
 
+    // Noise branch:
+    //   - lpL/lpR are used as the low-band extractor for the tilt-eq (pivot crossover)
+    //   - hpL/hpR are used as a gentle DC high-pass after diffusion
     jb_exc_hp1_t hpL, hpR;
     jb_exc_lp1_t lpL, lpR;
-    // Separate filter states for impulse branch (so it can be shaped identically to noise)
+
+    // Impulse branch filters (shape is impulse-only)
     jb_exc_hp1_t hpImpL, hpImpR;
     jb_exc_lp1_t lpImpL, lpImpR;
+
+    // Tracking band-pass (TPT state-variable filter) for "Excitation Narrowness"
+    float bpf_g;
+    float bpf_ic1L, bpf_ic2L;
+    float bpf_ic1R, bpf_ic2R;
 
     jb_exc_adsr_t env;
     jb_exc_pulse_t pulseL, pulseR;
@@ -311,16 +332,17 @@ typedef struct {
     float gainL, gainR;
 
     // Exciter branch loudness matching (noise vs impulse) - per voice.
-    // We track smoothed power (RMS follower) for each branch and apply
-    // a smoothed gain to the impulse branch so the exciter fader is fair.
     float pwr_noise;
     float pwr_imp;
     float imp_match;
 
-    int   particle_samples_left;
-    float diff_bufL[JB_EXC_DIFF_LEN];
-    float diff_bufR[JB_EXC_DIFF_LEN];
-    int   diff_idx;
+    // Noise diffusion: 4 cascaded all-pass filters with hard-panned stages
+    //   1 & 3 -> Left, 2 & 4 -> Right
+    int ap1_w, ap2_w, ap3_w, ap4_w;
+    float ap1_buf[JB_EXC_AP1_MAX];
+    float ap2_buf[JB_EXC_AP2_MAX];
+    float ap3_buf[JB_EXC_AP3_MAX];
+    float ap4_buf[JB_EXC_AP4_MAX];
 } jb_exc_voice_t;
 
 static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long seed_base){
@@ -337,7 +359,7 @@ static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long se
     v->env.curveR = 0.f;
     v->env.kA = v->env.kD = v->env.kR = 8.f;
 
-    // filters will be configured in STEP 2 (per block) from exc_shape
+    // filters will be configured in STEP 2 (per block): impulse-shape + noise-color/tilt
     jb_exc_hp1_set(&v->hpL, sr, 0.f);
     jb_exc_hp1_set(&v->hpR, sr, 0.f);
     jb_exc_lp1_set(&v->lpL, sr, 0.f);
@@ -356,10 +378,17 @@ static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long se
     v->pwr_imp   = 0.f;
     v->imp_match = 1.f;
 
-    v->diff_idx = 0;
-    v->particle_samples_left = 0;
-    memset(v->diff_bufL, 0, sizeof(v->diff_bufL));
-    memset(v->diff_bufR, 0, sizeof(v->diff_bufR));
+    // narrowness SVF state
+    v->bpf_g = 0.f;
+    v->bpf_ic1L = v->bpf_ic2L = 0.f;
+    v->bpf_ic1R = v->bpf_ic2R = 0.f;
+
+    // noise diffusion (all-pass)
+    v->ap1_w = v->ap2_w = v->ap3_w = v->ap4_w = 0;
+    memset(v->ap1_buf, 0, sizeof(v->ap1_buf));
+    memset(v->ap2_buf, 0, sizeof(v->ap2_buf));
+    memset(v->ap3_buf, 0, sizeof(v->ap3_buf));
+    memset(v->ap4_buf, 0, sizeof(v->ap4_buf));
 }
 
 // STEP 2 helpers (runtime reset)
@@ -384,17 +413,28 @@ static inline void jb_exc_voice_reset_runtime(jb_exc_voice_t *e){
     e->pwr_imp   = 0.f;
     e->imp_match = 1.f;
 
-    // particle gating + diffusion
-    e->particle_samples_left = 0;
-    e->diff_idx = 0;
-    memset(e->diff_bufL, 0, sizeof(e->diff_bufL));
-    memset(e->diff_bufR, 0, sizeof(e->diff_bufR));
+    // noise narrowness SVF state
+    e->bpf_g = 0.f;
+    e->bpf_ic1L = e->bpf_ic2L = 0.f;
+    e->bpf_ic1R = e->bpf_ic2R = 0.f;
+
+    // noise diffusion (all-pass)
+    e->ap1_w = e->ap2_w = e->ap3_w = e->ap4_w = 0;
+    memset(e->ap1_buf, 0, sizeof(e->ap1_buf));
+    memset(e->ap2_buf, 0, sizeof(e->ap2_buf));
+    memset(e->ap3_buf, 0, sizeof(e->ap3_buf));
+    memset(e->ap4_buf, 0, sizeof(e->ap4_buf));
 
     // filter memories
     e->hpL.y1 = e->hpL.x1 = 0.f;
     e->hpR.y1 = e->hpR.x1 = 0.f;
     e->lpL.y1 = 0.f;
     e->lpR.y1 = 0.f;
+
+    e->hpImpL.y1 = e->hpImpL.x1 = 0.f;
+    e->hpImpR.y1 = e->hpImpR.x1 = 0.f;
+    e->lpImpL.y1 = 0.f;
+    e->lpImpR.y1 = 0.f;
 
     e->gainL = 1.f;
     e->gainR = 1.f;
@@ -674,7 +714,19 @@ float damping, brightness; float global_decay, slope;
     float exc_decay_ms,  exc_decay_curve;
     float exc_sustain;
     float exc_release_ms, exc_release_curve;
-    float exc_density, exc_shape, exc_diffusion;
+    // exc_density: repurposed -> Excitation Narrowness (0..1)
+    float exc_density;
+    // exc_imp_shape: impulse-only shape (0..1)
+    float exc_imp_shape;
+    // exc_shape: repurposed -> Noise Color (0..1; red..white..violet)
+    float exc_shape;
+    // exc_diffusion: repurposed -> Noise Diffusion (0..1)
+    float exc_diffusion;
+
+    // per-block computed (shared)
+    float exc_noise_color_gL, exc_noise_color_gH, exc_noise_color_comp;
+    float exc_noise_diff_g;
+    float exc_noise_diff_d1, exc_noise_diff_d2, exc_noise_diff_d3, exc_noise_diff_d4;
 
     float noise_scale;   // factory trim (linear amp)
     float impulse_scale; // factory trim (linear amp)
@@ -688,6 +740,7 @@ float damping, brightness; float global_decay, slope;
     t_inlet *in_exc_release;
     t_inlet *in_exc_release_curve;
     t_inlet *in_exc_density;
+    t_inlet *in_exc_imp_shape;
     t_inlet *in_exc_shape;
     t_inlet *in_exc_diffusion;
 
@@ -842,8 +895,8 @@ static float jb_mod_source_value(const t_juicy_bank_tilde *x,
 static void jb_exc_update_block(t_juicy_bank_tilde *x){
     float sr = (x->sr > 0.f) ? x->sr : 48000.f;
 
-    // shape -> HP/LP cutoffs
-    float s = jb_clamp(x->exc_shape, 0.f, 1.f);
+    // Impulse Shape -> HP/LP cutoffs (impulse only)
+    float s = jb_clamp(x->exc_imp_shape, 0.f, 1.f);
     float lp_norm, hp_norm;
     if (s <= 0.5f){
         float t = s / 0.5f;
@@ -861,6 +914,27 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
     float hp_hz = jb_exc_expmap01(jb_clamp(hp_norm,0.f,1.f), hp_min, hp_max);
     if (lp_hz < hp_hz + 50.f) lp_hz = hp_hz + 50.f;
 
+    // Noise Color (tilt EQ) -> per-block gains (shared)
+    float color = jb_clamp(x->exc_shape, 0.f, 1.f); // 0=red .. 0.5=white .. 1=violet
+    float slope_db_per_oct = -6.f + 12.f * color;
+    float tilt_db = slope_db_per_oct * JB_EXC_TILT_OCT_SPAN;
+    float gH = powf(10.f,  tilt_db / 20.f);
+    float gL = powf(10.f, -tilt_db / 20.f);
+    float comp = 1.f / sqrtf(0.5f * (gL*gL + gH*gH) + 1e-12f);
+    x->exc_noise_color_gL = gL;
+    x->exc_noise_color_gH = gH;
+    x->exc_noise_color_comp = comp;
+
+    // Noise diffusion (all-pass) parameters (shared)
+    float d = jb_clamp(x->exc_diffusion, 0.f, 1.f);
+    float gd = 0.70710678f * sqrtf(d);
+    float tscale = 0.1f + 1.9f * d;
+    x->exc_noise_diff_g  = (d <= 0.f) ? 0.f : gd;
+    x->exc_noise_diff_d1 = (float)JB_EXC_AP1_BASE * tscale;
+    x->exc_noise_diff_d2 = (float)JB_EXC_AP2_BASE * tscale;
+    x->exc_noise_diff_d3 = (float)JB_EXC_AP3_BASE * tscale;
+    x->exc_noise_diff_d4 = (float)JB_EXC_AP4_BASE * tscale;
+
     // ADSR curves + times (applied to all voices)
     float aC = jb_clamp(x->exc_attack_curve,  -1.f, 1.f);
     float dC = jb_clamp(x->exc_decay_curve,   -1.f, 1.f);
@@ -870,20 +944,32 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
     float d_ms = x->exc_decay_ms;
     float sus  = x->exc_sustain;
     float r_ms = x->exc_release_ms;
-
     for(int i=0; i<x->total_voices; ++i){
         jb_exc_voice_t *e = &x->v[i].exc;
 
-        // filters
-        jb_exc_hp1_set(&e->hpL, sr, hp_hz);
-        jb_exc_hp1_set(&e->hpR, sr, hp_hz);
-        jb_exc_lp1_set(&e->lpL, sr, lp_hz);
-        jb_exc_lp1_set(&e->lpR, sr, lp_hz);
-        // impulse branch uses the same cutoff but its own filter state
+        // Noise filters:
+        //  - lpL/lpR: pivot low-pass for tilt EQ (used to split low/high bands)
+        //  - hpL/hpR: gentle DC high-pass (post diffusion)
+        float pivot_hz = JB_EXC_TILT_PIVOT_HZ;
+        if (pivot_hz < 50.f) pivot_hz = 50.f;
+        if (pivot_hz > 0.45f * sr) pivot_hz = 0.45f * sr;
+        jb_exc_lp1_set(&e->lpL, sr, pivot_hz);
+        jb_exc_lp1_set(&e->lpR, sr, pivot_hz);
+        jb_exc_hp1_set(&e->hpL, sr, 5.f);
+        jb_exc_hp1_set(&e->hpR, sr, 5.f);
+
+        // Impulse filters: shaped by the (new) impulse-only Shape inlet
         jb_exc_hp1_set(&e->hpImpL, sr, hp_hz);
         jb_exc_hp1_set(&e->hpImpR, sr, hp_hz);
         jb_exc_lp1_set(&e->lpImpL, sr, lp_hz);
         jb_exc_lp1_set(&e->lpImpR, sr, lp_hz);
+
+        // Pitch-tracked BPF coefficient for Excitation Narrowness (noise path)
+        float fc = x->v[i].f0;
+        if (!(fc > 0.f)) fc = 440.f;
+        if (fc < 20.f) fc = 20.f;
+        if (fc > 0.45f * sr) fc = 0.45f * sr;
+        e->bpf_g = tanf((float)M_PI * fc / sr);
 
         // env
         e->env.curveA = aC;
@@ -928,11 +1014,37 @@ static inline void jb_modenv_note_off(jb_voice_t *v){
     }
 }
 
+// Fractional-delay Schroeder all-pass (linear interpolation read).
+// Buffer stores w[n] = x[n] + g*y[n].
+static inline float jb_exc_apf_run(float x, float g, float delay_samps, float *buf, int *w, int maxlen){
+    if (g <= 0.f) return x;
+    float d = jb_clamp(delay_samps, 1.f, (float)(maxlen - 2));
+    int wi = *w;
+
+    float r = (float)wi - d;
+    while (r < 0.f) r += (float)maxlen;
+
+    int i0 = (int)r;
+    float frac = r - (float)i0;
+    int i1 = i0 + 1;
+    if (i1 >= maxlen) i1 -= maxlen;
+
+    float wd = buf[i0] + (buf[i1] - buf[i0]) * frac;
+    float y = -g * x + wd;
+    float wnew = x + g * y;
+
+    buf[wi] = wnew;
+    wi++;
+    if (wi >= maxlen) wi = 0;
+    *w = wi;
+    return y;
+}
+
 // Render one exciter sample for one voice (stereo).
 static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
                                          jb_voice_t *v,
                                          float w_imp, float w_noise,
-                                         float density, float diffusion,
+                                         float exc_narrow, float noise_diff,
                                          float a_pwr, float one_minus_a_pwr,
                                          float a_match, float one_minus_a_match,
                                          float *outL, float *outR)
@@ -949,62 +1061,69 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
         return;
     }
 
-    // particle gating (density)
-    float gate = 1.f;
-    if (density >= 0.999f){
-        gate = 1.f;
-    }else if (density <= 0.f){
-        gate = 0.f;
-    }else{
-        if (e->particle_samples_left > 0){
-            e->particle_samples_left--;
-            gate = 1.f;
-        }else{
-            float p = density * 0.01f;
-            if (jb_exc_rng64_uni(&e->rngL) < p){
-                int minLen = 16;
-                int maxLen = 512;
-                int len = minLen + (int)((1.f - density) * (float)(maxLen - minLen));
-                e->particle_samples_left = len;
-                gate = 1.f;
-            }else{
-                gate = 0.f;
-            }
-        }
+    // ---------- NOISE BRANCH ----------
+    float nL = jb_exc_noise_tpdf(&e->rngL);
+    float nR = jb_exc_noise_tpdf(&e->rngR);
+
+    // Noise Color (tilt EQ): split around pivot using 1-pole LP, then re-weight low/high.
+    float lpL = jb_exc_lp1_run(&e->lpL, nL);
+    float lpR = jb_exc_lp1_run(&e->lpR, nR);
+    float hpL = nL - lpL;
+    float hpR = nR - lpR;
+
+    float colL = x->exc_noise_color_comp * (x->exc_noise_color_gL * lpL + x->exc_noise_color_gH * hpL);
+    float colR = x->exc_noise_color_comp * (x->exc_noise_color_gL * lpR + x->exc_noise_color_gH * hpR);
+
+    // Excitation Narrowness: pitch-tracked BPF with envelope-controlled Q.
+    // At exc_narrow=0: static moderate Q. At 1: Q follows env from wide->narrow (acoustic stabilization).
+    const float Q_base = 2.0f;
+    const float Q_env  = 0.5f + (20.0f - 0.5f) * env;
+    float Q = Q_base + jb_clamp(exc_narrow, 0.f, 1.f) * (Q_env - Q_base);
+    if (Q < 0.1f) Q = 0.1f;
+    float k = 1.f / Q;
+    float g = e->bpf_g;
+    float inv = 1.f / (1.f + g * (g + k));
+
+    // TPT SVF per channel (band-pass output)
+    {
+        float v3 = colL - e->bpf_ic2L;
+        float v1 = (g * v3 + e->bpf_ic1L) * inv;
+        float v2 = e->bpf_ic2L + g * v1;
+        e->bpf_ic1L = 2.f * v1 - e->bpf_ic1L;
+        e->bpf_ic2L = 2.f * v2 - e->bpf_ic2L;
+        colL = v1;
+    }
+    {
+        float v3 = colR - e->bpf_ic2R;
+        float v1 = (g * v3 + e->bpf_ic1R) * inv;
+        float v2 = e->bpf_ic2R + g * v1;
+        e->bpf_ic1R = 2.f * v1 - e->bpf_ic1R;
+        e->bpf_ic2R = 2.f * v2 - e->bpf_ic2R;
+        colR = v1;
     }
 
-    // noise branch
-    float nL = gate * jb_exc_noise_tpdf(&e->rngL);
-    float nR = gate * jb_exc_noise_tpdf(&e->rngR);
+    // Noise diffusion: 4 cascaded all-pass filters (odd->L, even->R).
+    float diff_amt = jb_clamp(noise_diff, 0.f, 1.f);
+    if (diff_amt > 0.f){
+        float gd = x->exc_noise_diff_g;
+        colL = jb_exc_apf_run(colL, gd, x->exc_noise_diff_d1, e->ap1_buf, &e->ap1_w, JB_EXC_AP1_MAX);
+        colL = jb_exc_apf_run(colL, gd, x->exc_noise_diff_d3, e->ap3_buf, &e->ap3_w, JB_EXC_AP3_MAX);
 
-    float yL = jb_exc_lp1_run(&e->lpL, jb_exc_hp1_run(&e->hpL, nL));
-    float yR = jb_exc_lp1_run(&e->lpR, jb_exc_hp1_run(&e->hpR, nR));
+        colR = jb_exc_apf_run(colR, gd, x->exc_noise_diff_d2, e->ap2_buf, &e->ap2_w, JB_EXC_AP2_MAX);
+        colR = jb_exc_apf_run(colR, gd, x->exc_noise_diff_d4, e->ap4_buf, &e->ap4_w, JB_EXC_AP4_MAX);
+    }
 
-    yL *= env * e->vel_on * e->gainL;
-    yR *= env * e->vel_on * e->gainR;
+    // DC protection after diffusion
+    colL = jb_exc_hp1_run(&e->hpL, colL);
+    colR = jb_exc_hp1_run(&e->hpR, colR);
 
-    // impulse branch
+    float yL = colL * env * e->vel_on * e->gainL;
+    float yR = colR * env * e->vel_on * e->gainR;
+
+    // ---------- IMPULSE BRANCH (shape affects impulse only) ----------
     float pL = jb_exc_pulse_next(&e->pulseL);
     float pR = jb_exc_pulse_next(&e->pulseR);
 
-    // diffusion (tiny decorrelator for impulse)
-    if (diffusion > 0.f){
-        int idx = e->diff_idx & (JB_EXC_DIFF_LEN-1);
-        float dl = e->diff_bufL[idx];
-        float dr = e->diff_bufR[idx];
-
-        float wetL = pL + dl * diffusion;
-        float wetR = pR + dr * diffusion;
-
-        e->diff_bufL[idx] = pL;
-        e->diff_bufR[idx] = pR;
-        e->diff_idx = (idx + 1) & (JB_EXC_DIFF_LEN-1);
-
-        pL = wetL;
-        pR = wetR;
-    }
-
-    // Shape the impulse with the same HP/LP settings as noise (via separate filter state)
     pL = jb_exc_lp1_run(&e->lpImpL, jb_exc_hp1_run(&e->hpImpL, pL));
     pR = jb_exc_lp1_run(&e->lpImpR, jb_exc_hp1_run(&e->hpImpR, pR));
 
@@ -1013,43 +1132,33 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
     pR *= e->vel_on * e->gainR;
 
     // --- Loudness matching: impulse branch gain follows noise branch (pre-resonator) ---
-    // Track smoothed power for both branches (RMS follower) and set a smoothed
-    // impulse gain so that RMS(impulse) ~= RMS(noise). This makes the fader feel fair.
     {
-        // Branch power (mono) in the same domain we will inject into the resonator.
         float p_noise = 0.5f * (yL*yL + yR*yR);
         float p_imp   = 0.5f * (pL*pL + pR*pR);
 
-        // Smooth powers (one-pole)
         e->pwr_noise = a_pwr * e->pwr_noise + one_minus_a_pwr * p_noise;
         e->pwr_imp   = a_pwr * e->pwr_imp   + one_minus_a_pwr * p_imp;
 
-        // Convert to RMS for ratio. Add epsilon to avoid division by zero.
         const float eps = 1e-12f;
         float rms_noise = sqrtf(e->pwr_noise + eps);
         float rms_imp   = sqrtf(e->pwr_imp   + eps);
 
-        // If impulse is effectively silent, don't chase the ratio (prevents runaway).
         float target = e->imp_match;
         if (rms_noise > 1e-7f && rms_imp > 1e-7f){
             target = rms_noise / rms_imp;
         }
 
-        // Clamp for safety (avoid huge boosts on sparse impulses)
         const float kMin = 0.125f;
         const float kMax = 8.0f;
         if (target < kMin) target = kMin;
         if (target > kMax) target = kMax;
 
-        // Smooth the gain itself (separate time-constant from RMS follower)
         e->imp_match = a_match * e->imp_match + one_minus_a_match * target;
 
-        // Apply matched gain to impulse branch
         pL *= e->imp_match;
         pR *= e->imp_match;
     }
 
-    // mix (fader crossfade between noise and impulse)
     *outL = w_noise * (yL * x->noise_scale) + w_imp * (pL * x->impulse_scale);
     *outR = w_noise * (yR * x->noise_scale) + w_imp * (pR * x->impulse_scale);
 }
@@ -2594,17 +2703,21 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         x->lfo_amt_eff[1] = jb_clamp(x->lfo_amt_eff[1] + lfo1_out, -1.f, 1.f);
     }
 
-    // LFO1 -> Exciter Shape (0..1, additive, clamped) must be applied before jb_exc_update_block()
-    const float exc_shape_saved = x->exc_shape;
-    if (lfo1_out != 0.f && lfo1_tgt == gensym("exc_shape")) {
-        x->exc_shape = jb_clamp(exc_shape_saved + lfo1_out, 0.f, 1.f);
+    // LFO1 -> Exciter params (0..1, additive, clamped) must be applied before jb_exc_update_block()
+    const float exc_shape_saved = x->exc_shape;         // Noise Color
+    const float exc_imp_shape_saved = x->exc_imp_shape; // Impulse Shape
+    if (lfo1_out != 0.f){
+        if (lfo1_tgt == gensym("exc_shape")) {
+            x->exc_shape = jb_clamp(exc_shape_saved + lfo1_out, 0.f, 1.f);
+        } else if (lfo1_tgt == gensym("exc_imp_shape")) {
+            x->exc_imp_shape = jb_clamp(exc_imp_shape_saved + lfo1_out, 0.f, 1.f);
+        }
     }
-
-    // (Exciter has no impulse-frequency parameter.)
 
     // Internal exciter: update shared params -> per-voice filters + ADSR times/curves
     jb_exc_update_block(x);
     x->exc_shape = exc_shape_saved;
+    x->exc_imp_shape = exc_imp_shape_saved;
     jb_mod_adsr_update_block(x);
 
     const int topo = (int)jb_clamp(x->topology, 0.f, 3.f);
@@ -2619,8 +2732,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     float exc_t = 0.5f * (exc_f + 1.f);
     float exc_w_imp   = sinf(0.5f * (float)M_PI * exc_t);
     float exc_w_noise = cosf(0.5f * (float)M_PI * exc_t);
-    float exc_density   = jb_clamp(x->exc_density, 0.f, 1.f);
-    float exc_diffusion = jb_clamp(x->exc_diffusion, 0.f, 1.f);
+    float exc_narrow    = jb_clamp(x->exc_density, 0.f, 1.f);
+    float noise_diff    = jb_clamp(x->exc_diffusion, 0.f, 1.f);
     // Energy meter (per voice) used for voice stealing and tail cleanup.
     // 50ms time constant -> responsive but stable.
     const float a_energy = expf(-1.0f / (x->sr * 0.050f));
@@ -2736,7 +2849,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             float exL = 0.f, exR = 0.f;
             jb_exc_process_sample(x, v,
                                  exc_w_imp, exc_w_noise,
-                                 exc_density, exc_diffusion,
+                                 exc_narrow, noise_diff,
                                  a_exc_pwr, one_minus_a_exc_pwr,
                                  a_exc_match, one_minus_a_exc_match,
                                  &exL, &exR);
@@ -3262,6 +3375,7 @@ static inline int jb_lfo1_target_allowed(t_symbol *s){
         s == gensym("partials_1")   || s == gensym("partials_2")   ||
         s == gensym("coupling_amt") ||
         s == gensym("exc_shape")    ||
+        s == gensym("exc_imp_shape")||
         s == gensym("lfo2_rate")    ||
         s == gensym("lfo2_amount")
     );
@@ -3527,6 +3641,7 @@ inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     if (x->in_exc_release) inlet_free(x->in_exc_release);
     if (x->in_exc_release_curve) inlet_free(x->in_exc_release_curve);
     if (x->in_exc_density) inlet_free(x->in_exc_density);
+    if (x->in_exc_imp_shape) inlet_free(x->in_exc_imp_shape);
     if (x->in_exc_shape) inlet_free(x->in_exc_shape);
     if (x->in_exc_diffusion) inlet_free(x->in_exc_diffusion);
 
@@ -3681,9 +3796,10 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->exc_release_ms    = 400.f;
     x->exc_release_curve = 0.f;
 
-    x->exc_shape     = 0.5f;
-    x->exc_density   = 1.f;
-    x->exc_diffusion = 0.f;
+    x->exc_density    = 0.f;  // Excitation Narrowness (noise BPF Q env depth)
+    x->exc_imp_shape  = 0.5f;  // Impulse-only Shape (old shape logic)
+    x->exc_shape      = 0.5f;  // Noise Color (tilt EQ)
+    x->exc_diffusion  = 0.f;  // Noise Diffusion
     x->noise_scale  = 0.4f; // factory sweetspot
     x->impulse_scale = 10.f; // factory sweetspot
 // initialise per-LFO parameter and runtime state
@@ -3820,6 +3936,7 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->in_exc_release_curve = floatinlet_new(&x->x_obj, &x->exc_release_curve);
 
     x->in_exc_density       = floatinlet_new(&x->x_obj, &x->exc_density);
+    x->in_exc_imp_shape    = floatinlet_new(&x->x_obj, &x->exc_imp_shape);
     x->in_exc_shape         = floatinlet_new(&x->x_obj, &x->exc_shape);
     x->in_exc_diffusion     = floatinlet_new(&x->x_obj, &x->exc_diffusion);
 
