@@ -918,13 +918,12 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
     x->exc_noise_color_comp = comp;
 
     // Noise diffusion (all-pass) parameters (shared)
-    // IMPORTANT: an all-pass cascade on steady noise can be *very* subtle.
-    // We keep the 4-stage Schroeder APF design, but allow a hotter feedback
-    // coefficient (still < 1.0 for stability). The perceptual "cloud" comes
-    // mostly from the dry/wet blend done per-sample in jb_exc_process_sample().
+    // Make diffusion *obvious* by driving the all-pass feedback harder.
+    // We keep the original time-scaling behavior, but map diffusion -> g
+    // LINEARLY (no sqrt curve) and with a higher max than the original spec.
     float d = jb_clamp(x->exc_diffusion, 0.f, 1.f);
-    float gd = 0.92f * sqrtf(d);              // 0..0.92 (stable, more obvious)
-    float tscale = 0.1f + 1.9f * d;           // 0.1x .. 2.0x (fits buffer sizes)
+    float gd = 0.90f * d;              // 0..0.90 (stable, but much more "cloudy")
+    float tscale = 0.1f + 1.9f * d;    // 0.1x .. 2.0x
     x->exc_noise_diff_g  = (d <= 0.f) ? 0.f : gd;
     x->exc_noise_diff_d1 = (float)JB_EXC_AP1_BASE * tscale;
     x->exc_noise_diff_d2 = (float)JB_EXC_AP2_BASE * tscale;
@@ -1040,12 +1039,11 @@ static inline float jb_hp1_run_a(float x, float a, float *x1, float *y1){
 }
 
 // Soft clip with ceiling=1.0 and a lower knee (threshold) where it begins to squash.
-// For the feedback loop, threshold is intentionally allowed in [0 .. 0.707] so
-// higher "Pressure" can become progressively grittier while staying hard-capped.
+// Threshold is fixed in the feedback path at 0.707 (≈ 1/sqrt(2)) for predictable behavior.
 static inline float jb_softclip_thresh(float x, float threshold){
     float t = threshold;
-    if (t < 0.f) t = 0.f;
-    if (t > 0.70710678f) t = 0.70710678f;
+    if (t < 0.05f) t = 0.05f;
+    if (t > 0.95f) t = 0.95f;
 
     float ax = fabsf(x);
     if (ax <= t) return x;
@@ -1094,39 +1092,14 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
     float colR = x->exc_noise_color_comp * (x->exc_noise_color_gL * lpR + x->exc_noise_color_gH * hpR);
 
     // Noise diffusion: 4 cascaded all-pass filters (odd->L, even->R).
-    // To make the effect clearly audible as a "volumetric cloud", we apply:
-    //   (1) the all-pass cascade (phase scattering)
-    //   (2) a dry/wet blend (creates decorrelated cancellations that are audible)
     float diff_amt = jb_clamp(noise_diff, 0.f, 1.f);
     if (diff_amt > 0.f){
-        const float dryL = colL;
-        const float dryR = colR;
-
         float gd = x->exc_noise_diff_g;
-        float wetL = colL;
-        float wetR = colR;
+        colL = jb_exc_apf_run(colL, gd, x->exc_noise_diff_d1, e->ap1_buf, &e->ap1_w, JB_EXC_AP1_MAX);
+        colL = jb_exc_apf_run(colL, gd, x->exc_noise_diff_d3, e->ap3_buf, &e->ap3_w, JB_EXC_AP3_MAX);
 
-        wetL = jb_exc_apf_run(wetL, gd, x->exc_noise_diff_d1, e->ap1_buf, &e->ap1_w, JB_EXC_AP1_MAX);
-        wetL = jb_exc_apf_run(wetL, gd, x->exc_noise_diff_d3, e->ap3_buf, &e->ap3_w, JB_EXC_AP3_MAX);
-
-        wetR = jb_exc_apf_run(wetR, gd, x->exc_noise_diff_d2, e->ap2_buf, &e->ap2_w, JB_EXC_AP2_MAX);
-        wetR = jb_exc_apf_run(wetR, gd, x->exc_noise_diff_d4, e->ap4_buf, &e->ap4_w, JB_EXC_AP4_MAX);
-
-        // Make the range feel more obvious: use a sqrt curve for wet-mix so
-        // smaller knob moves already thicken the cloud.
-        float mix = sqrtf(diff_amt);
-
-        // crossfade: 0 = fully dry (transparent), 1 = fully diffused
-        colL = dryL + mix * (wetL - dryL);
-        colR = dryR + mix * (wetR - dryR);
-
-        // Small stereo crossfeed tied to diffusion for a more "volumetric" feel
-        // while keeping the odd/even hard-pan staging.
-        float xfeed = 0.15f * mix;
-        float tL = colL;
-        float tR = colR;
-        colL = tL + xfeed * (tR - tL);
-        colR = tR + xfeed * (tL - tR);
+        colR = jb_exc_apf_run(colR, gd, x->exc_noise_diff_d2, e->ap2_buf, &e->ap2_w, JB_EXC_AP2_MAX);
+        colR = jb_exc_apf_run(colR, gd, x->exc_noise_diff_d4, e->ap4_buf, &e->ap4_w, JB_EXC_AP4_MAX);
     }
 
     // DC protection after diffusion
@@ -2760,10 +2733,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     // Pressure (reuses former density inlet): feedback coefficient k = 0..0.95
     float pressure = jb_clamp(x->exc_density, 0.f, 1.f);
     float fb_k = 0.95f * pressure;
-    // Saturator knee (threshold) requested: 0..0.707. We tie it to Pressure:
-    //  - Pressure=0 -> threshold=0.707 (less squash)
-    //  - Pressure=1 -> threshold=0.0   (maximum squash / grit)
-    float fb_sat_thresh = 0.70710678f * (1.f - pressure);
     float noise_diff    = jb_clamp(x->exc_diffusion, 0.f, 1.f);
     // Energy meter (per voice) used for voice stealing and tail cleanup.
     // 50ms time constant -> responsive but stable.
@@ -2881,9 +2850,9 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 fbL = jb_hp1_run_a(v->fb_prevL, x->fb_hp_a, &v->fb_hp_x1L, &v->fb_hp_y1L);
                 fbR = jb_hp1_run_a(v->fb_prevR, x->fb_hp_a, &v->fb_hp_x1R, &v->fb_hp_y1R);
 
-                // Safety saturation (ceiling=1.0), knee controlled by Pressure
-                fbL = jb_softclip_thresh(fbL, fb_sat_thresh);
-                fbR = jb_softclip_thresh(fbR, fb_sat_thresh);
+                // Safety saturation (ceiling=1.0, fixed knee = 0.707)
+                fbL = jb_softclip_thresh(fbL, 0.70710678f);
+                fbR = jb_softclip_thresh(fbR, 0.70710678f);
 
                 // Strict gain ceiling (k <= 0.95)
                 fbL *= fb_k;
