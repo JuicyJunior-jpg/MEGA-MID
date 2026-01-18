@@ -106,19 +106,17 @@ static inline float jb_kill_denorm(float x){
 //         exciter into BOTH banks (pre-modal injection), and feeds per-voice env into mod matrix.
 
 #define JB_EXC_NVOICES   JB_MAX_VOICES
-// Noise diffusion (all-pass) + color tilt constants
+// Noise color tilt constants
 #define JB_EXC_TILT_PIVOT_HZ  1000.f
 #define JB_EXC_TILT_OCT_SPAN  3.f   // approx octaves from pivot to spectral edge
 
-#define JB_EXC_AP1_BASE 211
-#define JB_EXC_AP2_BASE 503
-#define JB_EXC_AP3_BASE 883
-#define JB_EXC_AP4_BASE 1217
-// max delay = base * 2.0 (tscale max) + 8 safety
-#define JB_EXC_AP1_MAX (JB_EXC_AP1_BASE*2 + 8)
-#define JB_EXC_AP2_MAX (JB_EXC_AP2_BASE*2 + 8)
-#define JB_EXC_AP3_MAX (JB_EXC_AP3_BASE*2 + 8)
-#define JB_EXC_AP4_MAX (JB_EXC_AP4_BASE*2 + 8)
+
+// Granular noise (shot-noise) constants for the 'Grains' parameter (reuses exc_diffusion inlet)
+#define JB_EXC_GRAIN_RATE_MIN_HZ 7.5f
+#define JB_EXC_GRAIN_RATE_MAX_HZ 2500.f
+#define JB_EXC_GRAIN_LEN_MIN_MS 5.f
+#define JB_EXC_GRAIN_LEN_MAX_MS 20.f
+#define JB_EXC_GRAIN_MAX_PER_CH 16
 
 static inline float jb_exc_expmap01(float t, float lo, float hi){
     if (t <= 0.f) return lo;
@@ -331,13 +329,19 @@ typedef struct {
     float pwr_imp;
     float imp_match;
 
-    // Noise diffusion: 4 cascaded all-pass filters with hard-panned stages
-    //   1 & 3 -> Left, 2 & 4 -> Right
-    int ap1_w, ap2_w, ap3_w, ap4_w;
-    float ap1_buf[JB_EXC_AP1_MAX];
-    float ap2_buf[JB_EXC_AP2_MAX];
-    float ap3_buf[JB_EXC_AP3_MAX];
-    float ap4_buf[JB_EXC_AP4_MAX];
+    // Granular noise (shot-noise) generator state per channel.
+    // Each trigger spawns a short Hann-windowed pulse; many overlapping grains converge toward white noise.
+    int   grain_waitL, grain_waitR; // samples until next grain trigger
+    int   grain_nL, grain_nR;       // active grain count (for quick early-out)
+    int   grain_posL[JB_EXC_GRAIN_MAX_PER_CH];
+    int   grain_lenL[JB_EXC_GRAIN_MAX_PER_CH];
+    float grain_ampL[JB_EXC_GRAIN_MAX_PER_CH];
+    unsigned char grain_onL[JB_EXC_GRAIN_MAX_PER_CH];
+
+    int   grain_posR[JB_EXC_GRAIN_MAX_PER_CH];
+    int   grain_lenR[JB_EXC_GRAIN_MAX_PER_CH];
+    float grain_ampR[JB_EXC_GRAIN_MAX_PER_CH];
+    unsigned char grain_onR[JB_EXC_GRAIN_MAX_PER_CH];
 } jb_exc_voice_t;
 
 static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long seed_base){
@@ -373,12 +377,13 @@ static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long se
     v->pwr_imp   = 0.f;
     v->imp_match = 1.f;
 
-    // noise diffusion (all-pass)
-    v->ap1_w = v->ap2_w = v->ap3_w = v->ap4_w = 0;
-    memset(v->ap1_buf, 0, sizeof(v->ap1_buf));
-    memset(v->ap2_buf, 0, sizeof(v->ap2_buf));
-    memset(v->ap3_buf, 0, sizeof(v->ap3_buf));
-    memset(v->ap4_buf, 0, sizeof(v->ap4_buf));
+    // granular grains
+    v->grain_waitL = v->grain_waitR = 0;
+    v->grain_nL = v->grain_nR = 0;
+    for (int i=0;i<JB_EXC_GRAIN_MAX_PER_CH;++i){
+        v->grain_onL[i]=0; v->grain_posL[i]=0; v->grain_lenL[i]=0; v->grain_ampL[i]=0.f;
+        v->grain_onR[i]=0; v->grain_posR[i]=0; v->grain_lenR[i]=0; v->grain_ampR[i]=0.f;
+    }
 }
 
 // STEP 2 helpers (runtime reset)
@@ -403,12 +408,13 @@ static inline void jb_exc_voice_reset_runtime(jb_exc_voice_t *e){
     e->pwr_imp   = 0.f;
     e->imp_match = 1.f;
 
-    // noise diffusion (all-pass)
-    e->ap1_w = e->ap2_w = e->ap3_w = e->ap4_w = 0;
-    memset(e->ap1_buf, 0, sizeof(e->ap1_buf));
-    memset(e->ap2_buf, 0, sizeof(e->ap2_buf));
-    memset(e->ap3_buf, 0, sizeof(e->ap3_buf));
-    memset(e->ap4_buf, 0, sizeof(e->ap4_buf));
+    // granular grains
+    e->grain_waitL = e->grain_waitR = 0;
+    e->grain_nL = e->grain_nR = 0;
+    for (int i=0;i<JB_EXC_GRAIN_MAX_PER_CH;++i){
+        e->grain_onL[i]=0; e->grain_posL[i]=0; e->grain_lenL[i]=0; e->grain_ampL[i]=0.f;
+        e->grain_onR[i]=0; e->grain_posR[i]=0; e->grain_lenR[i]=0; e->grain_ampR[i]=0.f;
+    }
 
     // filter memories
     e->hpL.y1 = e->hpL.x1 = 0.f;
@@ -712,13 +718,18 @@ float damping, brightness; float global_decay, slope;
     float exc_imp_shape;
     // exc_shape: repurposed -> Noise Color (0..1; red..white..violet)
     float exc_shape;
-    // exc_diffusion: repurposed -> Noise Diffusion (0..1)
+    // exc_diffusion: repurposed -> Grains (granular noise density/jitter) (0..1)
     float exc_diffusion;
-
     // per-block computed (shared)
     float exc_noise_color_gL, exc_noise_color_gH, exc_noise_color_comp;
-    float exc_noise_diff_g;
-    float exc_noise_diff_d1, exc_noise_diff_d2, exc_noise_diff_d3, exc_noise_diff_d4;
+
+    // grains (granular noise) computed params
+    float exc_grain_rate_hz;
+    float exc_grain_interval_samps;
+    float exc_grain_jitter;
+    float exc_grain_len_min_samps;
+    float exc_grain_len_max_samps;
+    float exc_grain_amp_scale;
 
     float noise_scale;   // factory trim (linear amp)
     float impulse_scale; // factory trim (linear amp)
@@ -917,15 +928,29 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
     x->exc_noise_color_gH = gH;
     x->exc_noise_color_comp = comp;
 
-    // Noise diffusion (all-pass) parameters (shared)
-    float d = jb_clamp(x->exc_diffusion, 0.f, 1.f);
-    float gd = 0.70710678f * sqrtf(d);
-    float tscale = 0.1f + 1.9f * d;
-    x->exc_noise_diff_g  = (d <= 0.f) ? 0.f : gd;
-    x->exc_noise_diff_d1 = (float)JB_EXC_AP1_BASE * tscale;
-    x->exc_noise_diff_d2 = (float)JB_EXC_AP2_BASE * tscale;
-    x->exc_noise_diff_d3 = (float)JB_EXC_AP3_BASE * tscale;
-    x->exc_noise_diff_d4 = (float)JB_EXC_AP4_BASE * tscale;
+    // Grains (granular noise) parameters (shared)
+    float g = jb_clamp(x->exc_diffusion, 0.f, 1.f);
+
+    // Density mapping: exponential rate from ~7.5 Hz to > 2000 Hz
+    float rate = JB_EXC_GRAIN_RATE_MIN_HZ * powf(JB_EXC_GRAIN_RATE_MAX_HZ / JB_EXC_GRAIN_RATE_MIN_HZ, g);
+    if (rate < 1.f) rate = 1.f;
+    x->exc_grain_rate_hz = rate;
+    x->exc_grain_interval_samps = sr / rate;
+
+    // Jitter: 0 -> mostly periodic, 1 -> fully randomized (0..2x interval)
+    x->exc_grain_jitter = g;
+
+    // Grain length range (in samples). Bias shorter as density rises so it fuses into noise and stays CPU-safe.
+    float len_lo = (JB_EXC_GRAIN_LEN_MIN_MS * 0.001f) * sr;
+    float len_hi = (JB_EXC_GRAIN_LEN_MAX_MS * 0.001f) * sr;
+    float len_max = len_lo + (len_hi - len_lo) * (1.f - g);
+    if (len_max < len_lo) len_max = len_lo;
+    x->exc_grain_len_min_samps = len_lo;
+    x->exc_grain_len_max_samps = len_max;
+
+    // Amplitude normalization: ~1/sqrt(density) law (shot noise)
+    const float base = 6.0f;
+    x->exc_grain_amp_scale = base / sqrtf(rate + 1e-12f);
 
     // ADSR curves + times (applied to all voices)
     float aC = jb_clamp(x->exc_attack_curve,  -1.f, 1.f);
@@ -941,7 +966,7 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
 
         // Noise filters:
         //  - lpL/lpR: pivot low-pass for tilt EQ (used to split low/high bands)
-        //  - hpL/hpR: gentle DC high-pass (post diffusion)
+        //  - hpL/hpR: gentle DC high-pass (post coloration)
         float pivot_hz = JB_EXC_TILT_PIVOT_HZ;
         if (pivot_hz < 50.f) pivot_hz = 50.f;
         if (pivot_hz > 0.45f * sr) pivot_hz = 0.45f * sr;
@@ -999,35 +1024,124 @@ static inline void jb_modenv_note_off(jb_voice_t *v){
     }
 }
 
-// Fractional-delay Schroeder all-pass (linear interpolation read).
-// Buffer stores w[n] = x[n] + g*y[n].
-static inline float jb_exc_apf_run(float x, float g, float delay_samps, float *buf, int *w, int maxlen){
-    if (g <= 0.f) return x;
-    float d = jb_clamp(delay_samps, 1.f, (float)(maxlen - 2));
-    int wi = *w;
-
-    float r = (float)wi - d;
-    while (r < 0.f) r += (float)maxlen;
-
-    int i0 = (int)r;
-    float frac = r - (float)i0;
-    int i1 = i0 + 1;
-    if (i1 >= maxlen) i1 -= maxlen;
-
-    float wd = buf[i0] + (buf[i1] - buf[i0]) * frac;
-    float y = -g * x + wd;
-    float wnew = x + g * y;
-
-    buf[wi] = wnew;
-    wi++;
-    if (wi >= maxlen) wi = 0;
-    *w = wi;
-    return y;
-}
-
 
 
 // 1-pole high-pass (stateful): y[n] = a*(y[n-1] + x[n] - x[n-1])
+
+// ---------- granular grains (shot-noise) helpers ----------
+
+static inline int jb_exc_irand_range(jb_exc_rng64_t *r, int lo, int hi){
+    if (hi <= lo) return lo;
+    float u = jb_exc_rng64_uni(r);
+    int v = lo + (int)((hi - lo + 1) * u);
+    if (v < lo) v = lo;
+    if (v > hi) v = hi;
+    return v;
+}
+
+static inline int jb_exc_find_free_grain(unsigned char *on){
+    for (int i=0;i<JB_EXC_GRAIN_MAX_PER_CH;++i){
+        if (!on[i]) return i;
+    }
+    return 0; // steal slot 0 (rare at sane densities)
+}
+
+static inline float jb_exc_hann_env(int pos, int len){
+    if (len <= 1) return 1.f;
+    float t = (float)pos / (float)(len - 1);
+    return 0.5f - 0.5f * cosf(2.f * (float)M_PI * t);
+}
+
+static inline float jb_exc_grains_next_L(jb_exc_voice_t *e, const t_juicy_bank_tilde *x){
+    // countdown to next trigger
+    if (e->grain_waitL > 0) e->grain_waitL--;
+    if (e->grain_waitL <= 0){
+        // trigger a grain
+        int slot = jb_exc_find_free_grain(e->grain_onL);
+        e->grain_onL[slot] = 1;
+        e->grain_posL[slot] = 0;
+
+        int len_min = (int)jb_clamp(x->exc_grain_len_min_samps, 1.f, 100000.f);
+        int len_max = (int)jb_clamp(x->exc_grain_len_max_samps, (float)len_min, 100000.f);
+        int glen = jb_exc_irand_range(&e->rngL, len_min, len_max);
+        if (glen < 1) glen = 1;
+        e->grain_lenL[slot] = glen;
+
+        float amp = jb_exc_noise_tpdf(&e->rngL) * x->exc_grain_amp_scale;
+        e->grain_ampL[slot] = amp;
+
+        // schedule next trigger with jitter. At jitter=0 -> periodic, at jitter=1 -> uniform 0..2x interval.
+        float base = x->exc_grain_interval_samps;
+        float u = jb_exc_rng64_uni(&e->rngL) * 2.f; // 0..2
+        float jit = x->exc_grain_jitter;
+        float fac = (1.f - jit) + (jit * u);
+        float nxt = base * fac;
+        if (nxt < 1.f) nxt = 1.f;
+        e->grain_waitL = (int)nxt;
+    }
+
+    // sum active grains
+    float y = 0.f;
+    int active = 0;
+    for (int i=0;i<JB_EXC_GRAIN_MAX_PER_CH;++i){
+        if (!e->grain_onL[i]) continue;
+        int pos = e->grain_posL[i];
+        int len = e->grain_lenL[i];
+        if (pos >= len){
+            e->grain_onL[i] = 0;
+            continue;
+        }
+        y += e->grain_ampL[i] * jb_exc_hann_env(pos, len);
+        e->grain_posL[i] = pos + 1;
+        active++;
+    }
+    e->grain_nL = active;
+    return y;
+}
+
+static inline float jb_exc_grains_next_R(jb_exc_voice_t *e, const t_juicy_bank_tilde *x){
+    if (e->grain_waitR > 0) e->grain_waitR--;
+    if (e->grain_waitR <= 0){
+        int slot = jb_exc_find_free_grain(e->grain_onR);
+        e->grain_onR[slot] = 1;
+        e->grain_posR[slot] = 0;
+
+        int len_min = (int)jb_clamp(x->exc_grain_len_min_samps, 1.f, 100000.f);
+        int len_max = (int)jb_clamp(x->exc_grain_len_max_samps, (float)len_min, 100000.f);
+        int glen = jb_exc_irand_range(&e->rngR, len_min, len_max);
+        if (glen < 1) glen = 1;
+        e->grain_lenR[slot] = glen;
+
+        float amp = jb_exc_noise_tpdf(&e->rngR) * x->exc_grain_amp_scale;
+        e->grain_ampR[slot] = amp;
+
+        float base = x->exc_grain_interval_samps;
+        float u = jb_exc_rng64_uni(&e->rngR) * 2.f;
+        float jit = x->exc_grain_jitter;
+        float fac = (1.f - jit) + (jit * u);
+        float nxt = base * fac;
+        if (nxt < 1.f) nxt = 1.f;
+        e->grain_waitR = (int)nxt;
+    }
+
+    float y = 0.f;
+    int active = 0;
+    for (int i=0;i<JB_EXC_GRAIN_MAX_PER_CH;++i){
+        if (!e->grain_onR[i]) continue;
+        int pos = e->grain_posR[i];
+        int len = e->grain_lenR[i];
+        if (pos >= len){
+            e->grain_onR[i] = 0;
+            continue;
+        }
+        y += e->grain_ampR[i] * jb_exc_hann_env(pos, len);
+        e->grain_posR[i] = pos + 1;
+        active++;
+    }
+    e->grain_nR = active;
+    return y;
+}
+
 static inline float jb_hp1_run_a(float x, float a, float *x1, float *y1){
     float y = a * ((*y1) + x - (*x1));
     *x1 = x;
@@ -1054,7 +1168,7 @@ static inline float jb_softclip_thresh(float x, float threshold){
 static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
                                          jb_voice_t *v,
                                          float w_imp, float w_noise,
-                                         float fb_inL, float fb_inR, float noise_diff,
+                                         float fb_inL, float fb_inR,
                                          float a_pwr, float one_minus_a_pwr,
                                          float a_match, float one_minus_a_match,
                                          float *outL, float *outR)
@@ -1072,8 +1186,9 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
     }
 
     // ---------- NOISE BRANCH ----------
-    float nL = jb_exc_noise_tpdf(&e->rngL);
-    float nR = jb_exc_noise_tpdf(&e->rngR);
+    // 'Grains' replaces diffusion: stochastic Hann-windowed pulses that converge to white noise at high density.
+    float nL = jb_exc_grains_next_L(e, x);
+    float nR = jb_exc_grains_next_R(e, x);
 
     // Pressure feedback injection (per voice): added into the noise input before spectral shaping
     nL += fb_inL;
@@ -1088,18 +1203,7 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
     float colL = x->exc_noise_color_comp * (x->exc_noise_color_gL * lpL + x->exc_noise_color_gH * hpL);
     float colR = x->exc_noise_color_comp * (x->exc_noise_color_gL * lpR + x->exc_noise_color_gH * hpR);
 
-    // Noise diffusion: 4 cascaded all-pass filters (odd->L, even->R).
-    float diff_amt = jb_clamp(noise_diff, 0.f, 1.f);
-    if (diff_amt > 0.f){
-        float gd = x->exc_noise_diff_g;
-        colL = jb_exc_apf_run(colL, gd, x->exc_noise_diff_d1, e->ap1_buf, &e->ap1_w, JB_EXC_AP1_MAX);
-        colL = jb_exc_apf_run(colL, gd, x->exc_noise_diff_d3, e->ap3_buf, &e->ap3_w, JB_EXC_AP3_MAX);
-
-        colR = jb_exc_apf_run(colR, gd, x->exc_noise_diff_d2, e->ap2_buf, &e->ap2_w, JB_EXC_AP2_MAX);
-        colR = jb_exc_apf_run(colR, gd, x->exc_noise_diff_d4, e->ap4_buf, &e->ap4_w, JB_EXC_AP4_MAX);
-    }
-
-    // DC protection after diffusion
+    // DC protection after coloration
     colL = jb_exc_hp1_run(&e->hpL, colL);
     colR = jb_exc_hp1_run(&e->hpR, colR);
 
@@ -2730,7 +2834,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     // Pressure (reuses former density inlet): feedback coefficient k = 0..0.95
     float pressure = jb_clamp(x->exc_density, 0.f, 1.f);
     float fb_k = 0.95f * pressure;
-    float noise_diff    = jb_clamp(x->exc_diffusion, 0.f, 1.f);
+    float grains = jb_clamp(x->exc_diffusion, 0.f, 1.f);
     // Energy meter (per voice) used for voice stealing and tail cleanup.
     // 50ms time constant -> responsive but stable.
     const float a_energy = expf(-1.0f / (x->sr * 0.050f));
@@ -2860,7 +2964,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             float exL = 0.f, exR = 0.f;
             jb_exc_process_sample(x, v,
                                  exc_w_imp, exc_w_noise,
-                                 fbL, fbR, noise_diff,
+                                 fbL, fbR,
                                  a_exc_pwr, one_minus_a_exc_pwr,
                                  a_exc_match, one_minus_a_exc_match,
                                  &exL, &exR);
@@ -3834,7 +3938,7 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->exc_density    = 0.f;  // Pressure (feedback coefficient 0..1 -> 0..0.95)
     x->exc_imp_shape  = 0.5f;  // Impulse-only Shape (old shape logic)
     x->exc_shape      = 0.5f;  // Noise Color (tilt EQ)
-    x->exc_diffusion  = 0.f;  // Noise Diffusion
+    x->exc_diffusion  = 0.f;  // Grains (granular noise)
     x->noise_scale  = 0.4f; // factory sweetspot
     x->impulse_scale = 10.f; // factory sweetspot
 // initialise per-LFO parameter and runtime state
