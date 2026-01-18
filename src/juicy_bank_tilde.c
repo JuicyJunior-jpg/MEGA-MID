@@ -321,11 +321,6 @@ typedef struct {
     jb_exc_hp1_t hpImpL, hpImpR;
     jb_exc_lp1_t lpImpL, lpImpR;
 
-    // Tracking band-pass (TPT state-variable filter) for "Excitation Narrowness"
-    float bpf_g;
-    float bpf_ic1L, bpf_ic2L;
-    float bpf_ic1R, bpf_ic2R;
-
     jb_exc_adsr_t env;
     jb_exc_pulse_t pulseL, pulseR;
 
@@ -378,11 +373,6 @@ static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long se
     v->pwr_imp   = 0.f;
     v->imp_match = 1.f;
 
-    // narrowness SVF state
-    v->bpf_g = 0.f;
-    v->bpf_ic1L = v->bpf_ic2L = 0.f;
-    v->bpf_ic1R = v->bpf_ic2R = 0.f;
-
     // noise diffusion (all-pass)
     v->ap1_w = v->ap2_w = v->ap3_w = v->ap4_w = 0;
     memset(v->ap1_buf, 0, sizeof(v->ap1_buf));
@@ -412,11 +402,6 @@ static inline void jb_exc_voice_reset_runtime(jb_exc_voice_t *e){
     e->pwr_noise = 0.f;
     e->pwr_imp   = 0.f;
     e->imp_match = 1.f;
-
-    // noise narrowness SVF state
-    e->bpf_g = 0.f;
-    e->bpf_ic1L = e->bpf_ic2L = 0.f;
-    e->bpf_ic1R = e->bpf_ic2R = 0.f;
 
     // noise diffusion (all-pass)
     e->ap1_w = e->ap2_w = e->ap3_w = e->ap4_w = 0;
@@ -531,6 +516,12 @@ typedef struct {
     float coup_b1_prevL, coup_b1_prevR; // Bank1 summed output (pre-release env weighting), L/R
     float coup_b2_prevL, coup_b2_prevR; // Bank2 summed output (pre-release env weighting), L/R
 
+
+    // Pressure feedback loop state (per voice, 1-sample delayed)
+    float fb_prevL, fb_prevR;               // last (Bank1+Bank2+Exciter) mix fed back
+    float fb_hp_x1L, fb_hp_y1L;             // 20Hz DC-blocker state (L)
+    float fb_hp_x1R, fb_hp_y1R;             // 20Hz DC-blocker state (R)
+
     // runtime per-mode — BANK 1/2
     jb_mode_rt_t m[JB_MAX_MODES];
     jb_mode_rt_t m2[JB_MAX_MODES];
@@ -628,6 +619,7 @@ float damping, brightness; float global_decay, slope;
 
     // DC HP
     float hp_a, hpL_x1, hpL_y1, hpR_x1, hpR_y1;
+    float fb_hp_a; // 20Hz DC blocker inside Pressure feedback loop
 
     // IO
     // main stereo exciter inputs
@@ -714,7 +706,7 @@ float damping, brightness; float global_decay, slope;
     float exc_decay_ms,  exc_decay_curve;
     float exc_sustain;
     float exc_release_ms, exc_release_curve;
-    // exc_density: repurposed -> Excitation Narrowness (0..1)
+    // exc_density: repurposed -> Pressure (feedback amount 0..1, internally capped to k<=0.95)
     float exc_density;
     // exc_imp_shape: impulse-only shape (0..1)
     float exc_imp_shape;
@@ -964,13 +956,6 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
         jb_exc_lp1_set(&e->lpImpL, sr, lp_hz);
         jb_exc_lp1_set(&e->lpImpR, sr, lp_hz);
 
-        // Pitch-tracked BPF coefficient for Excitation Narrowness (noise path)
-        float fc = x->v[i].f0;
-        if (!(fc > 0.f)) fc = 440.f;
-        if (fc < 20.f) fc = 20.f;
-        if (fc > 0.45f * sr) fc = 0.45f * sr;
-        e->bpf_g = tanf((float)M_PI * fc / sr);
-
         // env
         e->env.curveA = aC;
         e->env.curveD = dC;
@@ -1040,11 +1025,36 @@ static inline float jb_exc_apf_run(float x, float g, float delay_samps, float *b
     return y;
 }
 
+
+
+// 1-pole high-pass (stateful): y[n] = a*(y[n-1] + x[n] - x[n-1])
+static inline float jb_hp1_run_a(float x, float a, float *x1, float *y1){
+    float y = a * ((*y1) + x - (*x1));
+    *x1 = x;
+    *y1 = y;
+    return y;
+}
+
+// Soft clip with ceiling=1.0 and a lower knee (threshold) where it begins to squash.
+// threshold should be ~0.7..0.8; we default to 0.75 for organic saturation.
+static inline float jb_softclip_thresh(float x, float threshold){
+    float t = threshold;
+    if (t < 0.05f) t = 0.05f;
+    if (t > 0.95f) t = 0.95f;
+
+    float ax = fabsf(x);
+    if (ax <= t) return x;
+
+    float s = (ax - t) / (1.f - t);           // 0..inf
+    float y = t + (1.f - t) * tanhf(s);       // asymptote -> 1.0
+    return copysignf(y, x);
+}
+
 // Render one exciter sample for one voice (stereo).
 static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
                                          jb_voice_t *v,
                                          float w_imp, float w_noise,
-                                         float exc_narrow, float noise_diff,
+                                         float fb_inL, float fb_inR, float noise_diff,
                                          float a_pwr, float one_minus_a_pwr,
                                          float a_match, float one_minus_a_match,
                                          float *outL, float *outR)
@@ -1065,6 +1075,10 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
     float nL = jb_exc_noise_tpdf(&e->rngL);
     float nR = jb_exc_noise_tpdf(&e->rngR);
 
+    // Pressure feedback injection (per voice): added into the noise input before spectral shaping
+    nL += fb_inL;
+    nR += fb_inR;
+
     // Noise Color (tilt EQ): split around pivot using 1-pole LP, then re-weight low/high.
     float lpL = jb_exc_lp1_run(&e->lpL, nL);
     float lpR = jb_exc_lp1_run(&e->lpR, nR);
@@ -1073,34 +1087,6 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
 
     float colL = x->exc_noise_color_comp * (x->exc_noise_color_gL * lpL + x->exc_noise_color_gH * hpL);
     float colR = x->exc_noise_color_comp * (x->exc_noise_color_gL * lpR + x->exc_noise_color_gH * hpR);
-
-    // Excitation Narrowness: pitch-tracked BPF with envelope-controlled Q.
-    // At exc_narrow=0: static moderate Q. At 1: Q follows env from wide->narrow (acoustic stabilization).
-    const float Q_base = 2.0f;
-    const float Q_env  = 0.5f + (20.0f - 0.5f) * env;
-    float Q = Q_base + jb_clamp(exc_narrow, 0.f, 1.f) * (Q_env - Q_base);
-    if (Q < 0.1f) Q = 0.1f;
-    float k = 1.f / Q;
-    float g = e->bpf_g;
-    float inv = 1.f / (1.f + g * (g + k));
-
-    // TPT SVF per channel (band-pass output)
-    {
-        float v3 = colL - e->bpf_ic2L;
-        float v1 = (g * v3 + e->bpf_ic1L) * inv;
-        float v2 = e->bpf_ic2L + g * v1;
-        e->bpf_ic1L = 2.f * v1 - e->bpf_ic1L;
-        e->bpf_ic2L = 2.f * v2 - e->bpf_ic2L;
-        colL = v1;
-    }
-    {
-        float v3 = colR - e->bpf_ic2R;
-        float v1 = (g * v3 + e->bpf_ic1R) * inv;
-        float v2 = e->bpf_ic2R + g * v1;
-        e->bpf_ic1R = 2.f * v1 - e->bpf_ic1R;
-        e->bpf_ic2R = 2.f * v2 - e->bpf_ic2R;
-        colR = v1;
-    }
 
     // Noise diffusion: 4 cascaded all-pass filters (odd->L, even->R).
     float diff_amt = jb_clamp(noise_diff, 0.f, 1.f);
@@ -2348,6 +2334,10 @@ static void jb_update_voice_gains2(const t_juicy_bank_tilde *x, jb_voice_t *v){
     jb_update_voice_gains_bank(x, v, 1);
 }
 static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb_rng_t *rng){
+    // Pressure feedback loop state
+    v->fb_prevL = v->fb_prevR = 0.f;
+    v->fb_hp_x1L = v->fb_hp_y1L = 0.f;
+    v->fb_hp_x1R = v->fb_hp_y1R = 0.f;
     v->rel_env  = 1.f;
     v->rel_env2 = 1.f;
     v->energy = 0.f;
@@ -2427,6 +2417,11 @@ static void jb_voice_panic_reset(t_juicy_bank_tilde *x, jb_voice_t *v){
 
     v->coup_b1_prevL = v->coup_b1_prevR = 0.f;
     v->coup_b2_prevL = v->coup_b2_prevR = 0.f;
+
+    // Pressure feedback loop state
+    v->fb_prevL = v->fb_prevR = 0.f;
+    v->fb_hp_x1L = v->fb_hp_y1L = 0.f;
+    v->fb_hp_x1R = v->fb_hp_y1R = 0.f;
 
     // Internal exciter reset
     jb_exc_voice_reset_runtime(&v->exc);
@@ -2732,7 +2727,9 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     float exc_t = 0.5f * (exc_f + 1.f);
     float exc_w_imp   = sinf(0.5f * (float)M_PI * exc_t);
     float exc_w_noise = cosf(0.5f * (float)M_PI * exc_t);
-    float exc_narrow    = jb_clamp(x->exc_density, 0.f, 1.f);
+    // Pressure (reuses former density inlet): feedback coefficient k = 0..0.95
+    float pressure = jb_clamp(x->exc_density, 0.f, 1.f);
+    float fb_k = 0.95f * pressure;
     float noise_diff    = jb_clamp(x->exc_diffusion, 0.f, 1.f);
     // Energy meter (per voice) used for voice stealing and tail cleanup.
     // 50ms time constant -> responsive but stable.
@@ -2844,12 +2841,26 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 }
             }
             v->mod_env_last = v->mod_env;
+            // Pressure feedback input (Bank1+Bank2+Exciter mix from previous sample)
+            float fbL = 0.f, fbR = 0.f;
+            if (fb_k > 0.f){
+                fbL = jb_hp1_run_a(v->fb_prevL, x->fb_hp_a, &v->fb_hp_x1L, &v->fb_hp_y1L);
+                fbR = jb_hp1_run_a(v->fb_prevR, x->fb_hp_a, &v->fb_hp_x1R, &v->fb_hp_y1R);
+
+                // Safety saturation (ceiling=1.0, knee ~0.75)
+                fbL = jb_softclip_thresh(fbL, 0.75f);
+                fbR = jb_softclip_thresh(fbR, 0.75f);
+
+                // Strict gain ceiling (k <= 0.95)
+                fbL *= fb_k;
+                fbR *= fb_k;
+            }
 
             // Internal exciter (stereo) — one sample per voice per frame
             float exL = 0.f, exR = 0.f;
             jb_exc_process_sample(x, v,
                                  exc_w_imp, exc_w_noise,
-                                 exc_narrow, noise_diff,
+                                 fbL, fbR, noise_diff,
                                  a_exc_pwr, one_minus_a_exc_pwr,
                                  a_exc_match, one_minus_a_exc_match,
                                  &exL, &exR);
@@ -3004,6 +3015,10 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 vOutL = 0.f;
                 vOutR = 0.f;
             }
+            // Update Pressure loop source for next sample (per-voice): Bank1+Bank2 output + raw exciter
+            v->fb_prevL = jb_kill_denorm(vOutL + ex0L);
+            v->fb_prevR = jb_kill_denorm(vOutR + ex0R);
+
             outL[i] += vOutL;
             outR[i] += vOutR;
 
@@ -3039,6 +3054,11 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                         v->energy = 0.f;
                         v->coup_b1_prevL = v->coup_b1_prevR = 0.f;
                         v->coup_b2_prevL = v->coup_b2_prevR = 0.f;
+
+    // Pressure feedback loop state
+    v->fb_prevL = v->fb_prevR = 0.f;
+    v->fb_hp_x1L = v->fb_hp_y1L = 0.f;
+    v->fb_hp_x1R = v->fb_hp_y1R = 0.f;
                     }
                 } else if (is_tail){
                     // Safety: also free a tail once the exciter + mod env are idle and output energy is gone.
@@ -3047,6 +3067,11 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                         v->energy = 0.f;
                         v->coup_b1_prevL = v->coup_b1_prevR = 0.f;
                         v->coup_b2_prevL = v->coup_b2_prevR = 0.f;
+
+    // Pressure feedback loop state
+    v->fb_prevL = v->fb_prevR = 0.f;
+    v->fb_hp_x1L = v->fb_hp_y1L = 0.f;
+    v->fb_hp_x1R = v->fb_hp_y1R = 0.f;
                     }
                 }
             } else if (v->state == V_HELD) {
@@ -3576,6 +3601,12 @@ static void juicy_bank_tilde_reset(t_juicy_bank_tilde *x){
         x->v[v].state = V_IDLE; x->v[v].f0 = x->basef0_ref; x->v[v].vel = 0.f; x->v[v].energy=0.f; x->v[v].rel_env = 1.f; x->v[v].rel_env2 = 1.f;
         jb_exc_voice_reset_runtime(&x->v[v].exc);
         x->v[v].exc_env_last = 0.f;
+        x->v[v].fb_prevL = x->v[v].fb_prevR = 0.f;
+        x->v[v].fb_hp_x1L = x->v[v].fb_hp_y1L = 0.f;
+        x->v[v].fb_hp_x1R = x->v[v].fb_hp_y1R = 0.f;
+        x->v[v].fb_prevL = x->v[v].fb_prevR = 0.f;
+        x->v[v].fb_hp_x1L = x->v[v].fb_hp_y1L = 0.f;
+        x->v[v].fb_hp_x1R = x->v[v].fb_hp_y1R = 0.f;
         for(int i=0;i<JB_MAX_MODES;i++){
             x->v[v].disp_offset[i]=x->v[v].disp_target[i]=0.f;
             x->v[v].disp_offset2[i]=x->v[v].disp_target2[i]=0.f;
@@ -3596,13 +3627,17 @@ static void juicy_bank_tilde_preset_recall(t_juicy_bank_tilde *x){
         x->v[v].rel_env2 = 1.f;
         jb_exc_voice_reset_runtime(&x->v[v].exc);
         x->v[v].exc_env_last = 0.f;
+        x->v[v].fb_prevL = x->v[v].fb_prevR = 0.f;
+        x->v[v].fb_hp_x1L = x->v[v].fb_hp_y1L = 0.f;
+        x->v[v].fb_hp_x1R = x->v[v].fb_hp_y1R = 0.f;
     }
 }
 
 // ---------- dsp setup/free ----------
 static void juicy_bank_tilde_dsp(t_juicy_bank_tilde *x, t_signal **sp){
     x->sr = sp[0]->s_sr;
-    float fc=8.f; float RC=1.f/(2.f*M_PI*fc); float dt=1.f/x->sr; x->hp_a=RC/(RC+dt);
+    float fc=8.f;  float RC=1.f/(2.f*M_PI*fc);  float dt=1.f/x->sr; x->hp_a=RC/(RC+dt);
+    float fc_fb=20.f; float RCfb=1.f/(2.f*M_PI*fc_fb); x->fb_hp_a=RCfb/(RCfb+dt);
 
     // sp layout: [inL, inR, outL, outR]
     t_int argv[2 + 4 + 1];
@@ -3796,7 +3831,7 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->exc_release_ms    = 400.f;
     x->exc_release_curve = 0.f;
 
-    x->exc_density    = 0.f;  // Excitation Narrowness (noise BPF Q env depth)
+    x->exc_density    = 0.f;  // Pressure (feedback coefficient 0..1 -> 0..0.95)
     x->exc_imp_shape  = 0.5f;  // Impulse-only Shape (old shape logic)
     x->exc_shape      = 0.5f;  // Noise Color (tilt EQ)
     x->exc_diffusion  = 0.f;  // Noise Diffusion
@@ -3859,6 +3894,7 @@ x->excite_pos_y2  = x->excite_pos_y;
 
     jb_rng_seed(&x->rng, 0xC0FFEEu);
     x->hp_a=0.f; x->hpL_x1=x->hpL_y1=x->hpR_x1=x->hpR_y1=0.f;
+    x->fb_hp_a=0.f;
 
     // Two-bank scaffolding (STEP 1): bank 1 selected; bank 2 silent by default
     x->edit_bank = 0;
