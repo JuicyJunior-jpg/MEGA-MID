@@ -114,11 +114,13 @@ static inline float jb_kill_denorm(float x){
 #define JB_EXC_AP2_BASE 503
 #define JB_EXC_AP3_BASE 883
 #define JB_EXC_AP4_BASE 1217
-// max delay = base * 2.0 (tscale max) + 8 safety
-#define JB_EXC_AP1_MAX (JB_EXC_AP1_BASE*2 + 8)
-#define JB_EXC_AP2_MAX (JB_EXC_AP2_BASE*2 + 8)
-#define JB_EXC_AP3_MAX (JB_EXC_AP3_BASE*2 + 8)
-#define JB_EXC_AP4_MAX (JB_EXC_AP4_BASE*2 + 8)
+// max delay: base * 4.0 (tscale max) * 1.05 (R decorrelation) + safety
+#define JB_EXC_DIFF_MAXFAC_NUM 420
+#define JB_EXC_DIFF_MAXFAC_DEN 100
+#define JB_EXC_AP1_MAX (JB_EXC_AP1_BASE*JB_EXC_DIFF_MAXFAC_NUM/JB_EXC_DIFF_MAXFAC_DEN + 32)
+#define JB_EXC_AP2_MAX (JB_EXC_AP2_BASE*JB_EXC_DIFF_MAXFAC_NUM/JB_EXC_DIFF_MAXFAC_DEN + 32)
+#define JB_EXC_AP3_MAX (JB_EXC_AP3_BASE*JB_EXC_DIFF_MAXFAC_NUM/JB_EXC_DIFF_MAXFAC_DEN + 32)
+#define JB_EXC_AP4_MAX (JB_EXC_AP4_BASE*JB_EXC_DIFF_MAXFAC_NUM/JB_EXC_DIFF_MAXFAC_DEN + 32)
 
 static inline float jb_exc_expmap01(float t, float lo, float hi){
     if (t <= 0.f) return lo;
@@ -193,6 +195,46 @@ static inline float jb_exc_lp1_run(jb_exc_lp1_t *f, float x){
     f->y1 = y;
     return y;
 }
+
+// Biquad (RBJ) for tracking band-pass filter (noise path)
+typedef struct { float b0,b1,b2,a1,a2; float z1,z2; } jb_exc_bq_t;
+
+static inline void jb_exc_bq_reset(jb_exc_bq_t *q){ q->z1 = 0.f; q->z2 = 0.f; }
+
+static inline void jb_exc_bq_set_bandpass(jb_exc_bq_t *q, float sr, float fc, float Q){
+    if (sr <= 1.f){ q->b0=q->b1=q->b2=q->a1=q->a2=0.f; jb_exc_bq_reset(q); return; }
+    if (fc < 20.f) fc = 20.f;
+    float ny = 0.45f * sr;
+    if (fc > ny) fc = ny;
+    if (Q < 0.1f) Q = 0.1f;
+    if (Q > 50.f) Q = 50.f;
+
+    float w0 = 2.f * (float)M_PI * fc / sr;
+    float c = cosf(w0);
+    float s = sinf(w0);
+    float alpha = s / (2.f * Q);
+
+    float a0 = 1.f + alpha;
+    float b0 =  alpha;
+    float b1 =  0.f;
+    float b2 = -alpha;
+    float a1 = -2.f * c;
+    float a2 =  1.f - alpha;
+
+    q->b0 = b0 / a0;
+    q->b1 = b1 / a0;
+    q->b2 = b2 / a0;
+    q->a1 = a1 / a0;
+    q->a2 = a2 / a0;
+}
+
+static inline float jb_exc_bq_run(jb_exc_bq_t *q, float x){
+    float y = q->b0 * x + q->z1;
+    q->z1 = q->b1 * x - q->a1 * y + q->z2;
+    q->z2 = q->b2 * x - q->a2 * y;
+    return y;
+}
+
 
 // ADSR (per voice)
 typedef enum { JB_EXC_ENV_IDLE=0, JB_EXC_ENV_ATTACK, JB_EXC_ENV_DECAY, JB_EXC_ENV_SUSTAIN, JB_EXC_ENV_RELEASE } jb_exc_env_stage;
@@ -331,13 +373,23 @@ typedef struct {
     float pwr_imp;
     float imp_match;
 
-    // Noise diffusion: 4 cascaded all-pass filters with hard-panned stages
-    //   1 & 3 -> Left, 2 & 4 -> Right
-    int ap1_w, ap2_w, ap3_w, ap4_w;
-    float ap1_buf[JB_EXC_AP1_MAX];
-    float ap2_buf[JB_EXC_AP2_MAX];
-    float ap3_buf[JB_EXC_AP3_MAX];
-    float ap4_buf[JB_EXC_AP4_MAX];
+    // Noise tracking BPF (pre-color, fed by noise + Pressure feedback)
+    jb_exc_bq_t bpfL, bpfR;
+
+    // Noise diffusion: stereo high-density Schroeder cascade (4 all-pass per channel)
+    int apL1_w, apL2_w, apL3_w, apL4_w;
+    int apR1_w, apR2_w, apR3_w, apR4_w;
+
+    float apL1_x[JB_EXC_AP1_MAX], apL1_y[JB_EXC_AP1_MAX];
+    float apL2_x[JB_EXC_AP2_MAX], apL2_y[JB_EXC_AP2_MAX];
+    float apL3_x[JB_EXC_AP3_MAX], apL3_y[JB_EXC_AP3_MAX];
+    float apL4_x[JB_EXC_AP4_MAX], apL4_y[JB_EXC_AP4_MAX];
+
+    float apR1_x[JB_EXC_AP1_MAX], apR1_y[JB_EXC_AP1_MAX];
+    float apR2_x[JB_EXC_AP2_MAX], apR2_y[JB_EXC_AP2_MAX];
+    float apR3_x[JB_EXC_AP3_MAX], apR3_y[JB_EXC_AP3_MAX];
+    float apR4_x[JB_EXC_AP4_MAX], apR4_y[JB_EXC_AP4_MAX];
+
 } jb_exc_voice_t;
 
 static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long seed_base){
@@ -372,13 +424,25 @@ static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long se
     v->pwr_noise = 0.f;
     v->pwr_imp   = 0.f;
     v->imp_match = 1.f;
+    // tracking BPF
+    jb_exc_bq_set_bandpass(&v->bpfL, sr, 440.f, 2.f);
+    jb_exc_bq_set_bandpass(&v->bpfR, sr, 440.f, 2.f);
+    jb_exc_bq_reset(&v->bpfL);
+    jb_exc_bq_reset(&v->bpfR);
 
-    // noise diffusion (all-pass)
-    v->ap1_w = v->ap2_w = v->ap3_w = v->ap4_w = 0;
-    memset(v->ap1_buf, 0, sizeof(v->ap1_buf));
-    memset(v->ap2_buf, 0, sizeof(v->ap2_buf));
-    memset(v->ap3_buf, 0, sizeof(v->ap3_buf));
-    memset(v->ap4_buf, 0, sizeof(v->ap4_buf));
+    // noise diffusion (stereo Schroeder all-pass cascade)
+    v->apL1_w = v->apL2_w = v->apL3_w = v->apL4_w = 0;
+    v->apR1_w = v->apR2_w = v->apR3_w = v->apR4_w = 0;
+
+    memset(v->apL1_x, 0, sizeof(v->apL1_x)); memset(v->apL1_y, 0, sizeof(v->apL1_y));
+    memset(v->apL2_x, 0, sizeof(v->apL2_x)); memset(v->apL2_y, 0, sizeof(v->apL2_y));
+    memset(v->apL3_x, 0, sizeof(v->apL3_x)); memset(v->apL3_y, 0, sizeof(v->apL3_y));
+    memset(v->apL4_x, 0, sizeof(v->apL4_x)); memset(v->apL4_y, 0, sizeof(v->apL4_y));
+
+    memset(v->apR1_x, 0, sizeof(v->apR1_x)); memset(v->apR1_y, 0, sizeof(v->apR1_y));
+    memset(v->apR2_x, 0, sizeof(v->apR2_x)); memset(v->apR2_y, 0, sizeof(v->apR2_y));
+    memset(v->apR3_x, 0, sizeof(v->apR3_x)); memset(v->apR3_y, 0, sizeof(v->apR3_y));
+    memset(v->apR4_x, 0, sizeof(v->apR4_x)); memset(v->apR4_y, 0, sizeof(v->apR4_y));
 }
 
 // STEP 2 helpers (runtime reset)
@@ -402,13 +466,22 @@ static inline void jb_exc_voice_reset_runtime(jb_exc_voice_t *e){
     e->pwr_noise = 0.f;
     e->pwr_imp   = 0.f;
     e->imp_match = 1.f;
+    // tracking BPF state
+    jb_exc_bq_reset(&e->bpfL);
+    jb_exc_bq_reset(&e->bpfR);
+    // noise diffusion (stereo Schroeder all-pass cascade)
+    e->apL1_w = e->apL2_w = e->apL3_w = e->apL4_w = 0;
+    e->apR1_w = e->apR2_w = e->apR3_w = e->apR4_w = 0;
 
-    // noise diffusion (all-pass)
-    e->ap1_w = e->ap2_w = e->ap3_w = e->ap4_w = 0;
-    memset(e->ap1_buf, 0, sizeof(e->ap1_buf));
-    memset(e->ap2_buf, 0, sizeof(e->ap2_buf));
-    memset(e->ap3_buf, 0, sizeof(e->ap3_buf));
-    memset(e->ap4_buf, 0, sizeof(e->ap4_buf));
+    memset(e->apL1_x, 0, sizeof(e->apL1_x)); memset(e->apL1_y, 0, sizeof(e->apL1_y));
+    memset(e->apL2_x, 0, sizeof(e->apL2_x)); memset(e->apL2_y, 0, sizeof(e->apL2_y));
+    memset(e->apL3_x, 0, sizeof(e->apL3_x)); memset(e->apL3_y, 0, sizeof(e->apL3_y));
+    memset(e->apL4_x, 0, sizeof(e->apL4_x)); memset(e->apL4_y, 0, sizeof(e->apL4_y));
+
+    memset(e->apR1_x, 0, sizeof(e->apR1_x)); memset(e->apR1_y, 0, sizeof(e->apR1_y));
+    memset(e->apR2_x, 0, sizeof(e->apR2_x)); memset(e->apR2_y, 0, sizeof(e->apR2_y));
+    memset(e->apR3_x, 0, sizeof(e->apR3_x)); memset(e->apR3_y, 0, sizeof(e->apR3_y));
+    memset(e->apR4_x, 0, sizeof(e->apR4_x)); memset(e->apR4_y, 0, sizeof(e->apR4_y));
 
     // filter memories
     e->hpL.y1 = e->hpL.x1 = 0.f;
@@ -718,7 +791,8 @@ float damping, brightness; float global_decay, slope;
     // per-block computed (shared)
     float exc_noise_color_gL, exc_noise_color_gH, exc_noise_color_comp;
     float exc_noise_diff_g;
-    float exc_noise_diff_d1, exc_noise_diff_d2, exc_noise_diff_d3, exc_noise_diff_d4;
+    float exc_noise_diff_dL1, exc_noise_diff_dL2, exc_noise_diff_dL3, exc_noise_diff_dL4;
+    float exc_noise_diff_dR1, exc_noise_diff_dR2, exc_noise_diff_dR3, exc_noise_diff_dR4;
 
     float noise_scale;   // factory trim (linear amp)
     float impulse_scale; // factory trim (linear amp)
@@ -917,18 +991,23 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
     x->exc_noise_color_gH = gH;
     x->exc_noise_color_comp = comp;
 
-    // Noise diffusion (all-pass) parameters (shared)
-    // Make diffusion *obvious* by driving the all-pass feedback harder.
-    // We keep the original time-scaling behavior, but map diffusion -> g
-    // LINEARLY (no sqrt curve) and with a higher max than the original spec.
+    // Noise diffusion: stereo Schroeder cascade parameters (shared)
     float d = jb_clamp(x->exc_diffusion, 0.f, 1.f);
-    float gd = 0.90f * d;              // 0..0.90 (stable, but much more "cloudy")
-    float tscale = 0.1f + 1.9f * d;    // 0.1x .. 2.0x
-    x->exc_noise_diff_g  = (d <= 0.f) ? 0.f : gd;
-    x->exc_noise_diff_d1 = (float)JB_EXC_AP1_BASE * tscale;
-    x->exc_noise_diff_d2 = (float)JB_EXC_AP2_BASE * tscale;
-    x->exc_noise_diff_d3 = (float)JB_EXC_AP3_BASE * tscale;
-    x->exc_noise_diff_d4 = (float)JB_EXC_AP4_BASE * tscale;
+    float gmag = sqrtf(d) * 0.82f;
+    float tscale = 0.1f + 3.9f * d;
+    x->exc_noise_diff_g = (d <= 0.f) ? 0.f : gmag;
+
+    // Left uses base delays; Right uses 1.05x for decorrelation
+    x->exc_noise_diff_dL1 = (float)JB_EXC_AP1_BASE * tscale;
+    x->exc_noise_diff_dL2 = (float)JB_EXC_AP2_BASE * tscale;
+    x->exc_noise_diff_dL3 = (float)JB_EXC_AP3_BASE * tscale;
+    x->exc_noise_diff_dL4 = (float)JB_EXC_AP4_BASE * tscale;
+
+    const float rfac = 1.05f;
+    x->exc_noise_diff_dR1 = (float)JB_EXC_AP1_BASE * rfac * tscale;
+    x->exc_noise_diff_dR2 = (float)JB_EXC_AP2_BASE * rfac * tscale;
+    x->exc_noise_diff_dR3 = (float)JB_EXC_AP3_BASE * rfac * tscale;
+    x->exc_noise_diff_dR4 = (float)JB_EXC_AP4_BASE * rfac * tscale;
 
     // ADSR curves + times (applied to all voices)
     float aC = jb_clamp(x->exc_attack_curve,  -1.f, 1.f);
@@ -952,6 +1031,16 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
         jb_exc_lp1_set(&e->lpR, sr, pivot_hz);
         jb_exc_hp1_set(&e->hpL, sr, 5.f);
         jb_exc_hp1_set(&e->hpR, sr, 5.f);
+
+
+        // Tracking band-pass filter for phase-locking (fed by Pressure feedback).
+        float f0 = x->v[i].f0;
+        if (f0 <= 0.f) f0 = x->basef0_ref;
+        if (f0 <= 0.f) f0 = 440.f;
+        if (f0 < 20.f) f0 = 20.f;
+        if (f0 > 0.45f * sr) f0 = 0.45f * sr;
+        jb_exc_bq_set_bandpass(&e->bpfL, sr, f0, 2.f);
+        jb_exc_bq_set_bandpass(&e->bpfR, sr, f0, 2.f);
 
         // Impulse filters: shaped by the (new) impulse-only Shape inlet
         jb_exc_hp1_set(&e->hpImpL, sr, hp_hz);
@@ -1003,9 +1092,21 @@ static inline void jb_modenv_note_off(jb_voice_t *v){
 }
 
 // Fractional-delay Schroeder all-pass (linear interpolation read).
-// Buffer stores w[n] = x[n] + g*y[n].
-static inline float jb_exc_apf_run(float x, float g, float delay_samps, float *buf, int *w, int maxlen){
-    if (g <= 0.f) return x;
+// Direct form requested: y[n] = (-g*x[n]) + x[n-d] + (g*y[n-d])
+// Uses separate delay lines for x and y, with a shared write index.
+static inline float jb_exc_ap_sch_run(float x, float g, float delay_samps,
+                                     float *xbuf, float *ybuf, int *w, int maxlen){
+    // At exactly zero diffusion, bypass (raw noise) to avoid a pure delay coloration.
+    if (fabsf(g) <= 1e-12f) {
+        int wi = *w;
+        xbuf[wi] = x;
+        ybuf[wi] = x;
+        wi++;
+        if (wi >= maxlen) wi = 0;
+        *w = wi;
+        return x;
+    }
+
     float d = jb_clamp(delay_samps, 1.f, (float)(maxlen - 2));
     int wi = *w;
 
@@ -1017,17 +1118,19 @@ static inline float jb_exc_apf_run(float x, float g, float delay_samps, float *b
     int i1 = i0 + 1;
     if (i1 >= maxlen) i1 -= maxlen;
 
-    float wd = buf[i0] + (buf[i1] - buf[i0]) * frac;
-    float y = -g * x + wd;
-    float wnew = x + g * y;
+    float xdel = xbuf[i0] + (xbuf[i1] - xbuf[i0]) * frac;
+    float ydel = ybuf[i0] + (ybuf[i1] - ybuf[i0]) * frac;
 
-    buf[wi] = wnew;
+    float y = (-g * x) + xdel + (g * ydel);
+
+    xbuf[wi] = x;
+    ybuf[wi] = y;
+
     wi++;
     if (wi >= maxlen) wi = 0;
     *w = wi;
     return y;
 }
-
 
 
 // 1-pole high-pass (stateful): y[n] = a*(y[n-1] + x[n] - x[n-1])
@@ -1039,7 +1142,7 @@ static inline float jb_hp1_run_a(float x, float a, float *x1, float *y1){
 }
 
 // Soft clip with ceiling=1.0 and a lower knee (threshold) where it begins to squash.
-// Threshold is fixed in the feedback path at 0.707 (≈ 1/sqrt(2)) for predictable behavior.
+// threshold should be ~0.7..0.8; we default to 0.75 for organic saturation.
 static inline float jb_softclip_thresh(float x, float threshold){
     float t = threshold;
     if (t < 0.05f) t = 0.05f;
@@ -1078,9 +1181,13 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
     float nL = jb_exc_noise_tpdf(&e->rngL);
     float nR = jb_exc_noise_tpdf(&e->rngR);
 
-    // Pressure feedback injection (per voice): added into the noise input before spectral shaping
+    // Pressure feedback injection (per voice): added into the noise input before the tracking BPF
     nL += fb_inL;
     nR += fb_inR;
+
+    // Tracking Band-Pass Filter: centers noise energy at the fundamental (phase-lock anchor)
+    nL = jb_exc_bq_run(&e->bpfL, nL);
+    nR = jb_exc_bq_run(&e->bpfR, nR);
 
     // Noise Color (tilt EQ): split around pivot using 1-pole LP, then re-weight low/high.
     float lpL = jb_exc_lp1_run(&e->lpL, nL);
@@ -1091,15 +1198,24 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
     float colL = x->exc_noise_color_comp * (x->exc_noise_color_gL * lpL + x->exc_noise_color_gH * hpL);
     float colR = x->exc_noise_color_comp * (x->exc_noise_color_gL * lpR + x->exc_noise_color_gH * hpR);
 
-    // Noise diffusion: 4 cascaded all-pass filters (odd->L, even->R).
+    // Noise diffusion: stereo Schroeder cascade (4 all-pass per channel, sign-alternating)
     float diff_amt = jb_clamp(noise_diff, 0.f, 1.f);
     if (diff_amt > 0.f){
-        float gd = x->exc_noise_diff_g;
-        colL = jb_exc_apf_run(colL, gd, x->exc_noise_diff_d1, e->ap1_buf, &e->ap1_w, JB_EXC_AP1_MAX);
-        colL = jb_exc_apf_run(colL, gd, x->exc_noise_diff_d3, e->ap3_buf, &e->ap3_w, JB_EXC_AP3_MAX);
+        float gmag = x->exc_noise_diff_g;
+        float g1 =  gmag;
+        float g2 = -gmag;
+        float g3 =  gmag;
+        float g4 = -gmag;
 
-        colR = jb_exc_apf_run(colR, gd, x->exc_noise_diff_d2, e->ap2_buf, &e->ap2_w, JB_EXC_AP2_MAX);
-        colR = jb_exc_apf_run(colR, gd, x->exc_noise_diff_d4, e->ap4_buf, &e->ap4_w, JB_EXC_AP4_MAX);
+        colL = jb_exc_ap_sch_run(colL, g1, x->exc_noise_diff_dL1, e->apL1_x, e->apL1_y, &e->apL1_w, JB_EXC_AP1_MAX);
+        colL = jb_exc_ap_sch_run(colL, g2, x->exc_noise_diff_dL2, e->apL2_x, e->apL2_y, &e->apL2_w, JB_EXC_AP2_MAX);
+        colL = jb_exc_ap_sch_run(colL, g3, x->exc_noise_diff_dL3, e->apL3_x, e->apL3_y, &e->apL3_w, JB_EXC_AP3_MAX);
+        colL = jb_exc_ap_sch_run(colL, g4, x->exc_noise_diff_dL4, e->apL4_x, e->apL4_y, &e->apL4_w, JB_EXC_AP4_MAX);
+
+        colR = jb_exc_ap_sch_run(colR, g1, x->exc_noise_diff_dR1, e->apR1_x, e->apR1_y, &e->apR1_w, JB_EXC_AP1_MAX);
+        colR = jb_exc_ap_sch_run(colR, g2, x->exc_noise_diff_dR2, e->apR2_x, e->apR2_y, &e->apR2_w, JB_EXC_AP2_MAX);
+        colR = jb_exc_ap_sch_run(colR, g3, x->exc_noise_diff_dR3, e->apR3_x, e->apR3_y, &e->apR3_w, JB_EXC_AP3_MAX);
+        colR = jb_exc_ap_sch_run(colR, g4, x->exc_noise_diff_dR4, e->apR4_x, e->apR4_y, &e->apR4_w, JB_EXC_AP4_MAX);
     }
 
     // DC protection after diffusion
@@ -2844,15 +2960,15 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 }
             }
             v->mod_env_last = v->mod_env;
-            // Pressure feedback input (Bank1+Bank2+Exciter mix from previous sample)
+            // Pressure feedback input (Bank1+Bank2 output from previous sample)
             float fbL = 0.f, fbR = 0.f;
             if (fb_k > 0.f){
                 fbL = jb_hp1_run_a(v->fb_prevL, x->fb_hp_a, &v->fb_hp_x1L, &v->fb_hp_y1L);
                 fbR = jb_hp1_run_a(v->fb_prevR, x->fb_hp_a, &v->fb_hp_x1R, &v->fb_hp_y1R);
 
-                // Safety saturation (ceiling=1.0, fixed knee = 0.707)
-                fbL = jb_softclip_thresh(fbL, 0.70710678f);
-                fbR = jb_softclip_thresh(fbR, 0.70710678f);
+                // Safety saturation (ceiling=1.0, knee ~0.75)
+                fbL = jb_softclip_thresh(fbL, 0.70f);
+                fbR = jb_softclip_thresh(fbR, 0.70f);
 
                 // Strict gain ceiling (k <= 0.95)
                 fbL *= fb_k;
@@ -3018,9 +3134,9 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 vOutL = 0.f;
                 vOutR = 0.f;
             }
-            // Update Pressure loop source for next sample (per-voice): Bank1+Bank2 output + raw exciter
-            v->fb_prevL = jb_kill_denorm(vOutL + ex0L);
-            v->fb_prevR = jb_kill_denorm(vOutR + ex0R);
+            // Update Pressure loop source for next sample (per-voice): summed Bank1+Bank2 output (final)
+            v->fb_prevL = jb_kill_denorm(vOutL);
+            v->fb_prevR = jb_kill_denorm(vOutR);
 
             outL[i] += vOutL;
             outR[i] += vOutR;
