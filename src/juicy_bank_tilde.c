@@ -110,6 +110,32 @@ static inline float jb_kill_denorm(float x){
 #define JB_EXC_TILT_PIVOT_HZ  1000.f
 #define JB_EXC_TILT_OCT_SPAN  3.f   // approx octaves from pivot to spectral edge
 
+// Elements-style diffuser: 8 Schroeder all-pass stages per ear (fixed prime delays)
+#define JB_EXC_DIFF_STAGES 8
+#define JB_EXC_DIFF_MAX_DELAY 1601
+static const int JB_EXC_DIFF_PRIMES[JB_EXC_DIFF_STAGES] = {149, 307, 563, 827, 1013, 1223, 1447, 1601};
+static const float JB_EXC_DIFF_G_TARGET[JB_EXC_DIFF_STAGES] = {0.60f, 0.60f, 0.58f, 0.58f, 0.57f, 0.57f, 0.55f, 0.55f};
+
+typedef struct {
+    float buf[JB_EXC_DIFF_MAX_DELAY];
+    int write;
+    int delay;
+} jb_exc_ap_t;
+
+// Schroeder all-pass: y = delayed - g*x; buf = x + g*y
+static inline float jb_exc_ap_run(jb_exc_ap_t *ap, float x, float g){
+    if (g <= 0.f) return x;
+    int w = ap->write;
+    float delayed = ap->buf[w];
+    float y = delayed - g * x;
+    ap->buf[w] = x + g * y;
+    w++;
+    if (w >= ap->delay) w = 0;
+    ap->write = w;
+    return y;
+}
+
+
 #define JB_EXC_AP1_BASE 211
 #define JB_EXC_AP2_BASE 503
 #define JB_EXC_AP3_BASE 883
@@ -330,14 +356,9 @@ typedef struct {
     float pwr_noise;
     float pwr_imp;
     float imp_match;
-
-    // Noise diffusion: 4 cascaded all-pass filters with hard-panned stages
-    //   1 & 3 -> Left, 2 & 4 -> Right
-    int ap1_w, ap2_w, ap3_w, ap4_w;
-    float ap1_buf[JB_EXC_AP1_MAX];
-    float ap2_buf[JB_EXC_AP2_MAX];
-    float ap3_buf[JB_EXC_AP3_MAX];
-    float ap4_buf[JB_EXC_AP4_MAX];
+    // Noise diffusion (Elements-style): 8 cascaded Schroeder all-pass filters per ear
+    jb_exc_ap_t diffL[JB_EXC_DIFF_STAGES];
+    jb_exc_ap_t diffR[JB_EXC_DIFF_STAGES];
 } jb_exc_voice_t;
 
 static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long seed_base){
@@ -372,13 +393,15 @@ static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long se
     v->pwr_noise = 0.f;
     v->pwr_imp   = 0.f;
     v->imp_match = 1.f;
-
-    // noise diffusion (all-pass)
-    v->ap1_w = v->ap2_w = v->ap3_w = v->ap4_w = 0;
-    memset(v->ap1_buf, 0, sizeof(v->ap1_buf));
-    memset(v->ap2_buf, 0, sizeof(v->ap2_buf));
-    memset(v->ap3_buf, 0, sizeof(v->ap3_buf));
-    memset(v->ap4_buf, 0, sizeof(v->ap4_buf));
+    // noise diffusion (Elements-style 8x all-pass per ear)
+    for (int i = 0; i < JB_EXC_DIFF_STAGES; ++i){
+        v->diffL[i].delay = JB_EXC_DIFF_PRIMES[i];
+        v->diffR[i].delay = JB_EXC_DIFF_PRIMES[i];
+        v->diffL[i].write = 0;
+        v->diffR[i].write = 0;
+        memset(v->diffL[i].buf, 0, sizeof(v->diffL[i].buf));
+        memset(v->diffR[i].buf, 0, sizeof(v->diffR[i].buf));
+    }
 }
 
 // STEP 2 helpers (runtime reset)
@@ -402,13 +425,15 @@ static inline void jb_exc_voice_reset_runtime(jb_exc_voice_t *e){
     e->pwr_noise = 0.f;
     e->pwr_imp   = 0.f;
     e->imp_match = 1.f;
-
-    // noise diffusion (all-pass)
-    e->ap1_w = e->ap2_w = e->ap3_w = e->ap4_w = 0;
-    memset(e->ap1_buf, 0, sizeof(e->ap1_buf));
-    memset(e->ap2_buf, 0, sizeof(e->ap2_buf));
-    memset(e->ap3_buf, 0, sizeof(e->ap3_buf));
-    memset(e->ap4_buf, 0, sizeof(e->ap4_buf));
+    // noise diffusion (Elements-style 8x all-pass per ear)
+    for (int i = 0; i < JB_EXC_DIFF_STAGES; ++i){
+        e->diffL[i].delay = JB_EXC_DIFF_PRIMES[i];
+        e->diffR[i].delay = JB_EXC_DIFF_PRIMES[i];
+        e->diffL[i].write = 0;
+        e->diffR[i].write = 0;
+        memset(e->diffL[i].buf, 0, sizeof(e->diffL[i].buf));
+        memset(e->diffR[i].buf, 0, sizeof(e->diffR[i].buf));
+    }
 
     // filter memories
     e->hpL.y1 = e->hpL.x1 = 0.f;
@@ -714,11 +739,9 @@ float damping, brightness; float global_decay, slope;
     float exc_shape;
     // exc_diffusion: repurposed -> Noise Diffusion (0..1)
     float exc_diffusion;
-
     // per-block computed (shared)
     float exc_noise_color_gL, exc_noise_color_gH, exc_noise_color_comp;
-    float exc_noise_diff_g;
-    float exc_noise_diff_d1, exc_noise_diff_d2, exc_noise_diff_d3, exc_noise_diff_d4;
+    float exc_noise_diff_g_stage[JB_EXC_DIFF_STAGES];
 
     float noise_scale;   // factory trim (linear amp)
     float impulse_scale; // factory trim (linear amp)
@@ -916,16 +939,11 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
     x->exc_noise_color_gL = gL;
     x->exc_noise_color_gH = gH;
     x->exc_noise_color_comp = comp;
-
-    // Noise diffusion (all-pass) parameters (shared)
+    // Noise diffusion (Elements-style 8x all-pass): scale per-stage coefficient by diffusion (0..1)
     float d = jb_clamp(x->exc_diffusion, 0.f, 1.f);
-    float gd = 0.70710678f * sqrtf(d);
-    float tscale = 0.1f + 1.9f * d;
-    x->exc_noise_diff_g  = (d <= 0.f) ? 0.f : gd;
-    x->exc_noise_diff_d1 = (float)JB_EXC_AP1_BASE * tscale;
-    x->exc_noise_diff_d2 = (float)JB_EXC_AP2_BASE * tscale;
-    x->exc_noise_diff_d3 = (float)JB_EXC_AP3_BASE * tscale;
-    x->exc_noise_diff_d4 = (float)JB_EXC_AP4_BASE * tscale;
+    for (int i = 0; i < JB_EXC_DIFF_STAGES; ++i){
+        x->exc_noise_diff_g_stage[i] = d * JB_EXC_DIFF_G_TARGET[i];
+    }
 
     // ADSR curves + times (applied to all voices)
     float aC = jb_clamp(x->exc_attack_curve,  -1.f, 1.f);
@@ -1087,16 +1105,14 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
 
     float colL = x->exc_noise_color_comp * (x->exc_noise_color_gL * lpL + x->exc_noise_color_gH * hpL);
     float colR = x->exc_noise_color_comp * (x->exc_noise_color_gL * lpR + x->exc_noise_color_gH * hpR);
-
-    // Noise diffusion: 4 cascaded all-pass filters (odd->L, even->R).
+    // Noise diffusion (Elements-style): 8 cascaded Schroeder all-pass filters per ear
     float diff_amt = jb_clamp(noise_diff, 0.f, 1.f);
     if (diff_amt > 0.f){
-        float gd = x->exc_noise_diff_g;
-        colL = jb_exc_apf_run(colL, gd, x->exc_noise_diff_d1, e->ap1_buf, &e->ap1_w, JB_EXC_AP1_MAX);
-        colL = jb_exc_apf_run(colL, gd, x->exc_noise_diff_d3, e->ap3_buf, &e->ap3_w, JB_EXC_AP3_MAX);
-
-        colR = jb_exc_apf_run(colR, gd, x->exc_noise_diff_d2, e->ap2_buf, &e->ap2_w, JB_EXC_AP2_MAX);
-        colR = jb_exc_apf_run(colR, gd, x->exc_noise_diff_d4, e->ap4_buf, &e->ap4_w, JB_EXC_AP4_MAX);
+        for (int i = 0; i < JB_EXC_DIFF_STAGES; ++i){
+            const float g = x->exc_noise_diff_g_stage[i];
+            colL = jb_exc_ap_run(&e->diffL[i], colL, g);
+            colR = jb_exc_ap_run(&e->diffR[i], colR, g);
+        }
     }
 
     // DC protection after diffusion
