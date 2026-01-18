@@ -116,7 +116,7 @@ static inline float jb_kill_denorm(float x){
 #define JB_EXC_GRAIN_RATE_MAX_HZ 2500.f
 #define JB_EXC_GRAIN_LEN_MIN_MS 5.f
 #define JB_EXC_GRAIN_LEN_MAX_MS 20.f
-#define JB_EXC_GRAIN_MAX_PER_CH 16
+#define JB_EXC_GRAIN_MAX_PER_CH 128
 
 static inline float jb_exc_expmap01(float t, float lo, float hi){
     if (t <= 0.f) return lo;
@@ -948,9 +948,18 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
     x->exc_grain_len_min_samps = len_lo;
     x->exc_grain_len_max_samps = len_max;
 
-    // Amplitude normalization: ~1/sqrt(density) law (shot noise)
-    const float base = 6.0f;
-    x->exc_grain_amp_scale = base / sqrtf(rate + 1e-12f);
+    // Amplitude normalization (shot-noise): keep perceived level ~constant as overlap grows.
+    // Expected overlap ~= rate * avg_len / sr. We scale ~ 1/sqrt(overlap).
+    // This avoids the "goes silent at high density" failure mode when overlap is capped.
+    {
+        float avg_len = 0.5f * (len_lo + len_max);
+        float overlap = (rate * avg_len) / (sr + 1e-12f);
+        // Target RMS is handled downstream by x->noise_scale; here we just keep the generator stable.
+        float s = 1.15f / sqrtf(overlap + 1e-4f);
+        if (s > 8.0f)  s = 8.0f;
+        if (s < 0.05f) s = 0.05f;
+        x->exc_grain_amp_scale = s;
+    }
 
     // ADSR curves + times (applied to all voices)
     float aC = jb_clamp(x->exc_attack_curve,  -1.f, 1.f);
@@ -2842,6 +2851,12 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     float exc_t = 0.5f * (exc_f + 1.f);
     float exc_w_imp   = sinf(0.5f * (float)M_PI * exc_t);
     float exc_w_noise = cosf(0.5f * (float)M_PI * exc_t);
+    // Safety: if Grains is engaged but the fader is at (or near) full impulse, keep a tiny
+    // amount of noise so the Grains parameter is always audible while debugging.
+    // (Set Grains=0 to fully remove the noise branch.)
+    if (x->exc_diffusion > 1e-4f && exc_w_noise < 0.05f){
+        exc_w_noise = 0.05f;
+    }
     // Pressure (reuses former density inlet): feedback coefficient k = 0..0.95
     float pressure = jb_clamp(x->exc_density, 0.f, 1.f);
     float fb_k = 0.95f * pressure;
