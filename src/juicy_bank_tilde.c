@@ -51,6 +51,14 @@
 #define JB_N_LFO       2
 #define JB_PITCH_MOD_SEMITONES  2.0f
 
+// ---------- SPACE (global stereo room) ----------
+#define JB_SPACE_NCOMB     8
+#define JB_SPACE_NCOMB_CH  4
+#define JB_SPACE_MAX_DELAY 1700
+#define JB_SPACE_NAP       4
+#define JB_SPACE_AP_MAX    700
+
+
 // ---------- utils ----------
 static inline float jb_clamp(float x, float lo, float hi){ return (x<lo)?lo:((x>hi)?hi:x); }
 static inline float jb_wrap01(float x){
@@ -110,17 +118,49 @@ static inline float jb_kill_denorm(float x){
 #define JB_EXC_TILT_PIVOT_HZ  1000.f
 #define JB_EXC_TILT_OCT_SPAN  3.f   // approx octaves from pivot to spectral edge
 
-// Elements-style diffuser: 8 Schroeder all-pass stages per ear.
-// "Diffusion" controls the feedback coefficient g; "Space" scales the delay lengths.
-#define JB_EXC_DIFF_STAGES 8
-#define JB_EXC_DIFF_MAX_DELAY 4096
-static const int JB_EXC_DIFF_PRIMES[JB_EXC_DIFF_STAGES] = {149, 307, 563, 827, 1013, 1223, 1447, 1601};
-static const float JB_EXC_DIFF_G_TARGET[JB_EXC_DIFF_STAGES] = {0.995f, 0.995f, 0.993f, 0.993f, 0.991f, 0.991f, 0.989f, 0.989f};
+// ---------- SPACE (Schroeder-style reverb) ----------
+static const int jb_space_base_delay[JB_SPACE_NCOMB] = { 1117, 1373, 1481, 1607, 1103, 1361, 1471, 1597 };
+static const int jb_space_ap_delay[JB_SPACE_NAP]     = { 225, 556, 341, 441 }; // L:225,556 | R:341,441 (primes)
 
-typedef struct {
-    float buf[JB_EXC_DIFF_MAX_DELAY];
-    int write;
-} jb_exc_ap_t;
+// Feedback comb filter with 1-pole damping inside the feedback path.
+static inline float jb_space_comb_tick(float *buf, int maxlen, int *w, int delay,
+                                       float in, float g, float damp, float *lp_state)
+{
+    int wi = *w;
+    int ri = wi - delay;
+    if (ri < 0) ri += maxlen;
+
+    float y = buf[ri];
+
+    // 1-pole LP on feedback signal (damping): y_d = (1-d)*y + d*lp
+    float yd = (1.f - damp) * y + damp * (*lp_state);
+    *lp_state = yd;
+
+    buf[wi] = in + g * yd;
+
+    wi++;
+    if (wi >= maxlen) wi = 0;
+    *w = wi;
+    return yd;
+}
+
+// Classic Schroeder allpass: y = -g*x + z; z = x + g*y
+static inline float jb_space_ap_tick(float *buf, int maxlen, int *w, int delay,
+                                     float x, float g)
+{
+    int wi = *w;
+    int ri = wi - delay;
+    if (ri < 0) ri += maxlen;
+
+    float z = buf[ri];
+    float y = -g * x + z;
+    buf[wi] = x + g * y;
+
+    wi++;
+    if (wi >= maxlen) wi = 0;
+    *w = wi;
+    return y;
+}
 
 
 
@@ -344,9 +384,6 @@ typedef struct {
     float pwr_noise;
     float pwr_imp;
     float imp_match;
-    // Noise diffusion (Elements-style): 8 cascaded Schroeder all-pass filters per ear
-    jb_exc_ap_t diffL[JB_EXC_DIFF_STAGES];
-    jb_exc_ap_t diffR[JB_EXC_DIFF_STAGES];
 } jb_exc_voice_t;
 
 static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long seed_base){
@@ -381,13 +418,7 @@ static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long se
     v->pwr_noise = 0.f;
     v->pwr_imp   = 0.f;
     v->imp_match = 1.f;
-    // noise diffusion (Elements-style 8x all-pass per ear)
-    for (int i = 0; i < JB_EXC_DIFF_STAGES; ++i){
-        v->diffL[i].write = 0;
-        v->diffR[i].write = 0;
-        memset(v->diffL[i].buf, 0, sizeof(v->diffL[i].buf));
-        memset(v->diffR[i].buf, 0, sizeof(v->diffR[i].buf));
-    }
+    // NOTE: old exciter noise diffusion (all-pass cascade) removed.
 }
 
 // STEP 2 helpers (runtime reset)
@@ -411,13 +442,7 @@ static inline void jb_exc_voice_reset_runtime(jb_exc_voice_t *e){
     e->pwr_noise = 0.f;
     e->pwr_imp   = 0.f;
     e->imp_match = 1.f;
-    // noise diffusion (Elements-style 8x all-pass per ear)
-    for (int i = 0; i < JB_EXC_DIFF_STAGES; ++i){
-        e->diffL[i].write = 0;
-        e->diffR[i].write = 0;
-        memset(e->diffL[i].buf, 0, sizeof(e->diffL[i].buf));
-        memset(e->diffR[i].buf, 0, sizeof(e->diffR[i].buf));
-    }
+
 
     // filter memories
     e->hpL.y1 = e->hpL.x1 = 0.f;
@@ -521,15 +546,14 @@ typedef struct {
     float rel_env;
     float rel_env2;
 
-    // coupling sends (stored per voice for 1-sample delayed injection)
-    float coup_b1_prevL, coup_b1_prevR; // Bank1 summed output (pre-release env weighting), L/R
-    float coup_b2_prevL, coup_b2_prevR; // Bank2 summed output (pre-release env weighting), L/R
 
-
-    // Pressure feedback loop state (per voice, 1-sample delayed)
-    float fb_prevL, fb_prevR;               // last (Bank1+Bank2+Exciter) mix fed back
-    float fb_hp_x1L, fb_hp_y1L;             // 20Hz DC-blocker state (L)
-    float fb_hp_x1R, fb_hp_y1R;             // 20Hz DC-blocker state (R)
+    // Feedback loop state (per voice, per bank, 1-sample delayed)
+    // Each bank ONLY feeds back its own output.
+    float fb_prevL[2], fb_prevR[2];         // last bank output (pre-space), L/R
+    float fb_hp_x1L[2], fb_hp_y1L[2];       // 20Hz DC-blocker state (L)
+    float fb_hp_x1R[2], fb_hp_y1R[2];       // 20Hz DC-blocker state (R)
+    float fb_agc_gain[2];                   // AGC gain applied to feedback before reinjection
+    float fb_agc_env[2];                    // AGC level follower (mono abs)
 
     // runtime per-mode — BANK 1/2
     jb_mode_rt_t m[JB_MAX_MODES];
@@ -561,10 +585,6 @@ typedef struct _juicy_bank_tilde {
     int   bank_semitone[2];        // per-bank semitone transpose (-12..+12)
     int   bank_octave[2];          // per-bank octave (-2..+2, snapped)
     float bank_tune_cents[2];     // per-bank cents detune (-100..+100)
-
-    // --- COUPLING TOPOLOGY (global test) ---
-    float topology;               // 0=normal, 1=B2->B1, 2=B1->B2, 3=cross (B2 has exciter)
-    float coupling;               // 0..1 strength
     // Individual/global inlets
     t_inlet *in_partials;          // message inlet for 'partials' (float 0..n_modes)
     t_inlet *in_master;            // per-bank master (selected bank)
@@ -572,8 +592,11 @@ typedef struct _juicy_bank_tilde {
     t_inlet *in_semitone;          // per-bank semitone transpose (selected bank)
     t_inlet *in_tune;              // per-bank cents detune (selected bank)
     t_inlet *in_bank;              // bank selector (1 or 2)
-    t_inlet *in_topology;          // topology selector (0=normal, 1=B2->B1, 2=B1->B2, 3=cross)
-    t_inlet *in_coupling;          // coupling strength (0..1)
+    // SPACE (global room)
+    t_inlet *in_space_size;
+    t_inlet *in_space_decay;
+    t_inlet *in_space_diffusion;
+    t_inlet *in_space_damping;
     t_outlet *out_index;           // float outlet reporting current selected partial (1-based)
     jb_mode_base_t base[JB_MAX_MODES];
     jb_mode_base_t base2[JB_MAX_MODES];
@@ -629,6 +652,20 @@ float damping, brightness; float global_decay, slope;
     // DC HP
     float hp_a, hpL_x1, hpL_y1, hpR_x1, hpR_y1;
     float fb_hp_a; // 20Hz DC blocker inside Pressure feedback loop
+
+    // SPACE parameters (0..1)
+    float space_size;
+    float space_decay;
+    float space_diffusion;
+    float space_damping;
+
+    // SPACE state (global)
+    float space_comb_buf[JB_SPACE_NCOMB][JB_SPACE_MAX_DELAY];
+    int   space_comb_w[JB_SPACE_NCOMB];
+    float space_comb_lp[JB_SPACE_NCOMB];
+
+    float space_ap_buf[JB_SPACE_NAP][JB_SPACE_AP_MAX];
+    int   space_ap_w[JB_SPACE_NAP];
 
     // IO
     // main stereo exciter inputs
@@ -715,20 +752,19 @@ float damping, brightness; float global_decay, slope;
     float exc_decay_ms,  exc_decay_curve;
     float exc_sustain;
     float exc_release_ms, exc_release_curve;
-    // exc_density: repurposed -> Pressure (feedback amount -1..+1, internally capped to |k|<=0.95)
+    // exc_density: repurposed -> Pressure (AGC target level for feedback loop, 0..1 -> 0..0.98)
     float exc_density;
     // exc_imp_shape: impulse-only shape (0..1)
     float exc_imp_shape;
     // exc_shape: repurposed -> Noise Color (0..1; red..white..violet)
     float exc_shape;
-    // exc_diffusion: repurposed -> Noise Diffusion (0..1)
-    float exc_diffusion;
-    // exc_space: scales diffuser delay lengths (0..1)
-    float exc_space;
     // per-block computed (shared)
     float exc_noise_color_gL, exc_noise_color_gH, exc_noise_color_comp;
-    float exc_noise_diff_g_stage[JB_EXC_DIFF_STAGES];
-    float exc_noise_diff_delay_stage[JB_EXC_DIFF_STAGES];
+
+    // --- FEEDBACK AGC (per-bank, per-voice) ---
+    // Attack/Release are 0..1 UI parameters mapped to time constants (seconds).
+    float fb_agc_attack;
+    float fb_agc_release;
 
     float noise_scale;   // factory trim (linear amp)
     float impulse_scale; // factory trim (linear amp)
@@ -744,8 +780,10 @@ float damping, brightness; float global_decay, slope;
     t_inlet *in_exc_density;
     t_inlet *in_exc_imp_shape;
     t_inlet *in_exc_shape;
-    t_inlet *in_exc_diffusion;
-    t_inlet *in_exc_space;
+
+    // AGC inlets (placed after timbre/color, before LFO index)
+    t_inlet *in_fb_agc_attack;
+    t_inlet *in_fb_agc_release;
 
     // --- MOD SECTION inlets (targets/amounts; actual wiring added next step) ---
     t_inlet *in_lfo_index;
@@ -927,31 +965,7 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
     x->exc_noise_color_gL = gL;
     x->exc_noise_color_gH = gH;
     x->exc_noise_color_comp = comp;
-    // Noise diffusion (Elements-style 8x all-pass): scale per-stage coefficient by diffusion (0..1)
-    float d = jb_clamp(x->exc_diffusion, 0.f, 1.f);
-    for (int i = 0; i < JB_EXC_DIFF_STAGES; ++i){
-        x->exc_noise_diff_g_stage[i] = d * JB_EXC_DIFF_G_TARGET[i];
-    }
-
-    // Noise diffuser "Space": scale the all-pass delay lengths (0..1).
-    //  space = 0.0 -> 0.25x (tiny, pinched, HF smear)
-    //  space = 0.5 -> 1.00x (Elements-ish default)
-    //  space = 1.0 -> 2.00x (large, airy, LF smear)
-    float space = jb_clamp(x->exc_space, 0.f, 1.f);
-    float scale;
-    if (space <= 0.5f){
-        float t = space * 2.f;          // 0..1
-        scale = 0.25f + t * (1.f - 0.25f);
-    }else{
-        float t = (space - 0.5f) * 2.f; // 0..1
-        scale = 1.f + t * (2.f - 1.f);
-    }
-    for (int i = 0; i < JB_EXC_DIFF_STAGES; ++i){
-        float dly = (float)JB_EXC_DIFF_PRIMES[i] * scale;
-        if (dly < 1.f) dly = 1.f;
-        if (dly > (float)(JB_EXC_DIFF_MAX_DELAY - 2)) dly = (float)(JB_EXC_DIFF_MAX_DELAY - 2);
-        x->exc_noise_diff_delay_stage[i] = dly;
-    }
+    // NOTE: old exciter noise diffusion (all-pass cascade) removed.
 
     // ADSR curves + times (applied to all voices)
     float aC = jb_clamp(x->exc_attack_curve,  -1.f, 1.f);
@@ -1080,7 +1094,6 @@ static inline float jb_softclip_thresh(float x, float threshold){
 static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
                                          jb_voice_t *v,
                                          float w_imp, float w_noise,
-                                         float fb_inL, float fb_inR, float noise_diff,
                                          float a_pwr, float one_minus_a_pwr,
                                          float a_match, float one_minus_a_match,
                                          float *outL, float *outR)
@@ -1101,11 +1114,6 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
     float nL = jb_exc_noise_tpdf(&e->rngL);
     float nR = jb_exc_noise_tpdf(&e->rngR);
 
-    // Pressure feedback injection (per voice): injected into the noise input,
-    // and gated by the noise ADSR so closed envelopes don't "pre-load" the diffuser.
-    nL += fb_inL * env;
-    nR += fb_inR * env;
-
     // Noise Color (tilt EQ): split around pivot using 1-pole LP, then re-weight low/high.
     float lpL = jb_exc_lp1_run(&e->lpL, nL);
     float lpR = jb_exc_lp1_run(&e->lpR, nR);
@@ -1114,18 +1122,7 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
 
     float colL = x->exc_noise_color_comp * (x->exc_noise_color_gL * lpL + x->exc_noise_color_gH * hpL);
     float colR = x->exc_noise_color_comp * (x->exc_noise_color_gL * lpR + x->exc_noise_color_gH * hpR);
-    // Noise diffusion (Elements-style): 8 cascaded Schroeder all-pass filters per ear
-    float diff_amt = jb_clamp(noise_diff, 0.f, 1.f);
-    if (diff_amt > 0.f){
-        for (int i = 0; i < JB_EXC_DIFF_STAGES; ++i){
-            const float g = x->exc_noise_diff_g_stage[i];
-            const float dly = x->exc_noise_diff_delay_stage[i];
-            colL = jb_exc_apf_run(colL, g, dly, e->diffL[i].buf, &e->diffL[i].write, JB_EXC_DIFF_MAX_DELAY);
-            colR = jb_exc_apf_run(colR, g, dly, e->diffR[i].buf, &e->diffR[i].write, JB_EXC_DIFF_MAX_DELAY);
-        }
-    }
-
-    // DC protection after diffusion
+    // DC protection
     colL = jb_exc_hp1_run(&e->hpL, colL);
     colR = jb_exc_hp1_run(&e->hpR, colR);
 
@@ -2360,10 +2357,14 @@ static void jb_update_voice_gains2(const t_juicy_bank_tilde *x, jb_voice_t *v){
     jb_update_voice_gains_bank(x, v, 1);
 }
 static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb_rng_t *rng){
-    // Pressure feedback loop state
-    v->fb_prevL = v->fb_prevR = 0.f;
-    v->fb_hp_x1L = v->fb_hp_y1L = 0.f;
-    v->fb_hp_x1R = v->fb_hp_y1R = 0.f;
+    // Feedback loop state (per bank)
+    for (int b = 0; b < 2; ++b){
+        v->fb_prevL[b] = v->fb_prevR[b] = 0.f;
+        v->fb_hp_x1L[b] = v->fb_hp_y1L[b] = 0.f;
+        v->fb_hp_x1R[b] = v->fb_hp_y1R[b] = 0.f;
+        v->fb_agc_gain[b] = 1.f;
+        v->fb_agc_env[b]  = 0.f;
+    }
     v->rel_env  = 1.f;
     v->rel_env2 = 1.f;
     v->energy = 0.f;
@@ -2440,14 +2441,14 @@ static void jb_voice_panic_reset(t_juicy_bank_tilde *x, jb_voice_t *v){
     v->rel_env = 0.f;
     v->rel_env2 = 0.f;
     v->energy = 0.f;
-
-    v->coup_b1_prevL = v->coup_b1_prevR = 0.f;
-    v->coup_b2_prevL = v->coup_b2_prevR = 0.f;
-
-    // Pressure feedback loop state
-    v->fb_prevL = v->fb_prevR = 0.f;
-    v->fb_hp_x1L = v->fb_hp_y1L = 0.f;
-    v->fb_hp_x1R = v->fb_hp_y1R = 0.f;
+    // Feedback loop state (per bank)
+    for (int b = 0; b < 2; ++b){
+        v->fb_prevL[b] = v->fb_prevR[b] = 0.f;
+        v->fb_hp_x1L[b] = v->fb_hp_y1L[b] = 0.f;
+        v->fb_hp_x1R[b] = v->fb_hp_y1R[b] = 0.f;
+        v->fb_agc_gain[b] = 1.f;
+        v->fb_agc_env[b]  = 0.f;
+    }
 
     // Internal exciter reset
     jb_exc_voice_reset_runtime(&v->exc);
@@ -2741,24 +2742,29 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     x->exc_imp_shape = exc_imp_shape_saved;
     jb_mod_adsr_update_block(x);
 
-    const int topo = (int)jb_clamp(x->topology, 0.f, 3.f);
-    float coup = jb_clamp(x->coupling, 0.f, 1.f);
-    if (lfo1_out != 0.f && lfo1_tgt == gensym("coupling_amt")){
-        coup = jb_clamp(coup + lfo1_out, 0.f, 1.f);
-    }
-    const int need_send2 = (topo==1 || topo==3); // Bank2 -> Bank1 send needed
-    const int need_send1 = (topo==2 || topo==3); // Bank1 -> Bank2 send needed
+        // (Coupling removed) Both banks are always excited by the internal exciter and always summed to the output.
     // Internal exciter mix weights (computed once per block)
     float exc_f = jb_clamp(x->exc_fader, -1.f, 1.f);
     float exc_t = 0.5f * (exc_f + 1.f);
     float exc_w_imp   = sinf(0.5f * (float)M_PI * exc_t);
     float exc_w_noise = cosf(0.5f * (float)M_PI * exc_t);
-    // Pressure (reuses former density inlet): feedback coefficient k = 0..0.95
-    // Pressure is bipolar (-1..+1) so you can invert polarity of the feedback injection.
-    // |fb_k| is capped at 0.95 for stability.
-    float pressure = jb_clamp(x->exc_density, -1.f, 1.f);
-    float fb_k = 0.95f * pressure;
-    float noise_diff    = jb_clamp(x->exc_diffusion, 0.f, 1.f);
+    // Pressure (reuses former density inlet): feedback-loop AGC target level (0..0.98)
+    const float pressure = jb_clamp(x->exc_density, 0.f, 1.f);
+    const float fb_target = 0.98f * pressure;
+
+    // Feedback AGC smoothing coefficients (per block)
+    // Attack:  0..1 -> 1ms..200ms  (fast clamp-down)
+    // Release: 0..1 -> 10ms..2500ms (slow recovery)
+    const float fb_tauA = 0.001f + 0.199f * jb_clamp(x->fb_agc_attack,  0.f, 1.f);
+    const float fb_tauR = 0.010f + 2.490f * jb_clamp(x->fb_agc_release, 0.f, 1.f);
+    const float a_fb_attack  = expf(-1.0f / (x->sr * fb_tauA));
+    const float a_fb_release = expf(-1.0f / (x->sr * fb_tauR));
+    const float one_minus_a_fb_attack  = 1.f - a_fb_attack;
+    const float one_minus_a_fb_release = 1.f - a_fb_release;
+
+    // Level detector (abs follower) for AGC: fixed 10ms time constant
+    const float a_fb_env = expf(-1.0f / (x->sr * 0.010f));
+    const float one_minus_a_fb_env = 1.f - a_fb_env;
     // Energy meter (per voice) used for voice stealing and tail cleanup.
     // 50ms time constant -> responsive but stable.
     const float a_energy = expf(-1.0f / (x->sr * 0.050f));
@@ -2851,8 +2857,9 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         const jb_mode_base_t *base2 = x->base2;
 
         for(int i=0;i<n;i++){
-            float vOutL = 0.f;
-            float vOutR = 0.f;
+            // Per-bank voice outputs (pre-space)
+            float b1OutL = 0.f, b1OutR = 0.f;
+            float b2OutL = 0.f, b2OutR = 0.f;
             // Dedicated MOD ADSR (independent of exciter ADSR)
             if (v->mod_env_stage != 0){
                 if (v->mod_env_stage == 1){
@@ -2869,46 +2876,68 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 }
             }
             v->mod_env_last = v->mod_env;
-            // Pressure feedback input (Bank1+Bank2+Exciter mix from previous sample)
-            float fbL = 0.f, fbR = 0.f;
-            if (fabsf(fb_k) > 0.f){
-                fbL = jb_hp1_run_a(v->fb_prevL, x->fb_hp_a, &v->fb_hp_x1L, &v->fb_hp_y1L);
-                fbR = jb_hp1_run_a(v->fb_prevR, x->fb_hp_a, &v->fb_hp_x1R, &v->fb_hp_y1R);
-
-                // Safety saturation (ceiling=1.0, knee ~0.75)
-                fbL = jb_softclip_thresh(fbL, 0.75f);
-                fbR = jb_softclip_thresh(fbR, 0.75f);
-
-                // Strict gain ceiling (|k| <= 0.95)
-                fbL *= fb_k;
-                fbR *= fb_k;
+            // ---------- FEEDBACK (per-bank, per-voice) ----------
+            // Each bank ONLY feeds back its own output. Feedback is injected at the
+            // same junction as the exciter input, but it does NOT pass through the
+            // exciter ADSR/noise path.
+            float fb1L = 0.f, fb1R = 0.f;
+            float fb2L = 0.f, fb2R = 0.f;
+            {
+                // Bank 1 (index 0)
+                float inL = jb_hp1_run_a(v->fb_prevL[0], x->fb_hp_a, &v->fb_hp_x1L[0], &v->fb_hp_y1L[0]);
+                float inR = jb_hp1_run_a(v->fb_prevR[0], x->fb_hp_a, &v->fb_hp_x1R[0], &v->fb_hp_y1R[0]);
+                inL = jb_softclip_thresh(inL, 0.75f);
+                inR = jb_softclip_thresh(inR, 0.75f);
+                float lvl = 0.5f * (fabsf(inL) + fabsf(inR));
+                v->fb_agc_env[0] = jb_kill_denorm(a_fb_env * v->fb_agc_env[0] + one_minus_a_fb_env * lvl);
+                float desired = (fb_target <= 1e-9f) ? 0.f : (fb_target / (v->fb_agc_env[0] + 1e-6f));
+                if (desired > 0.98f) desired = 0.98f;
+                if (desired < 0.f) desired = 0.f;
+                float g = v->fb_agc_gain[0];
+                if (desired < g) g = a_fb_attack * g + one_minus_a_fb_attack * desired;
+                else             g = a_fb_release * g + one_minus_a_fb_release * desired;
+                v->fb_agc_gain[0] = g;
+                fb1L = inL * g;
+                fb1R = inR * g;
+                // Final safety saturator (ceiling ~= 0.99)
+                if (fb1L > 0.99f) fb1L = 0.99f; else if (fb1L < -0.99f) fb1L = -0.99f;
+                if (fb1R > 0.99f) fb1R = 0.99f; else if (fb1R < -0.99f) fb1R = -0.99f;
+            }
+            {
+                // Bank 2 (index 1)
+                float inL = jb_hp1_run_a(v->fb_prevL[1], x->fb_hp_a, &v->fb_hp_x1L[1], &v->fb_hp_y1L[1]);
+                float inR = jb_hp1_run_a(v->fb_prevR[1], x->fb_hp_a, &v->fb_hp_x1R[1], &v->fb_hp_y1R[1]);
+                inL = jb_softclip_thresh(inL, 0.75f);
+                inR = jb_softclip_thresh(inR, 0.75f);
+                float lvl = 0.5f * (fabsf(inL) + fabsf(inR));
+                v->fb_agc_env[1] = jb_kill_denorm(a_fb_env * v->fb_agc_env[1] + one_minus_a_fb_env * lvl);
+                float desired = (fb_target <= 1e-9f) ? 0.f : (fb_target / (v->fb_agc_env[1] + 1e-6f));
+                if (desired > 0.98f) desired = 0.98f;
+                if (desired < 0.f) desired = 0.f;
+                float g = v->fb_agc_gain[1];
+                if (desired < g) g = a_fb_attack * g + one_minus_a_fb_attack * desired;
+                else             g = a_fb_release * g + one_minus_a_fb_release * desired;
+                v->fb_agc_gain[1] = g;
+                fb2L = inL * g;
+                fb2R = inR * g;
+                if (fb2L > 0.99f) fb2L = 0.99f; else if (fb2L < -0.99f) fb2L = -0.99f;
+                if (fb2R > 0.99f) fb2R = 0.99f; else if (fb2R < -0.99f) fb2R = -0.99f;
             }
 
-            // Internal exciter (stereo) — one sample per voice per frame
-            float exL = 0.f, exR = 0.f;
+            // ---------- INTERNAL EXCITER (no feedback mixed into noise/impulse) ----------
+            float ex0L = 0.f, ex0R = 0.f;
             jb_exc_process_sample(x, v,
                                  exc_w_imp, exc_w_noise,
-                                 fbL, fbR, noise_diff,
                                  a_exc_pwr, one_minus_a_exc_pwr,
                                  a_exc_match, one_minus_a_exc_match,
-                                 &exL, &exR);
-            exL = jb_kill_denorm(exL);
-            exR = jb_kill_denorm(exR);
-            if (!jb_isfinitef(exL) || !jb_isfinitef(exR)) { exL = 0.f; exR = 0.f; }
+                                 &ex0L, &ex0R);
+            ex0L = jb_kill_denorm(ex0L);
+            ex0R = jb_kill_denorm(ex0R);
+            if (!jb_isfinitef(ex0L) || !jb_isfinitef(ex0R)) { ex0L = 0.f; ex0R = 0.f; }
 
-            // Cache raw internal exciter for later (Bank1 may need it even if Bank2 input is replaced)
-            const float ex0L = exL, ex0R = exR;
-            // Select what excites BANK 2 for this topology
-            if (topo==2){ // Bank1 excites Bank2 (Bank2 has no direct exciter)
-                exL = coup * v->coup_b1_prevL;
-                exR = coup * v->coup_b1_prevR;
-            } else if (topo==3){ // cross: Bank2 has exciter + coupling from Bank1
-                exL = ex0L + (coup * v->coup_b1_prevL);
-                exR = ex0R + (coup * v->coup_b1_prevR);
-            }
-
-            float b2sendL = 0.f, b2sendR = 0.f; // bank2 send (used for topo 1/3 and stored for delayed use)
-            float b1sendL = 0.f, b1sendR = 0.f; // bank1 send (used for topo 2/3 and stored for delayed use)
+            // BANK 2 input: exciter + bank2 feedback
+            float exL = ex0L + fb2L;
+            float exR = ex0R + fb2R;
             // -------- BANK 2 --------
             if (bank_gain2 > 0.f && v->rel_env2 > 0.f){
                 for(int m=0;m<x->n_modes2;m++){
@@ -2950,30 +2979,17 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 	                    float p = jb_clamp(base_pan + pan_mod2, -1.f, 1.f);
                     float wL = sqrtf(0.5f*(1.f - p));
                     float wR = sqrtf(0.5f*(1.f + p));
-                    if (need_send2){ b2sendL += y_totalL * wL; b2sendR += y_totalR * wR; }
                     y_totalL *= v->rel_env2; y_totalR *= v->rel_env2;
-                    vOutL += y_totalL * wL * bank_gain2;
-                    vOutR += y_totalR * wR * bank_gain2;
+                    b2OutL += y_totalL * wL * bank_gain2;
+                    b2OutR += y_totalR * wR * bank_gain2;
 
                     md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
                     md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
                 }
             }
-            // topology selector (BANK 1 input source):
-            // topo 0: normal (both banks excited by internal exciter)
-            // topo 1: B2 -> B1 (B1 gets ONLY Bank2 send, no direct exciter)
-            // topo 2: B1 -> B2 (B1 gets internal exciter)
-            // topo 3: cross (B1 gets delayed Bank2 send; no direct exciter)
-            if (topo==0 || topo==2){
-                exL = ex0L;
-                exR = ex0R;
-            } else if (topo==1){
-                exL = coup * b2sendL;
-                exR = coup * b2sendR;
-            } else if (topo==3){
-                exL = coup * v->coup_b2_prevL;
-                exR = coup * v->coup_b2_prevR;
-            }
+            // BANK 1 input: exciter + bank1 feedback
+            exL = ex0L + fb1L;
+            exR = ex0R + fb1R;
 
 // -------- BANK 1 --------
             if (bank_gain1 > 0.f && v->rel_env > 0.f){
@@ -3017,23 +3033,18 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     else if (p < -1.f) p = -1.f;
                     float wL = sqrtf(0.5f*(1.f - p));
                     float wR = sqrtf(0.5f*(1.f + p));
-                    if (need_send1){ b1sendL += y_totalL * wL; b1sendR += y_totalR * wR; }
 
                     y_totalL *= v->rel_env; y_totalR *= v->rel_env;
-                    vOutL += y_totalL * wL * bank_gain1;
-                    vOutR += y_totalR * wR * bank_gain1;
+                    b1OutL += y_totalL * wL * bank_gain1;
+                    b1OutR += y_totalR * wR * bank_gain1;
 
                     md->y1L=y1L; md->y2L=y2L; md->y1bL=y1bL; md->y2bL=y2bL; md->driveL=driveL; md->envL=envL;
                     md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
                 }
             }
-
-            // Store coupling sends for next sample (used by topo 2/3 delayed injection)
-            v->coup_b1_prevL = b1sendL;
-            v->coup_b1_prevR = b1sendR;
-            v->coup_b2_prevL = b2sendL;
-            v->coup_b2_prevR = b2sendR;
-
+            // Final per-voice sum (pre-space)
+            float vOutL = b1OutL + b2OutL;
+            float vOutR = b1OutR + b2OutR;
 
             // --- voice output + safety watchdog ---
             // If anything goes unstable (NaN/INF or runaway magnitude), hard-reset this voice.
@@ -3043,9 +3054,11 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 vOutL = 0.f;
                 vOutR = 0.f;
             }
-            // Update Pressure loop source for next sample (per-voice): Bank1+Bank2 output + raw exciter
-            v->fb_prevL = jb_kill_denorm(vOutL + ex0L);
-            v->fb_prevR = jb_kill_denorm(vOutR + ex0R);
+            // Update feedback sources for next sample (per bank, per voice)
+            v->fb_prevL[0] = jb_kill_denorm(b1OutL);
+            v->fb_prevR[0] = jb_kill_denorm(b1OutR);
+            v->fb_prevL[1] = jb_kill_denorm(b2OutL);
+            v->fb_prevR[1] = jb_kill_denorm(b2OutR);
 
             outL[i] += vOutL;
             outR[i] += vOutR;
@@ -3080,26 +3093,26 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     v->state = V_IDLE;
                     if (is_tail){
                         v->energy = 0.f;
-                        v->coup_b1_prevL = v->coup_b1_prevR = 0.f;
-                        v->coup_b2_prevL = v->coup_b2_prevR = 0.f;
-
-    // Pressure feedback loop state
-    v->fb_prevL = v->fb_prevR = 0.f;
-    v->fb_hp_x1L = v->fb_hp_y1L = 0.f;
-    v->fb_hp_x1R = v->fb_hp_y1R = 0.f;
+                        for (int b = 0; b < 2; ++b){
+                            v->fb_prevL[b] = v->fb_prevR[b] = 0.f;
+                            v->fb_hp_x1L[b] = v->fb_hp_y1L[b] = 0.f;
+                            v->fb_hp_x1R[b] = v->fb_hp_y1R[b] = 0.f;
+                            v->fb_agc_gain[b] = 1.f;
+                            v->fb_agc_env[b] = 0.f;
+                        }
                     }
                 } else if (is_tail){
                     // Safety: also free a tail once the exciter + mod env are idle and output energy is gone.
                     if (v->exc.env.stage == JB_EXC_ENV_IDLE && v->mod_env_stage == 0 && v->energy < tail_energy_thresh){
                         v->state = V_IDLE;
                         v->energy = 0.f;
-                        v->coup_b1_prevL = v->coup_b1_prevR = 0.f;
-                        v->coup_b2_prevL = v->coup_b2_prevR = 0.f;
-
-    // Pressure feedback loop state
-    v->fb_prevL = v->fb_prevR = 0.f;
-    v->fb_hp_x1L = v->fb_hp_y1L = 0.f;
-    v->fb_hp_x1R = v->fb_hp_y1R = 0.f;
+                        for (int b = 0; b < 2; ++b){
+                            v->fb_prevL[b] = v->fb_prevR[b] = 0.f;
+                            v->fb_hp_x1L[b] = v->fb_hp_y1L[b] = 0.f;
+                            v->fb_hp_x1R[b] = v->fb_hp_y1R[b] = 0.f;
+                            v->fb_agc_gain[b] = 1.f;
+                            v->fb_agc_env[b] = 0.f;
+                        }
                     }
                 }
             } else if (v->state == V_HELD) {
@@ -3324,6 +3337,21 @@ static void juicy_bank_tilde_position(t_juicy_bank_tilde *x, t_floatarg f){
 }
 
 
+// ---------- SPACE setters (0..1) ----------
+static void juicy_bank_tilde_space_size(t_juicy_bank_tilde *x, t_floatarg f){
+    x->space_size = jb_clamp(f, 0.f, 1.f);
+}
+static void juicy_bank_tilde_space_decay(t_juicy_bank_tilde *x, t_floatarg f){
+    x->space_decay = jb_clamp(f, 0.f, 1.f);
+}
+static void juicy_bank_tilde_space_diffusion(t_juicy_bank_tilde *x, t_floatarg f){
+    x->space_diffusion = jb_clamp(f, 0.f, 1.f);
+}
+static void juicy_bank_tilde_space_damping(t_juicy_bank_tilde *x, t_floatarg f){
+    x->space_damping = jb_clamp(f, 0.f, 1.f);
+}
+
+
 static void juicy_bank_tilde_pickupL(t_juicy_bank_tilde *x, t_floatarg f){
     // pickup/mic X position along the 1D object (0..1)
     float v = jb_clamp(f, 0.f, 1.f);
@@ -3426,7 +3454,6 @@ static inline int jb_lfo1_target_allowed(t_symbol *s){
         s == gensym("brightness_1") || s == gensym("brightness_2") ||
         s == gensym("density_1")    || s == gensym("density_2")    ||
         s == gensym("partials_1")   || s == gensym("partials_2")   ||
-        s == gensym("coupling_amt") ||
         s == gensym("exc_shape")    ||
         s == gensym("exc_imp_shape")||
         s == gensym("lfo2_rate")    ||
@@ -3629,12 +3656,13 @@ static void juicy_bank_tilde_reset(t_juicy_bank_tilde *x){
         x->v[v].state = V_IDLE; x->v[v].f0 = x->basef0_ref; x->v[v].vel = 0.f; x->v[v].energy=0.f; x->v[v].rel_env = 1.f; x->v[v].rel_env2 = 1.f;
         jb_exc_voice_reset_runtime(&x->v[v].exc);
         x->v[v].exc_env_last = 0.f;
-        x->v[v].fb_prevL = x->v[v].fb_prevR = 0.f;
-        x->v[v].fb_hp_x1L = x->v[v].fb_hp_y1L = 0.f;
-        x->v[v].fb_hp_x1R = x->v[v].fb_hp_y1R = 0.f;
-        x->v[v].fb_prevL = x->v[v].fb_prevR = 0.f;
-        x->v[v].fb_hp_x1L = x->v[v].fb_hp_y1L = 0.f;
-        x->v[v].fb_hp_x1R = x->v[v].fb_hp_y1R = 0.f;
+        for (int b = 0; b < 2; ++b){
+            x->v[v].fb_prevL[b] = x->v[v].fb_prevR[b] = 0.f;
+            x->v[v].fb_hp_x1L[b] = x->v[v].fb_hp_y1L[b] = 0.f;
+            x->v[v].fb_hp_x1R[b] = x->v[v].fb_hp_y1R[b] = 0.f;
+            x->v[v].fb_agc_gain[b] = 1.f;
+            x->v[v].fb_agc_env[b] = 0.f;
+        }
         for(int i=0;i<JB_MAX_MODES;i++){
             x->v[v].disp_offset[i]=x->v[v].disp_target[i]=0.f;
             x->v[v].disp_offset2[i]=x->v[v].disp_target2[i]=0.f;
@@ -3655,9 +3683,13 @@ static void juicy_bank_tilde_preset_recall(t_juicy_bank_tilde *x){
         x->v[v].rel_env2 = 1.f;
         jb_exc_voice_reset_runtime(&x->v[v].exc);
         x->v[v].exc_env_last = 0.f;
-        x->v[v].fb_prevL = x->v[v].fb_prevR = 0.f;
-        x->v[v].fb_hp_x1L = x->v[v].fb_hp_y1L = 0.f;
-        x->v[v].fb_hp_x1R = x->v[v].fb_hp_y1R = 0.f;
+        for (int b = 0; b < 2; ++b){
+            x->v[v].fb_prevL[b] = x->v[v].fb_prevR[b] = 0.f;
+            x->v[v].fb_hp_x1L[b] = x->v[v].fb_hp_y1L[b] = 0.f;
+            x->v[v].fb_hp_x1R[b] = x->v[v].fb_hp_y1R[b] = 0.f;
+            x->v[v].fb_agc_gain[b] = 1.f;
+            x->v[v].fb_agc_env[b] = 0.f;
+        }
     }
 }
 
@@ -3706,8 +3738,8 @@ inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     if (x->in_exc_density) inlet_free(x->in_exc_density);
     if (x->in_exc_imp_shape) inlet_free(x->in_exc_imp_shape);
     if (x->in_exc_shape) inlet_free(x->in_exc_shape);
-    if (x->in_exc_diffusion) inlet_free(x->in_exc_diffusion);
-    if (x->in_exc_space) inlet_free(x->in_exc_space);
+    if (x->in_fb_agc_attack) inlet_free(x->in_fb_agc_attack);
+    if (x->in_fb_agc_release) inlet_free(x->in_fb_agc_release);
 
     // MOD SECTION inlets
     if (x->in_lfo_index) inlet_free(x->in_lfo_index);
@@ -3860,11 +3892,12 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->exc_release_ms    = 400.f;
     x->exc_release_curve = 0.f;
 
-    x->exc_density    = 0.f;  // Pressure (-1..+1 -> -0.95..+0.95)
+    x->exc_density    = 0.f;  // Pressure (AGC target 0..1 -> 0..0.98)
     x->exc_imp_shape  = 0.5f;  // Impulse-only Shape (old shape logic)
     x->exc_shape      = 0.5f;  // Noise Color (tilt EQ)
-    x->exc_diffusion  = 0.f;  // Noise Diffusion
-    x->exc_space      = 0.5f;  // Space (delay-length scale); 0.5 = Elements-ish default
+    // Feedback-loop AGC defaults (0..1 mapped to time constants in DSP)
+    x->fb_agc_attack  = 0.15f;
+    x->fb_agc_release = 0.55f;
     x->noise_scale  = 0.4f; // factory sweetspot
     x->impulse_scale = 10.f; // factory sweetspot
 // initialise per-LFO parameter and runtime state
@@ -3909,7 +3942,7 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->max_voices = JB_ATTACK_VOICES;
     x->total_voices = JB_MAX_VOICES;
     for(int v=0; v<JB_MAX_VOICES; ++v){
-        x->v[v].state=V_IDLE; x->v[v].f0=x->basef0_ref; x->v[v].vel=0.f; x->v[v].energy=0.f; x->v[v].rel_env=0.f; x->v[v].rel_env2=0.f; x->v[v].coup_b1_prevL=0.f; x->v[v].coup_b1_prevR=0.f; x->v[v].coup_b2_prevL=0.f; x->v[v].coup_b2_prevR=0.f;
+        x->v[v].state=V_IDLE; x->v[v].f0=x->basef0_ref; x->v[v].vel=0.f; x->v[v].energy=0.f; x->v[v].rel_env=0.f; x->v[v].rel_env2=0.f;
         for(int i=0;i<JB_MAX_MODES;i++){
             x->v[v].disp_offset[i]=x->v[v].disp_target[i]=0.f;
             x->v[v].disp_offset2[i]=x->v[v].disp_target2[i]=0.f;
@@ -3970,9 +4003,25 @@ x->excite_pos_y2  = x->excite_pos_y;
 
 // Individual
 
-    // Coupling topology defaults
-    x->topology = 0.f;
-    x->coupling = 0.f;
+    // SPACE defaults (global room)
+    x->space_size = 0.25f;
+    x->space_decay = 0.35f;
+    x->space_diffusion = 0.6f;
+    x->space_damping = 0.25f;
+
+    for (int k = 0; k < JB_SPACE_NCOMB; ++k){
+        x->space_comb_w[k] = 0;
+        x->space_comb_lp[k] = 0.f;
+        for (int n = 0; n < JB_SPACE_MAX_DELAY; ++n){
+            x->space_comb_buf[k][n] = 0.f;
+        }
+    }
+    for (int k = 0; k < JB_SPACE_NAP; ++k){
+        x->space_ap_w[k] = 0;
+        for (int n = 0; n < JB_SPACE_AP_MAX; ++n){
+            x->space_ap_buf[k][n] = 0.f;
+        }
+    }
 
     x->in_partials   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("partials"));
     x->in_master     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("master"));
@@ -3980,8 +4029,10 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->in_semitone   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("semitone"));
     x->in_tune       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("tune"));
     x->in_bank       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("bank"));
-    x->in_topology   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("topology"));
-    x->in_coupling   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("coupling"));
+    x->in_space_size      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("space_size"));
+    x->in_space_decay     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("space_decay"));
+    x->in_space_diffusion = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("space_diffusion"));
+    x->in_space_damping   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("space_damping"));
     x->in_index      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("index"));
     x->in_ratio      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("ratio"));
     x->in_gain       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("gain"));
@@ -4004,8 +4055,10 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->in_exc_density       = floatinlet_new(&x->x_obj, &x->exc_density);
     x->in_exc_imp_shape    = floatinlet_new(&x->x_obj, &x->exc_imp_shape);
     x->in_exc_shape         = floatinlet_new(&x->x_obj, &x->exc_shape);
-    x->in_exc_diffusion     = floatinlet_new(&x->x_obj, &x->exc_diffusion);
-    x->in_exc_space         = floatinlet_new(&x->x_obj, &x->exc_space);
+
+    // Feedback AGC inlets (placed AFTER timbre/color, BEFORE LFO index)
+    x->in_fb_agc_attack      = floatinlet_new(&x->x_obj, &x->fb_agc_attack);
+    x->in_fb_agc_release     = floatinlet_new(&x->x_obj, &x->fb_agc_release);
 
     // LFO + ADSR inlets (for future modulation matrix)
     // --- MOD SECTION (starts after exciter controls) ---
@@ -4091,22 +4144,6 @@ static void juicy_bank_tilde_bank(t_juicy_bank_tilde *x, t_floatarg f){
     x->edit_bank = b - 1;
 }
 
-static void juicy_bank_tilde_topology(t_juicy_bank_tilde *x, t_floatarg f){
-    // Topology selector (integer encoded as float):
-    //  0 = normal (both banks excited by internal exciter)
-    //  1 = unidirectional: Bank2 excites Bank1 (Bank1 has NO direct exciter)
-    //  2 = unidirectional: Bank1 excites Bank2 (Bank2 has NO direct exciter)
-    //  3 = cross coupling: Bank2 has exciter, and Bank1<->Bank2 exchange energy
-    int t = (int)floorf((float)f + 0.5f);
-    if (t < 0) t = 0;
-    if (t > 3) t = 3;
-    x->topology = (float)t;
-}
-
-static void juicy_bank_tilde_coupling(t_juicy_bank_tilde *x, t_floatarg f){
-    // 0..1 coupling strength (used when topology is 1/2/3; ignored in topology 0)
-    x->coupling = jb_clamp(f, 0.f, 1.f);
-}
 
 
 // master: per-bank output gain (0..1), written to selected bank
@@ -4454,8 +4491,10 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_octave,   gen
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_semitone, gensym("semitone"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_tune,     gensym("tune"),     A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bank,     gensym("bank"),     A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_topology, gensym("topology"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_coupling, gensym("coupling"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_space_size,      gensym("space_size"),      A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_space_decay,     gensym("space_decay"),     A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_space_diffusion, gensym("space_diffusion"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_space_damping,   gensym("space_damping"),   A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index_forward, gensym("forward"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index_backward, gensym("backward"), 0);
 
