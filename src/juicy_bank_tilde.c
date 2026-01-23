@@ -132,16 +132,17 @@ static inline float jb_space_comb_tick(float *buf, int maxlen, int *w, int delay
 
     float y = buf[ri];
 
-    // 1-pole LP on feedback signal (damping): y_d = (1-d)*y + d*lp
-    float yd = (1.f - damp) * y + damp * (*lp_state);
-    *lp_state = yd;
+    // 1-pole LP on FEEDBACK ONLY (damping): fb = (1-d)*y + d*lp_prev
+    float fb = (1.f - damp) * y + damp * (*lp_state);
+    *lp_state = fb;
 
-    buf[wi] = in + g * yd;
+    buf[wi] = in + g * fb;
 
     wi++;
     if (wi >= maxlen) wi = 0;
     *w = wi;
-    return yd;
+    // Return the undamped comb output; damping only affects the loop.
+    return y;
 }
 
 // Classic Schroeder allpass: y = -g*x + z; z = x + g*y
@@ -3131,6 +3132,72 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     for (int i = 0; i < n; ++i){
         if (!jb_isfinitef(outL[i])) outL[i] = 0.f;
         if (!jb_isfinitef(outR[i])) outR[i] = 0.f;
+    }
+
+    // ---------- SPACE (global stereo room) ----------
+    // Schroeder-style: 4 combs per channel -> 2 allpasses per channel.
+    // Parameters are 0..1 floats mapped exactly as specified.
+    {
+        const float size01 = jb_clamp(x->space_size, 0.f, 1.f);
+        const float decay01 = jb_clamp(x->space_decay, 0.f, 1.f);
+        const float diff01 = jb_clamp(x->space_diffusion, 0.f, 1.f);
+        const float damp01 = jb_clamp(x->space_damping, 0.f, 1.f);
+
+        const float size_scale = 0.05f + (size01 * 0.95f);
+        float comb_g = powf(decay01, 1.5f) * 0.98f; // optional curve -> natural "long tails" at end
+        if (comb_g < 0.f) comb_g = 0.f;
+        if (comb_g > 0.98f) comb_g = 0.98f;
+
+        float ap_g = 0.2f + (diff01 * 0.5f);
+        ap_g = jb_clamp(ap_g, 0.2f, 0.7f);
+
+        float damp = jb_clamp(damp01 * 0.8f, 0.f, 0.8f);
+
+        // Delay taps (samples), scaled by SIZE. Clamped to safe bounds.
+        int comb_delay[JB_SPACE_NCOMB];
+        for (int k = 0; k < JB_SPACE_NCOMB; ++k){
+            int d = (int)floorf((float)jb_space_base_delay[k] * size_scale + 0.5f);
+            if (d < 1) d = 1;
+            if (d > (JB_SPACE_MAX_DELAY - 2)) d = (JB_SPACE_MAX_DELAY - 2);
+            comb_delay[k] = d;
+        }
+
+        // Fixed wet/dry mix (no inlet in this revision)
+        const float mix = 0.35f;
+        const float dry_w = 1.f - mix;
+
+        for (int i = 0; i < n; ++i){
+            const float dryL = outL[i];
+            const float dryR = outR[i];
+
+            // L combs: 0..3, R combs: 4..7
+            float comb_sumL = 0.f;
+            float comb_sumR = 0.f;
+            for (int k = 0; k < JB_SPACE_NCOMB_CH; ++k){
+                comb_sumL += jb_space_comb_tick(x->space_comb_buf[k], JB_SPACE_MAX_DELAY,
+                                               &x->space_comb_w[k], comb_delay[k],
+                                               dryL, comb_g, damp, &x->space_comb_lp[k]);
+                int rk = k + JB_SPACE_NCOMB_CH;
+                comb_sumR += jb_space_comb_tick(x->space_comb_buf[rk], JB_SPACE_MAX_DELAY,
+                                               &x->space_comb_w[rk], comb_delay[rk],
+                                               dryR, comb_g, damp, &x->space_comb_lp[rk]);
+            }
+
+            // Normalize comb sum
+            comb_sumL *= (1.f / (float)JB_SPACE_NCOMB_CH);
+            comb_sumR *= (1.f / (float)JB_SPACE_NCOMB_CH);
+
+            // Allpass diffusion (2 per channel)
+            float wetL = comb_sumL;
+            float wetR = comb_sumR;
+            wetL = jb_space_ap_tick(x->space_ap_buf[0], JB_SPACE_AP_MAX, &x->space_ap_w[0], jb_space_ap_delay[0], wetL, ap_g);
+            wetL = jb_space_ap_tick(x->space_ap_buf[1], JB_SPACE_AP_MAX, &x->space_ap_w[1], jb_space_ap_delay[1], wetL, ap_g);
+            wetR = jb_space_ap_tick(x->space_ap_buf[2], JB_SPACE_AP_MAX, &x->space_ap_w[2], jb_space_ap_delay[2], wetR, ap_g);
+            wetR = jb_space_ap_tick(x->space_ap_buf[3], JB_SPACE_AP_MAX, &x->space_ap_w[3], jb_space_ap_delay[3], wetR, ap_g);
+
+            outL[i] = dryL * dry_w + wetL * mix;
+            outR[i] = dryR * dry_w + wetR * mix;
+        }
     }
 
     // Output DC HP (post-sum)
