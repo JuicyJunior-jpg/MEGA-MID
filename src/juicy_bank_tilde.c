@@ -2088,11 +2088,12 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
 // In RipplerX, decay 'd' is the per-partial decay time (seconds).
 // We use the already-computed per-mode decay time stored in md->t60_s.
 float d = md->t60_s;
-if (d < 1e-6f) d = 1e-6f;
+// RipplerX d is decay time in seconds, typically 0.01..10.0
+d = jb_clamp(d, 0.01f, 10.f);
 
-// R = exp(-pi * f * d / fs)
-float RL = expf(-(float)M_PI * HzL * d / x->sr);
-float RR = expf(-(float)M_PI * HzR * d / x->sr);
+// R = exp(-pi * f / (fs * d))  (d is decay time in seconds)
+float RL = expf(-(float)M_PI * HzL / (x->sr * d));
+float RR = expf(-(float)M_PI * HzR / (x->sr * d));
 if (RL > 0.999999f) RL = 0.999999f; else if (RL < 0.f) RL = 0.f;
 if (RR > 0.999999f) RR = 0.999999f; else if (RR < 0.f) RR = 0.f;
 
@@ -2354,12 +2355,8 @@ gnL     *= wL;
 
     // --- RipplerX global energy normalization (summation scaling) ---
 // Output_Final = (Sum_of_Partials) * (1 / sqrt(N))
-int N = 0;
-for (int i = 0; i < n_modes; ++i){
-    if (!base[i].active) continue;
-    if ((fabsf(m[i].gain_nowL) + fabsf(m[i].gain_nowR)) > 0.f) N++;
-}
-float gnorm = (N > 0) ? (1.f / sqrtf((float)N)) : 1.f;
+// In RipplerX, N is the fixed maximum partial count (64).
+const float gnorm = 1.f / sqrtf(64.f);
 for (int i = 0; i < n_modes; ++i){
     m[i].gain_nowL *= gnorm;
     m[i].gain_nowR *= gnorm;
