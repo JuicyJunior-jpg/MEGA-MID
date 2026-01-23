@@ -2085,15 +2085,22 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
         md->t60_s = T60;
 
         // --- RipplerX resonator coefficients + normalization ---
-// In RipplerX, decay 'd' is the per-partial decay time (seconds).
-// We use the already-computed per-mode decay time stored in md->t60_s.
-float d = md->t60_s;
-// RipplerX d is decay time in seconds, typically 0.01..10.0
-d = jb_clamp(d, 0.01f, 10.f);
+// In RipplerX:
+//   * UI "Decay" up -> internal damping coefficient d down (inverse mapping).
+//   * d is a per-partial damping coefficient (smaller = longer ring).
+//   * R = exp(-pi * f * d / fs)
+//   * gain = (1 - R^2) * sin(theta)
+//   * Total_Gain = gain / (sqrt(d) * sqrt(N)), with N fixed at 64.
+//
+// Our engine maintains a per-mode decay time in seconds as md->t60_s (after all damping logic).
+// To match RipplerX behavior, we map decay-time -> damping coefficient via d = 1 / T.
+float T = jb_clamp(md->t60_s, 0.01f, 10.f); // seconds (RipplerX typical)
+float d = 1.f / T;                          // damping coefficient (smaller = longer ring)
+d = jb_clamp(d, 0.1f, 100.f);               // implied by T clamp above (1/10 .. 1/0.01)
 
-// R = exp(-pi * f / (fs * d))  (d is decay time in seconds)
-float RL = expf(-(float)M_PI * HzL / (x->sr * d));
-float RR = expf(-(float)M_PI * HzR / (x->sr * d));
+// R = exp(-pi * f * d / fs)
+float RL = expf(-(float)M_PI * HzL * d / x->sr);
+float RR = expf(-(float)M_PI * HzR * d / x->sr);
 if (RL > 0.999999f) RL = 0.999999f; else if (RL < 0.f) RL = 0.f;
 if (RR > 0.999999f) RR = 0.999999f; else if (RR < 0.f) RR = 0.f;
 
@@ -2111,12 +2118,16 @@ md->a2R = -RR * RR;
 float gainL = (1.f - RL*RL) * sinf(wL);
 float gainR = (1.f - RR*RR) * sinf(wR);
 
-// Decay-to-amplitude compensation:
+// Decay-to-amplitude compensation (RipplerX):
 // Amplitude_Scale = 1 / sqrt(d)
 float amp_scale = 1.f / sqrtf(d);
 
-md->normL = gainL * amp_scale;
-md->normR = gainR * amp_scale;
+// Safety normalization (RipplerX, fixed N=64):
+const float inv_sqrtN = 1.f / sqrtf(64.f);
+
+// Total_Gain = gain / (sqrt(d) * sqrt(N))
+md->normL = gainL * amp_scale * inv_sqrtN;
+md->normR = gainR * amp_scale * inv_sqrtN;
         if (bw_amt > 0.f){
             float mode_scale = (n_modes>1)? ((float)i/(float)(n_modes-1)) : 0.f;
             float max_det = 0.0005f + 0.0015f * mode_scale;
@@ -2352,16 +2363,8 @@ gnL     *= wL;
         sum_gain += 0.5f * (fabsf(gnL) + fabsf(gnR));
         sum_ref  += 0.5f * (fabsf(gn_refL) + fabsf(gn_refR));
     }
+}
 
-    // --- RipplerX global energy normalization (summation scaling) ---
-// Output_Final = (Sum_of_Partials) * (1 / sqrt(N))
-// In RipplerX, N is the fixed maximum partial count (64).
-const float gnorm = 1.f / sqrtf(64.f);
-for (int i = 0; i < n_modes; ++i){
-    m[i].gain_nowL *= gnorm;
-    m[i].gain_nowR *= gnorm;
-}
-}
 
 static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
     jb_update_voice_gains_bank(x, v, 0);
