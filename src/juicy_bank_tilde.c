@@ -337,28 +337,65 @@ static inline void jb_exc_adsr_note_off(jb_exc_adsr_t *e){
     }
 }
 
-// Pulse generator (strike)
+
+// Mallet stiffness (RipplerX-style):
+//   tau = 1 / (f_base * (c1 + c2 * S_effective))
+//   S_effective = S_base + Velocity * Sensitivity
+// Notes:
+// - S_base is the existing "exc_imp_shape" inlet (0..1), repurposed as mallet stiffness.
+// - These constants are internal scaling constants (as per the formula spec).
+#define JB_MALLET_F_BASE_HZ   (440.0f)
+#define JB_MALLET_C1          (0.50f)
+#define JB_MALLET_C2          (4.00f)
+#define JB_MALLET_VEL_SENS    (0.50f)
+#define JB_MALLET_TAU_MIN_S   (0.00005f)   // 0.05 ms safety floor
+#define JB_MALLET_TAU_MAX_S   (0.05000f)   // 50 ms safety ceiling
+
+// Pulse generator (strike) — RipplerX mallet stiffness drives pulse width via tau.
+// We render a short exponential pulse whose time constant is tau.
 typedef struct {
-    int   samples_left;
-    float A, a1, a2, k2;
-    float n;
+    int   samples_left;  // countdown (prevents denormals + bounds CPU)
+    float A;             // base amplitude (1.0)
+    float alpha;         // per-sample decay multiplier
+    float n;             // current pulse value
 } jb_exc_pulse_t;
 
 // NOTE: Velocity scaling is applied uniformly in jb_exc_process_sample()
 // so the impulse and noise branches share the same per-voice velocity->loudness law.
-static inline void jb_exc_pulse_trigger(jb_exc_pulse_t *p){
-    // Mathematically-correct impulse (delta): one sample with unit amplitude.
-    // Any overall strike strength is applied later via per-voice velocity and gain scaling.
+static inline void jb_exc_pulse_trigger(jb_exc_pulse_t *p, float sr, float tau_s){
+    // Build an exponential pulse: n[0]=1, n[n+1]=n[n]*alpha
+    // alpha = exp(-1/(tau*sr)) (time constant tau seconds)
+    float tau = tau_s;
+    if (tau < JB_MALLET_TAU_MIN_S) tau = JB_MALLET_TAU_MIN_S;
+    if (tau > JB_MALLET_TAU_MAX_S) tau = JB_MALLET_TAU_MAX_S;
+
+    float a = expf(-1.f / (tau * sr));
+    if (!(a > 0.f && a < 1.f)) a = 0.0f;
+
     p->A = 1.0f;
-    p->samples_left = 1;
-    p->n = 0.f;
-}
-static inline float jb_exc_pulse_next(jb_exc_pulse_t *p){
-    if (p->samples_left <= 0) return 0.f;
-    p->samples_left--;
-    return p->A;
+    p->alpha = a;
+    p->n = 1.0f;
+
+    // Stop after ~-60 dB: alpha^(N) ~= 0.001  => N ~= ln(0.001)/ln(alpha)
+    // This is still "tau-driven" and avoids long tails when tau is large.
+    int N = 1;
+    if (a > 0.f && a < 0.999999f){
+        float ln_a = logf(a);
+        float Nf = logf(0.001f) / ln_a;
+        if (Nf < 1.f) Nf = 1.f;
+        if (Nf > 4096.f) Nf = 4096.f;
+        N = (int)(Nf + 0.5f);
+    }
+    p->samples_left = N;
 }
 
+static inline float jb_exc_pulse_next(jb_exc_pulse_t *p){
+    if (p->samples_left <= 0) return 0.f;
+    float y = p->A * p->n;
+    p->n *= p->alpha;
+    p->samples_left--;
+    return y;
+}
 // Per-voice exciter runtime state (stereo)
 typedef struct {
     float vel_cur;
@@ -372,9 +409,8 @@ typedef struct {
     jb_exc_hp1_t hpL, hpR;
     jb_exc_lp1_t lpL, lpR;
 
-    // Impulse branch filters (shape is impulse-only)
-    jb_exc_hp1_t hpImpL, hpImpR;
-    jb_exc_lp1_t lpImpL, lpImpR;
+    // Mallet stiffness effective (0..1), captured at note-on.
+    float mallet_stiff_eff;
 
     jb_exc_adsr_t env;
     jb_exc_pulse_t pulseL, pulseR;
@@ -406,12 +442,8 @@ static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long se
     jb_exc_hp1_set(&v->hpR, sr, 0.f);
     jb_exc_lp1_set(&v->lpL, sr, 0.f);
     jb_exc_lp1_set(&v->lpR, sr, 0.f);
-    // impulse branch filters start identical but keep their own state
-    jb_exc_hp1_set(&v->hpImpL, sr, 0.f);
-    jb_exc_hp1_set(&v->hpImpR, sr, 0.f);
-    jb_exc_lp1_set(&v->lpImpL, sr, 0.f);
-    jb_exc_lp1_set(&v->lpImpR, sr, 0.f);
-
+    // mallet stiffness is captured at note-on
+    v->mallet_stiff_eff = 0.f;
     v->gainL = 1.f;
     v->gainR = 1.f;
 
@@ -450,12 +482,7 @@ static inline void jb_exc_voice_reset_runtime(jb_exc_voice_t *e){
     e->hpR.y1 = e->hpR.x1 = 0.f;
     e->lpL.y1 = 0.f;
     e->lpR.y1 = 0.f;
-
-    e->hpImpL.y1 = e->hpImpL.x1 = 0.f;
-    e->hpImpR.y1 = e->hpImpR.x1 = 0.f;
-    e->lpImpL.y1 = 0.f;
-    e->lpImpR.y1 = 0.f;
-
+    e->mallet_stiff_eff = 0.f;
     e->gainL = 1.f;
     e->gainR = 1.f;
 }
@@ -755,7 +782,7 @@ float damping, brightness; float global_decay, slope;
     float exc_release_ms, exc_release_curve;
     // exc_density: repurposed -> Pressure (AGC target level for feedback loop, 0..1 -> 0..0.98)
     float exc_density;
-    // exc_imp_shape: impulse-only shape (0..1)
+    // exc_imp_shape: mallet stiffness (0..1) — controls impulse pulse width (tau)
     float exc_imp_shape;
     // exc_shape: repurposed -> Noise Color (0..1; red..white..violet)
     float exc_shape;
@@ -937,24 +964,7 @@ static float jb_mod_source_value(const t_juicy_bank_tilde *x,
 static void jb_exc_update_block(t_juicy_bank_tilde *x){
     float sr = (x->sr > 0.f) ? x->sr : 48000.f;
 
-    // Impulse Shape -> HP/LP cutoffs (impulse only)
-    float s = jb_clamp(x->exc_imp_shape, 0.f, 1.f);
-    float lp_norm, hp_norm;
-    if (s <= 0.5f){
-        float t = s / 0.5f;
-        lp_norm = t;
-        hp_norm = 0.f;
-    }else{
-        float t = (s - 0.5f) / 0.5f;
-        lp_norm = 1.f;
-        hp_norm = t;
-    }
-    float lp_min = 200.f, lp_max = 0.48f * sr;
-    float hp_min = 5.f,   hp_max = 8000.f;
-
-    float lp_hz = jb_exc_expmap01(jb_clamp(lp_norm,0.f,1.f), lp_min, lp_max);
-    float hp_hz = jb_exc_expmap01(jb_clamp(hp_norm,0.f,1.f), hp_min, hp_max);
-    if (lp_hz < hp_hz + 50.f) lp_hz = hp_hz + 50.f;
+    // NOTE: exc_imp_shape is now mallet stiffness (RipplerX-style tau) and is applied at note-on.
 
     // Noise Color (tilt EQ) -> per-block gains (shared)
     float color = jb_clamp(x->exc_shape, 0.f, 1.f); // 0=red .. 0.5=white .. 1=violet
@@ -977,6 +987,7 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
     float d_ms = x->exc_decay_ms;
     float sus  = x->exc_sustain;
     float r_ms = x->exc_release_ms;
+
     for(int i=0; i<x->total_voices; ++i){
         jb_exc_voice_t *e = &x->v[i].exc;
 
@@ -991,12 +1002,6 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
         jb_exc_hp1_set(&e->hpL, sr, 5.f);
         jb_exc_hp1_set(&e->hpR, sr, 5.f);
 
-        // Impulse filters: shaped by the (new) impulse-only Shape inlet
-        jb_exc_hp1_set(&e->hpImpL, sr, hp_hz);
-        jb_exc_hp1_set(&e->hpImpR, sr, hp_hz);
-        jb_exc_lp1_set(&e->lpImpL, sr, lp_hz);
-        jb_exc_lp1_set(&e->lpImpR, sr, lp_hz);
-
         // env
         e->env.curveA = aC;
         e->env.curveD = dC;
@@ -1004,6 +1009,7 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
         jb_exc_adsr_set_times(&e->env, sr, a_ms, d_ms, sus, r_ms);
     }
 }
+
 
 // ---------- MOD ADSR (dedicated modulation envelope) ----------
 
@@ -1133,10 +1139,7 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
     // ---------- IMPULSE BRANCH (shape affects impulse only) ----------
     float pL = jb_exc_pulse_next(&e->pulseL);
     float pR = jb_exc_pulse_next(&e->pulseR);
-
-    pL = jb_exc_lp1_run(&e->lpImpL, jb_exc_hp1_run(&e->hpImpL, pL));
-    pR = jb_exc_lp1_run(&e->lpImpR, jb_exc_hp1_run(&e->hpImpR, pR));
-
+    // No impulse filter shaping (tau-driven pulse already shapes the impulse).
     // Impulse is NOT governed by the exciter ADSR (noise is). We still scale by velocity and per-voice micro-variation.
     pL *= e->vel_on * e->gainL;
     pR *= e->vel_on * e->gainR;
@@ -1169,8 +1172,15 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
         pR *= e->imp_match;
     }
 
-    *outL = w_noise * (yL * x->noise_scale) + w_imp * (pL * x->impulse_scale);
+        *outL = w_noise * (yL * x->noise_scale) + w_imp * (pL * x->impulse_scale);
     *outR = w_noise * (yR * x->noise_scale) + w_imp * (pR * x->impulse_scale);
+
+    // RipplerX excitation impulse normalization:
+    // Normalized_Excitation = Input_Signal * (1.0 - Stiffness_Factor)
+    float stiff = jb_clamp(e->mallet_stiff_eff, 0.f, 1.f);
+    float norm  = 1.f - stiff;
+    *outL *= norm;
+    *outR *= norm;
 }
 // ---------- helpers ----------
 static float jb_bright_gain(float ratio_rel, float b){
@@ -2074,38 +2084,38 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
 
         md->t60_s = T60;
 
-        float r = (T60 <= 0.f) ? 0.f : powf(10.f, -3.f / (T60 * x->sr));
-        float cL=cosf(wL), cR=cosf(wR);
+        // --- RipplerX resonator coefficients + normalization ---
+// In RipplerX, decay 'd' is the per-partial decay time (seconds).
+// We use the already-computed per-mode decay time stored in md->t60_s.
+float d = md->t60_s;
+if (d < 1e-6f) d = 1e-6f;
 
-        md->a1L=2.f*r*cL; md->a2L=-r*r;
-        md->a1R=2.f*r*cR; md->a2R=-r*r;
-        // Scaling Factor normalization (frequency + decay-aware, constant-energy target):
-// The old choice:
-//   b0 = (1 - r) * sqrt(1 + r^2 - 2 r cos(2 w0))
-// normalizes the *steady-state sinusoid* gain at resonance (|H(e^{jw0})|=1),
-// which makes long decays (r→1) inject very little energy for burst/noise exciters.
-//
-// For burst/noise excitation, a better perceptual target is roughly constant injected
-// power/energy vs decay. Replace (1 - r) with sqrt(1 - r^2).
-float tL = 1.f + r*r - 2.f*r*cosf(2.f*wL);
-float tR = 1.f + r*r - 2.f*r*cosf(2.f*wR);
-if (tL < 0.f) tL = 0.f;
-if (tR < 0.f) tR = 0.f;
+// R = exp(-pi * f * d / fs)
+float RL = expf(-(float)M_PI * HzL * d / x->sr);
+float RR = expf(-(float)M_PI * HzR * d / x->sr);
+if (RL > 0.999999f) RL = 0.999999f; else if (RL < 0.f) RL = 0.f;
+if (RR > 0.999999f) RR = 0.999999f; else if (RR < 0.f) RR = 0.f;
 
-float qL = 1.f - r*r;
-float qR = 1.f - r*r;
-if (qL < 0.f) qL = 0.f;
-if (qR < 0.f) qR = 0.f;
+// Resonator coefficients:
+// a1 = 2 * R * cos(theta)
+// a2 = -R^2
+float cL = cosf(wL), cR = cosf(wR);
+md->a1L = 2.f * RL * cL;
+md->a2L = -RL * RL;
+md->a1R = 2.f * RR * cR;
+md->a2R = -RR * RR;
 
-float b0L = sqrtf(qL) * sqrtf(tL);
-float b0R = sqrtf(qR) * sqrtf(tR);
+// Per-resonator input gain (b0):
+// gain = (1 - R^2) * sin(theta)
+float gainL = (1.f - RL*RL) * sinf(wL);
+float gainR = (1.f - RR*RR) * sinf(wR);
 
-if (b0L < 1e-9f) b0L = 1e-9f;
-if (b0R < 1e-9f) b0R = 1e-9f;
+// Decay-to-amplitude compensation:
+// Amplitude_Scale = 1 / sqrt(d)
+float amp_scale = 1.f / sqrtf(d);
 
-md->normL = b0L;
-md->normR = b0R;
-
+md->normL = gainL * amp_scale;
+md->normR = gainR * amp_scale;
         if (bw_amt > 0.f){
             float mode_scale = (n_modes>1)? ((float)i/(float)(n_modes-1)) : 0.f;
             float max_det = 0.0005f + 0.0015f * mode_scale;
@@ -2115,8 +2125,8 @@ md->normR = b0R;
             float w2R = wR * (1.f + detR);
             float c2L = cosf(w2L);
             float c2R = cosf(w2R);
-            md->a1bL = 2.f*r*c2L; md->a2bL = -r*r;
-            md->a1bR = 2.f*r*c2R; md->a2bR = -r*r;
+            md->a1bL = 2.f*RL*c2L; md->a2bL = -RL*RL;
+            md->a1bR = 2.f*RR*c2R; md->a2bR = -RR*RR;
         } else {
             md->a1bL=md->a2bL=0.f; md->a1bR=md->a2bR=0.f;
         }
@@ -2342,13 +2352,18 @@ gnL     *= wL;
         sum_ref  += 0.5f * (fabsf(gn_refL) + fabsf(gn_refR));
     }
 
-    // Apply normalization so brightness redistributes energy without changing overall level.
-    float norm = (sum_gain > 1e-12f) ? (sum_ref / sum_gain) : 1.f;
-    if (norm < 0.f) norm = 0.f;
-    for (int i = 0; i < n_modes; ++i){
-        m[i].gain_nowL *= norm;
-        m[i].gain_nowR *= norm;
-    }
+    // --- RipplerX global energy normalization (summation scaling) ---
+// Output_Final = (Sum_of_Partials) * (1 / sqrt(N))
+int N = 0;
+for (int i = 0; i < n_modes; ++i){
+    if (!base[i].active) continue;
+    if ((fabsf(m[i].gain_nowL) + fabsf(m[i].gain_nowR)) > 0.f) N++;
+}
+float gnorm = (N > 0) ? (1.f / sqrtf((float)N)) : 1.f;
+for (int i = 0; i < n_modes; ++i){
+    m[i].gain_nowL *= gnorm;
+    m[i].gain_nowR *= gnorm;
+}
 }
 
 static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
@@ -2490,8 +2505,23 @@ static inline void jb_exc_note_on(t_juicy_bank_tilde *x, jb_voice_t *v, float ve
         e->gainL = 1.f + 0.02f * jb_exc_noise_tpdf(&e->rngL);
         e->gainR = 1.f + 0.02f * jb_exc_noise_tpdf(&e->rngR);
 
-        jb_exc_pulse_trigger(&e->pulseL);
-        jb_exc_pulse_trigger(&e->pulseR);
+        // RipplerX mallet stiffness:
+        //   S_effective = S_base + Velocity * Sensitivity
+        //   tau = 1 / (f_base * (c1 + c2*S_effective))
+        float sr = (x->sr > 0.f) ? x->sr : 48000.f;
+        float S_base = jb_clamp(x->exc_imp_shape, 0.f, 1.f);
+        float S_eff  = S_base + e->vel_on * JB_MALLET_VEL_SENS;
+        S_eff = jb_clamp(S_eff, 0.f, 1.f);
+        e->mallet_stiff_eff = S_eff;
+
+        float denom = JB_MALLET_C1 + JB_MALLET_C2 * S_eff;
+        if (denom < 1e-6f) denom = 1e-6f;
+        float tau = 1.f / (JB_MALLET_F_BASE_HZ * denom);
+        if (tau < JB_MALLET_TAU_MIN_S) tau = JB_MALLET_TAU_MIN_S;
+        if (tau > JB_MALLET_TAU_MAX_S) tau = JB_MALLET_TAU_MAX_S;
+
+        jb_exc_pulse_trigger(&e->pulseL, sr, tau);
+        jb_exc_pulse_trigger(&e->pulseR, sr, tau);
     }else{
         jb_exc_adsr_note_off(&e->env);
     }
@@ -2753,6 +2783,12 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     const float pressure = jb_clamp(x->exc_density, 0.f, 1.f);
     const float fb_target = 0.98f * pressure;
 
+    // RipplerX excitation impulse normalization:
+    // Normalized_Excitation = Input_Signal * (1.0 - Stiffness_Factor)
+    // We use per-bank "stiffen" amount as Stiffness_Factor.
+    const float exc_norm1 = 1.f - jb_clamp(x->stiffen_amt,  0.f, 1.f);
+    const float exc_norm2 = 1.f - jb_clamp(x->stiffen_amt2, 0.f, 1.f);
+
     // Feedback AGC smoothing coefficients (per block)
     // Attack:  0..1 -> 1ms..200ms  (fast clamp-down)
     // Release: 0..1 -> 10ms..2500ms (slow recovery)
@@ -2937,8 +2973,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             if (!jb_isfinitef(ex0L) || !jb_isfinitef(ex0R)) { ex0L = 0.f; ex0R = 0.f; }
 
             // BANK 2 input: exciter + bank2 feedback
-            float exL = ex0L + fb2L;
-            float exR = ex0R + fb2R;
+            float exL = (ex0L * exc_norm2) + fb2L;
+            float exR = (ex0R * exc_norm2) + fb2R;
             // -------- BANK 2 --------
             if (bank_gain2 > 0.f && v->rel_env2 > 0.f){
                 for(int m=0;m<x->n_modes2;m++){
@@ -2989,8 +3025,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 }
             }
             // BANK 1 input: exciter + bank1 feedback
-            exL = ex0L + fb1L;
-            exR = ex0R + fb1R;
+            exL = (ex0L * exc_norm1) + fb1L;
+            exR = (ex0R * exc_norm1) + fb1R;
 
 // -------- BANK 1 --------
             if (bank_gain1 > 0.f && v->rel_env > 0.f){
@@ -3960,7 +3996,7 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->exc_release_curve = 0.f;
 
     x->exc_density    = 0.f;  // Pressure (AGC target 0..1 -> 0..0.98)
-    x->exc_imp_shape  = 0.5f;  // Impulse-only Shape (old shape logic)
+    x->exc_imp_shape  = 0.5f;  // Mallet stiffness (RipplerX-style tau)
     x->exc_shape      = 0.5f;  // Noise Color (tilt EQ)
     // Feedback-loop AGC defaults (0..1 mapped to time constants in DSP)
     x->fb_agc_attack  = 0.15f;
