@@ -1,4 +1,3 @@
-
 // juicy_bank~ — modal resonator bank (V5.0)
 // 4-voice poly, true stereo banks, Behavior + Body + Individual inlets.
 // NEW (V5.0):
@@ -614,8 +613,18 @@ typedef struct _juicy_bank_tilde {
 
     float warp; // -1..+1 bias for stretch distribution
     float warp2;
-float damping, brightness; float global_decay, slope;
-    float damping2, brightness2; float global_decay2, slope2;
+float brightness;
+    // --- GPD damping anchors (3 zeta anchors + profile exponent k) ---
+    float gpd_z1, gpd_z2, gpd_z3;
+    float gpd_k;
+    float gpd_a0, gpd_a1, gpd_a2;
+    int   gpd_dirty;
+
+    float brightness2;
+    float gpd_z1_2, gpd_z2_2, gpd_z3_2;
+    float gpd_k_2;
+    float gpd_a0_2, gpd_a1_2, gpd_a2_2;
+    int   gpd_dirty2;
     float density_amt; jb_density_mode density_mode;
     float density_amt2; jb_density_mode density_mode2;
     float dispersion, dispersion_last;
@@ -682,7 +691,7 @@ float damping, brightness; float global_decay, slope;
     
         t_inlet *in_release;
 // Body controls (damping, brightness, density, dispersion, anisotropy)
-    t_inlet *in_damping, *in_global_decay, *in_slope, *in_brightness, *in_density, *in_stretch, *in_warp, *in_dispersion, *in_offset, *in_collision;
+    t_inlet *in_gpd1, *in_gpd2, *in_gpd3, *in_gpd_k, *in_brightness, *in_density, *in_stretch, *in_warp, *in_dispersion, *in_offset, *in_collision;
     // Individual
     t_inlet *in_index, *in_ratio, *in_gain, *in_decay;
         // --- Spatial coupling (node/antinode; gain-level only) ---
@@ -1299,18 +1308,125 @@ static inline float jb_bank_stretch_amt(const t_juicy_bank_tilde *x, int bank){
 static inline float jb_bank_warp_amt(const t_juicy_bank_tilde *x, int bank){
     return bank ? x->warp2 : x->warp;
 }
-static inline float jb_bank_damping(const t_juicy_bank_tilde *x, int bank){
-    return bank ? x->damping2 : x->damping;
+static inline float jb_bank_gpd_z1(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->gpd_z1_2 : x->gpd_z1;
 }
-static inline float jb_bank_global_decay(const t_juicy_bank_tilde *x, int bank){
-    return bank ? x->global_decay2 : x->global_decay;
+static inline float jb_bank_gpd_z2(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->gpd_z2_2 : x->gpd_z2;
 }
-static inline float jb_bank_slope(const t_juicy_bank_tilde *x, int bank){
-    return bank ? x->slope2 : x->slope;
+static inline float jb_bank_gpd_z3(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->gpd_z3_2 : x->gpd_z3;
 }
+static inline float jb_bank_gpd_k(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->gpd_k_2 : x->gpd_k;
+}
+static inline float jb_bank_gpd_a0(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->gpd_a0_2 : x->gpd_a0;
+}
+static inline float jb_bank_gpd_a1(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->gpd_a1_2 : x->gpd_a1;
+}
+static inline float jb_bank_gpd_a2(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->gpd_a2_2 : x->gpd_a2;
+}
+static inline int *jb_bank_gpd_dirty_ptr(t_juicy_bank_tilde *x, int bank){
+    return bank ? &x->gpd_dirty2 : &x->gpd_dirty;
+}
+
 // Backward-compat aliases (old names)
-static inline float jb_bank_damp_broad(const t_juicy_bank_tilde *x, int bank){ return jb_bank_global_decay(x, bank); }
-static inline float jb_bank_damp_point(const t_juicy_bank_tilde *x, int bank){ return jb_bank_slope(x, bank); }
+static inline float jb_bank_damp_broad(const t_juicy_bank_tilde *x, int bank){ return jb_bank_gpd_z2(x, bank); }
+static inline float jb_bank_damp_point(const t_juicy_bank_tilde *x, int bank){ return jb_bank_gpd_k(x, bank); }
+
+// --- GPD damping (3-anchor, per-bank) ---
+// Anchors are fixed in Hz; inlets set the corresponding damping ratios (zeta).
+#ifndef JB_GPD_F1_HZ
+#define JB_GPD_F1_HZ 200.f
+#define JB_GPD_F2_HZ 1200.f
+#define JB_GPD_F3_HZ 6000.f
+#endif
+
+static void jb_gpd_solve_bank(t_juicy_bank_tilde *x, int bank){
+    float z1 = jb_clamp(jb_bank_gpd_z1(x, bank), 0.f, 0.5f);
+    float z2 = jb_clamp(jb_bank_gpd_z2(x, bank), 0.f, 0.5f);
+    float z3 = jb_clamp(jb_bank_gpd_z3(x, bank), 0.f, 0.5f);
+    float k  = jb_bank_gpd_k(x, bank);
+    if (k < 0.05f) k = 0.05f;
+    if (k > 6.f)   k = 6.f;
+
+    const float W1 = 2.f * (float)M_PI * JB_GPD_F1_HZ;
+    const float W2 = 2.f * (float)M_PI * JB_GPD_F2_HZ;
+    const float W3 = 2.f * (float)M_PI * JB_GPD_F3_HZ;
+
+    float A[3][4] = {
+        { 1.f/W1, W1, powf(W1, k), 2.f*z1 },
+        { 1.f/W2, W2, powf(W2, k), 2.f*z2 },
+        { 1.f/W3, W3, powf(W3, k), 2.f*z3 }
+    };
+
+    for (int c = 0; c < 3; ++c){
+        int piv = c;
+        float maxv = fabsf(A[c][c]);
+        for (int r = c+1; r < 3; ++r){
+            float v = fabsf(A[r][c]);
+            if (v > maxv){ maxv = v; piv = r; }
+        }
+        if (maxv < 1e-20f) break;
+        if (piv != c){
+            for (int j = c; j < 4; ++j){ float tmp=A[c][j]; A[c][j]=A[piv][j]; A[piv][j]=tmp; }
+        }
+        float inv = 1.f / A[c][c];
+        for (int j = c; j < 4; ++j) A[c][j] *= inv;
+        for (int r = 0; r < 3; ++r){
+            if (r == c) continue;
+            float f = A[r][c];
+            if (f == 0.f) continue;
+            for (int j = c; j < 4; ++j) A[r][j] -= f * A[c][j];
+        }
+    }
+
+    float a0 = A[0][3];
+    float a1 = A[1][3];
+    float a2 = A[2][3];
+
+    if (!isfinite(a0) || !isfinite(a1) || !isfinite(a2)){
+        float b1 = 2.f*z1, b3 = 2.f*z3;
+        float det = (1.f/W1)*W3 - (1.f/W3)*W1;
+        if (fabsf(det) < 1e-20f){
+            a0 = 0.f; a1 = 0.f; a2 = 0.f;
+        } else {
+            a0 = (b1*W3 - b3*W1) / det;
+            a1 = ((1.f/W1)*b3 - (1.f/W3)*b1) / det;
+            a2 = 0.f;
+        }
+    }
+
+    if (bank){
+        x->gpd_a0_2 = a0; x->gpd_a1_2 = a1; x->gpd_a2_2 = a2;
+        x->gpd_k_2  = k;
+        x->gpd_dirty2 = 0;
+    } else {
+        x->gpd_a0 = a0; x->gpd_a1 = a1; x->gpd_a2 = a2;
+        x->gpd_k  = k;
+        x->gpd_dirty = 0;
+    }
+}
+
+static inline void jb_gpd_ensure(t_juicy_bank_tilde *x, int bank){
+    int *dirty = jb_bank_gpd_dirty_ptr(x, bank);
+    if (*dirty) jb_gpd_solve_bank(x, bank);
+}
+
+static inline float jb_gpd_zeta_eval(const t_juicy_bank_tilde *x, int bank, float omega){
+    if (omega < 1e-6f) omega = 1e-6f;
+    float a0 = jb_bank_gpd_a0(x, bank);
+    float a1 = jb_bank_gpd_a1(x, bank);
+    float a2 = jb_bank_gpd_a2(x, bank);
+    float k  = jb_bank_gpd_k(x, bank);
+    float z = 0.5f * (a0/omega + a1*omega + a2*powf(omega, k));
+    if (!isfinite(z) || z < 0.f) z = 0.f;
+    if (z > 0.5f) z = 0.5f;
+    return z;
+}
 static inline float jb_bank_brightness(const t_juicy_bank_tilde *x, int bank){
     return bank ? x->brightness2 : x->brightness;
 }
@@ -1960,35 +2076,10 @@ jb_lock_fundamental_generic(n_modes, base, m);
         f0_eff *= ratio;
     }
 
-    // --- damping + broadness mod (targets 0 and 1) ---
-    float damping_base = jb_clamp(jb_bank_damping(x, bank), 0.f, 1.f);
-    // LFO1: (damper removed from LFO targets)
-float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
+        // --- GPD damping (solve once per change) ---
+    jb_gpd_ensure(x, bank);
 
-    float damping_mod = 0.f;
-    float broad_mod   = 0.f;
-    for (int src = 0; src < JB_N_MODSRC; ++src){
-        float src_v = jb_mod_source_value(x, v, src);
-        if (src_v == 0.f) continue;
-        float amt_d = mm[src][0];
-        float amt_b = mm[src][1];
-        if (amt_d != 0.f) damping_mod += amt_d * src_v;
-        if (amt_b != 0.f) broad_mod   += amt_b * src_v;
-    }
-    if (damping_mod > 1.f) damping_mod = 1.f;
-    else if (damping_mod < -1.f) damping_mod = -1.f;
-    if (broad_mod > 1.f) broad_mod = 1.f;
-    else if (broad_mod < -1.f) broad_mod = -1.f;
-
-    float damping_total = damping_base + damping_mod;
-    if (damping_total > 1.f) damping_total = 1.f;
-    else if (damping_total < 0.f) damping_total = 0.f;
-
-    float broad_total = broad_base + broad_mod;
-    if (broad_total < 0.f) broad_total = 0.f;
-    else if (broad_total > 1.f) broad_total = 1.f;
-
-    float md_amt = jb_clamp(jb_bank_micro_detune(x, bank),0.f,1.f);
+float md_amt = jb_clamp(jb_bank_micro_detune(x, bank),0.f,1.f);
     float bw_amt = bank ? jb_clamp(v->bandwidth_v2, 0.f, 1.f) : jb_clamp(v->bandwidth_v, 0.f, 1.f);
 
     float disp = jb_bank_dispersion(x, bank);
@@ -2037,10 +2128,14 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
         }
 
         
-        // --- Global decay (base T60) ---
-        // NOTE: global_decay sets the baseline decay for ALL modes (uniform), before frequency-based damping.
-        float gdecay01 = jb_clamp(broad_total, 0.f, 1.f);
-        float T60 = jb_expmap01(gdecay01, JB_GLOBAL_DECAY_MIN_S, JB_GLOBAL_DECAY_MAX_S);
+                // --- GPD damping baseline (frequency-dependent) ---
+        // omega is rad/sec (not rad/sample)
+        const float LN1000 = 6.907755278982137f; // ln(1000)
+        float Hz = 0.5f * (HzL + HzR);
+        float omega = 2.f * (float)M_PI * Hz;
+        float zeta = jb_gpd_zeta_eval(x, bank, omega);
+        // Convert damping ratio to T60: exp(-zeta*omega*T60) = 1/1000
+        float T60 = (zeta <= 1e-9f) ? 1e9f : (LN1000 / (zeta * omega));
 
         float decay_pitch_mul = bank ? v->decay_pitch_mul2 : v->decay_pitch_mul;
         float decay_vel_mul   = bank ? v->decay_vel_mul2   : v->decay_vel_mul;
@@ -2049,31 +2144,8 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
         T60 *= decay_vel_mul;
         T60 *= cr_decay_mul[i];
 
-        // --- Frequency-based damping ("damper remastered") ---
-        // decay_rate (alpha) = alpha_base + (damper * pow(f_norm, power_law) * alpha_hi_max)
-        // where f_norm is normalized to Nyquist.
-        {
-            const float LN1000 = 6.907755278982137f; // ln(1000)
-            float damper01 = jb_clamp(damping_total, 0.f, 1.f);
-            float slope01  = jb_clamp(jb_bank_slope(x, bank), 0.f, 1.f);
-            float power_law = jb_slope_to_powerlaw(slope01);
-
-            float Hz = 0.5f * (HzL + HzR);
-            float nyq = 0.5f * x->sr;
-            float f_norm = (nyq > 0.f) ? (Hz / nyq) : 0.f;
-            f_norm = jb_clamp(f_norm, 0.f, 1.f);
-
-            float alpha_base = (T60 <= 1e-9f) ? (LN1000 / 1e-9f) : (LN1000 / T60);
-            float alpha_hi_max = LN1000 / JB_DAMP_T60_MIN_S;
-
-            float alpha_add = damper01 * powf(f_norm, power_law) * alpha_hi_max;
-            float alpha_total = alpha_base + alpha_add;
-
-            if (alpha_total < 1e-6f) alpha_total = 1e-6f;
-            T60 = LN1000 / alpha_total;
-        }
-
-        md->t60_s = T60;
+        
+md->t60_s = T60;
 
         float r = (T60 <= 0.f) ? 0.f : powf(10.f, -3.f / (T60 * x->sr));
         float cL=cosf(wL), cR=cosf(wR);
@@ -3326,24 +3398,38 @@ static void juicy_bank_tilde_amps(t_juicy_bank_tilde *x, t_symbol *s, int argc, 
     }
 }
 
-// BODY globals
-static void juicy_bank_tilde_global_decay(t_juicy_bank_tilde *x, t_floatarg f){
-    if (x->edit_bank) x->global_decay2 = jb_clamp(f, 0.f, 1.f);
-    else              x->global_decay  = jb_clamp(f, 0.f, 1.f);
+// BODY (GPD damping anchors)
+// Inlets are floats representing damping ratios (zeta). Recommended range: ~0..0.05
+static void juicy_bank_tilde_gpd1(t_juicy_bank_tilde *x, t_floatarg f){
+    float v = jb_clamp((float)f, 0.f, 0.5f);
+    if (x->edit_bank) { x->gpd_z1_2 = v; x->gpd_dirty2 = 1; }
+    else             { x->gpd_z1   = v; x->gpd_dirty  = 1; }
 }
-static void juicy_bank_tilde_slope(t_juicy_bank_tilde *x, t_floatarg f){
-    if (x->edit_bank) x->slope2 = jb_clamp(f, 0.f, 1.f);
-    else              x->slope  = jb_clamp(f, 0.f, 1.f);
+static void juicy_bank_tilde_gpd2(t_juicy_bank_tilde *x, t_floatarg f){
+    float v = jb_clamp((float)f, 0.f, 0.5f);
+    if (x->edit_bank) { x->gpd_z2_2 = v; x->gpd_dirty2 = 1; }
+    else             { x->gpd_z2   = v; x->gpd_dirty  = 1; }
 }
-// Backward-compat message names (old inlet labels)
-static void juicy_bank_tilde_damp_broad(t_juicy_bank_tilde *x, t_floatarg f){ juicy_bank_tilde_global_decay(x, f); }
-static void juicy_bank_tilde_damp_point(t_juicy_bank_tilde *x, t_floatarg f){ juicy_bank_tilde_slope(x, f); }
+static void juicy_bank_tilde_gpd3(t_juicy_bank_tilde *x, t_floatarg f){
+    float v = jb_clamp((float)f, 0.f, 0.5f);
+    if (x->edit_bank) { x->gpd_z3_2 = v; x->gpd_dirty2 = 1; }
+    else             { x->gpd_z3   = v; x->gpd_dirty  = 1; }
+}
+static void juicy_bank_tilde_gpd_k(t_juicy_bank_tilde *x, t_floatarg f){
+    float v = (float)f;
+    if (v < 0.05f) v = 0.05f;
+    if (v > 6.f)   v = 6.f;
+    if (x->edit_bank) { x->gpd_k_2 = v; x->gpd_dirty2 = 1; }
+    else             { x->gpd_k   = v; x->gpd_dirty  = 1; }
+}
+// Backward-compat message names (old inlet labels) -> map to reasonable GPD equivalents
+static void juicy_bank_tilde_damp_broad(t_juicy_bank_tilde *x, t_floatarg f){ juicy_bank_tilde_gpd2(x, f); }
+static void juicy_bank_tilde_damp_point(t_juicy_bank_tilde *x, t_floatarg f){ juicy_bank_tilde_gpd_k(x, f); }
+// Old method names kept as aliases for external message compatibility:
+static void juicy_bank_tilde_damping(t_juicy_bank_tilde *x, t_floatarg f){ juicy_bank_tilde_gpd3(x, f); }
+static void juicy_bank_tilde_global_decay(t_juicy_bank_tilde *x, t_floatarg f){ juicy_bank_tilde_gpd1(x, f); }
+static void juicy_bank_tilde_slope(t_juicy_bank_tilde *x, t_floatarg f){ juicy_bank_tilde_gpd_k(x, f); }
 
-static void juicy_bank_tilde_damping(t_juicy_bank_tilde *x, t_floatarg f){
-    // 0..1 (frequency-based damping intensity)
-    if (x->edit_bank) x->damping2 = jb_clamp(f, 0.f, 1.f);
-    else              x->damping  = jb_clamp(f, 0.f, 1.f);
-}
 static void juicy_bank_tilde_brightness(t_juicy_bank_tilde *x, t_floatarg f){
     if (x->edit_bank) x->brightness2 = jb_clamp(f, -1.f, 1.f);
     else              x->brightness  = jb_clamp(f, -1.f, 1.f);
@@ -3780,7 +3866,7 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
     inlet_free(x->in_crossring);
     inlet_free(x->in_release);
 
-    inlet_free(x->in_damping); inlet_free(x->in_global_decay); inlet_free(x->in_slope); inlet_free(x->in_brightness);    inlet_free(x->in_density);
+    inlet_free(x->in_gpd1); inlet_free(x->in_gpd2); inlet_free(x->in_gpd3); inlet_free(x->in_gpd_k); inlet_free(x->in_brightness);    inlet_free(x->in_density);
     inlet_free(x->in_warp); inlet_free(x->in_dispersion);
     inlet_free(x->in_offset);
     inlet_free(x->in_collision);
@@ -3862,12 +3948,12 @@ static void jb_apply_default_saw_bank(t_juicy_bank_tilde *x, int bank){
 
     // sensible body defaults (per bank)
     if (!bank){
-        x->damping = 0.f; x->brightness = 0.f; x->global_decay=0.63f; x->slope=0.5f;
+        x->brightness = 0.f; x->gpd_z1 = 0.0030f; x->gpd_z2 = 0.0045f; x->gpd_z3 = 0.0200f; x->gpd_k = 3.f; x->gpd_dirty = 1;
         x->density_amt = 0.f; x->density_mode = DENSITY_PIVOT;
         x->dispersion = 0.f; x->dispersion_last = -1.f;
 x->release_amt = 1.f;
     } else {
-        x->damping2 = 0.f; x->brightness2 = 0.f; x->global_decay2=0.63f; x->slope2=0.5f;
+        x->brightness2 = 0.f; x->gpd_z1_2 = 0.0030f; x->gpd_z2_2 = 0.0045f; x->gpd_z3_2 = 0.0200f; x->gpd_k_2 = 3.f; x->gpd_dirty2 = 1;
         x->density_amt2 = 0.f; x->density_mode2 = DENSITY_PIVOT;
         x->dispersion2 = 0.f; x->dispersion_last2 = -1.f;
 x->release_amt2 = 1.f;
@@ -3887,8 +3973,16 @@ static void *juicy_bank_tilde_new(void){
     jb_apply_default_saw(x);
 
     // body defaults
-    x->damping=0.f; x->brightness=0.f; x->density_amt=0.f; x->density_mode=DENSITY_PIVOT;
+    x->brightness=0.f; x->density_amt=0.f; x->density_mode=DENSITY_PIVOT;
     x->dispersion=0.f; x->dispersion_last=-1.f;
+
+    // GPD damping defaults (zeta anchors + profile)
+    x->gpd_z1 = 0.0030f;  // body (around ~2s @ 200 Hz)
+    x->gpd_z2 = 0.0045f;  // warmth
+    x->gpd_z3 = 0.0200f;  // high damping
+    x->gpd_k  = 3.f;
+    x->gpd_a0 = x->gpd_a1 = x->gpd_a2 = 0.f;
+    x->gpd_dirty = 1;
     x->offset_amt=0.f;
     x->collision_amt=0.f;
 
@@ -3910,9 +4004,14 @@ x->release_amt2   = x->release_amt;
 x->stretch2       = x->stretch;
 x->warp2          = x->warp;
 
-x->damping2       = x->damping;
-x->global_decay2  = x->global_decay;
-x->slope2         = x->slope;
+x->gpd_z1_2       = x->gpd_z1;
+x->gpd_z2_2       = x->gpd_z2;
+x->gpd_z3_2       = x->gpd_z3;
+x->gpd_k_2        = x->gpd_k;
+x->gpd_a0_2       = 0.f;
+x->gpd_a1_2       = 0.f;
+x->gpd_a2_2       = 0.f;
+x->gpd_dirty2     = 1;
 x->brightness2    = x->brightness;
 
 x->density_amt2   = x->density_amt;
@@ -4048,10 +4147,11 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->in_crossring  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("crossring"));
     x->in_release    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("release")); // release 0..1
 
-    // Body (order: damping, brightness, density, dispersion, offset, collision, anisotropy)
-    x->in_damping    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("damping"));
-    x->in_global_decay = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("global_decay"));
-    x->in_slope = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("slope"));
+    // Body (order: gpd1, gpd2, gpd3, gpd_k, brightness, density, dispersion, offset, collision, anisotropy)
+    x->in_gpd1      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("gpd1"));
+    x->in_gpd2      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("gpd2"));
+    x->in_gpd3      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("gpd3"));
+    x->in_gpd_k     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("gpd_k"));
     x->in_brightness = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("brightness"));
     x->in_density    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("density"));
     x->in_stretch    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("stretch"));
@@ -4273,44 +4373,30 @@ static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
 
     // NOTE: SINE pattern is NOT snapshotted (gain-only, runtime mask).
 
-// --- DAMPER bake into base_decay_ms (frequency-based damping + global decay) ---
+// --- GPD bake into base_decay_ms (per-mode frequency-dependent T60) ---
     {
-        float damper01 = jb_clamp(jb_bank_damping(x, bank), 0.f, 1.f);
-        float gdecay01 = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
-        float slope01  = jb_clamp(jb_bank_slope(x, bank), 0.f, 1.f);
-        float power_law = jb_slope_to_powerlaw(slope01);
+        jb_gpd_ensure(x, bank);
+        jb_mode_base_t *base = bank ? x->base2 : x->base;
 
-        if ((damper01 != 0.f || gdecay01 != 0.f) && n_modes > 0){
-            const float LN1000 = 6.907755278982137f;
-            float T60_base = jb_expmap01(gdecay01, JB_GLOBAL_DECAY_MIN_S, JB_GLOBAL_DECAY_MAX_S);
+        float f0_ref = x->basef0_ref;
+        if (f0_ref <= 0.f) f0_ref = 440.f;
 
-            // Use current reference f0 for keytracked modes
-            float f0_ref = x->basef0_ref;
-            if (f0_ref <= 0.f) f0_ref = 440.f;
+        const float LN1000 = 6.907755278982137f;
 
-            for (int i = 0; i < n_modes; ++i){
-                if (!base[i].active) continue;
+        for (int i = 0; i < n_modes; ++i){
+            if (!base[i].active) continue;
 
-                float Hz = base[i].keytrack ? (f0_ref * base[i].base_ratio) : base[i].base_ratio;
-                float nyq = 0.5f * x->sr;
-                float f_norm = (nyq > 0.f) ? (Hz / nyq) : 0.f;
-                f_norm = jb_clamp(f_norm, 0.f, 1.f);
+            float Hz = base[i].keytrack ? (f0_ref * base[i].base_ratio) : base[i].base_ratio;
+            float omega = 2.f * (float)M_PI * Hz;
+            float zeta = jb_gpd_zeta_eval(x, bank, omega);
+            float T60 = (zeta <= 1e-9f) ? 1e9f : (LN1000 / (zeta * omega));
 
-                float alpha_base = LN1000 / jb_clamp(T60_base, 1e-6f, 1e9f);
-                float alpha_hi_max = LN1000 / JB_DAMP_T60_MIN_S;
-
-                float alpha_add = damper01 * powf(f_norm, power_law) * alpha_hi_max;
-                float alpha_total = alpha_base + alpha_add;
-                if (alpha_total < 1e-6f) alpha_total = 1e-6f;
-
-                float T60 = LN1000 / alpha_total;
-                float ms = T60 * 1000.f;
-                if (ms < 1.f) ms = 1.f;
-                base[i].base_decay_ms = ms;
-            }
+            float ms = T60 * 1000.f;
+            if (ms < 1.f) ms = 1.f;
+            base[i].base_decay_ms = ms;
         }
     }
-}
+
 static void juicy_bank_tilde_snapshot_undo(t_juicy_bank_tilde *x){
     if (!x->_undo_valid) return;
 
@@ -4469,14 +4555,19 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_snapshot_undo
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_crossring, gensym("crossring"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_release, gensym("release"), A_DEFFLOAT, 0);
 
-    // BODY
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_damping, gensym("damping"), A_DEFFLOAT, 0);
+    // BODY (GPD damping)
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_gpd1,  gensym("gpd1"),  A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_gpd2,  gensym("gpd2"),  A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_gpd3,  gensym("gpd3"),  A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_gpd_k, gensym("gpd_k"), A_DEFFLOAT, 0);
+    // Backward-compat aliases (kept)
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_damping,      gensym("damping"),      A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_global_decay, gensym("global_decay"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_slope, gensym("slope"), A_DEFFLOAT, 0);
-    // Backward-compat aliases
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_damp_broad, gensym("damp_broad"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_damp_point, gensym("damp_point"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_brightness, gensym("brightness"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_slope,        gensym("slope"),        A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_damp_broad,   gensym("damp_broad"),   A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_damp_point,   gensym("damp_point"),   A_DEFFLOAT, 0);
+
+class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_brightness, gensym("brightness"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_density, gensym("density"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_density_pivot, gensym("density_pivot"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_density_individual, gensym("density_individual"), 0);
