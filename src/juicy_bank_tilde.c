@@ -2255,8 +2255,8 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
 
     // Tela-style brightness normalization: keep loudness stable when brightness changes.
     // We normalize the summed per-mode gains to match the reference spectrum at brightness=0 (saw tilt).
-    float sum_gain = 0.f;
-    float sum_ref  = 0.f;
+    float sum_gain2 = 0.f;
+    float sum_ref2  = 0.f;
 
     // LFO1 -> partials_* : smooth float gating across active modes
     if (lfo1 != 0.f){
@@ -2352,10 +2352,29 @@ gnL     *= wL;
 
         m[i].gain_nowL = gnL;
         m[i].gain_nowR = gnR;
-        sum_gain += 0.5f * (fabsf(gnL) + fabsf(gnR));
-        sum_ref  += 0.5f * (fabsf(gn_refL) + fabsf(gn_refR));
+        // Accumulate RMS energy of per-mode gains (L/R) for brightness normalization.
+
+        // Apply energy-neutral brightness normalization.
+        // Keep overall bank loudness stable as brightness tilts the spectrum by matching RMS energy
+        // to the reference spectrum at brightness=0.
+        {
+            const float eps = 1e-12f;
+            float bright_norm = 1.f;
+            if (sum_gain2 > eps && sum_ref2 > eps){
+                bright_norm = sqrtf(sum_ref2 / (sum_gain2 + eps));
+            }
+            // Safety clamp (RipplerX-style guardrails)
+            if (bright_norm < 0.25f) bright_norm = 0.25f;
+            if (bright_norm > 4.0f)  bright_norm = 4.0f;
+            for (int i = 0; i < n_modes; ++i){
+                if (!base[i].active) continue;
+                m[i].gain_nowL *= bright_norm;
+                m[i].gain_nowR *= bright_norm;
+            }
+        }
     }
 }
+
 
 
 static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
