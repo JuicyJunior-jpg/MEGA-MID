@@ -1822,8 +1822,8 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
 // 0 => linear, 1 => steeper.
     float idx_curve = 1.f + 3.f * slope01_sm;
 
-// Max attenuation of Tau at the highest mode under fully-woody material.
-    const float TAU_ATTN_MAX = 0.95f;
+// RipplerX-style material damping boost (index-based): maximum extra damping multiplier for the highest mode under fully-woody material.
+    const float D_BOOST_MAX = 12.0f;
 
 // Safety normalization: fixed max partial count per bank.
     const float inv_sqrtN = 1.f / sqrtf((float)n_modes);
@@ -1875,50 +1875,64 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
         }
 
         
-                // --- RipplerX resonator coefficients + normalization (baked per block) ---
-// Tau per mode: Tau_i = Tau_base * Material_Factor(index)
-// Woody material (mat_woody=1) shortens higher modes more.
-// NOTE: this is index-based (reference-scaled), so behavior stays consistent across notes.
-        const float theta_eps = 1e-4f;
-        float thetaL = wL;
-        float thetaR = wR;
-        if (thetaL < theta_eps) thetaL = theta_eps;
-        else if (thetaL > (float)M_PI - theta_eps) thetaL = (float)M_PI - theta_eps;
-        if (thetaR < theta_eps) thetaR = theta_eps;
-        else if (thetaR > (float)M_PI - theta_eps) thetaR = (float)M_PI - theta_eps;
+                
+        // --- RipplerX resonator coefficients + normalization (baked per block) ---
+// We keep the user-facing Decay as a time constant (Tau), but the RipplerX resonator math
+// uses a damping coefficient d (seconds) inside R = exp(-pi*f*d/fs).
+// Therefore: d_base ~= 1 / Tau_base (and Decay up => Tau up => d down).
+const float theta_eps = 1e-4f;
+float thetaL = wL;
+float thetaR = wR;
+if (thetaL < theta_eps) thetaL = theta_eps;
+else if (thetaL > (float)M_PI - theta_eps) thetaL = (float)M_PI - theta_eps;
+if (thetaR < theta_eps) thetaR = theta_eps;
+else if (thetaR > (float)M_PI - theta_eps) thetaR = (float)M_PI - theta_eps;
 
-        // Mode index normalized (1..N -> 0..1]
-        float mode_rel = (n_modes > 0) ? ((float)(i + 1) / (float)n_modes) : 1.f;
-        if (mode_rel < 0.f) mode_rel = 0.f;
-        if (mode_rel > 1.f) mode_rel = 1.f;
+// Mode index normalized (1..N -> 0..1]
+float mode_rel = (n_modes > 0) ? ((float)(i + 1) / (float)n_modes) : 1.f;
+if (mode_rel < 0.f) mode_rel = 0.f;
+if (mode_rel > 1.f) mode_rel = 1.f;
 
-        float tau_atten = mat_woody * TAU_ATTN_MAX * powf(mode_rel, idx_curve);
-        if (tau_atten > TAU_ATTN_MAX) tau_atten = TAU_ATTN_MAX;
-        float tau_i = tau_base * (1.f - tau_atten);
-        if (tau_i < 1e-4f) tau_i = 1e-4f;
+// Base damping from global Tau (seconds)
+float d_base = 1.f / (tau_base + 1e-8f);
 
-        // Pole radius from time constant (amplitude ~ exp(-t/tau))
-        float R = expf(-1.f / (x->sr * tau_i));
-        if (R > 0.99999f) R = 0.99999f; else if (R < 0.f) R = 0.f;
+// Material (woody) increases damping for higher modes by index (reference-scaled).
+// Metallic => mat_woody ~ 0 => d_i ~= d_base for all modes.
+float d_boost = mat_woody * D_BOOST_MAX * powf(mode_rel, idx_curve);
+if (d_boost < 0.f) d_boost = 0.f;
+float d_i = d_base * (1.f + d_boost);
 
-        float cL = cosf(thetaL), cR = cosf(thetaR);
-        md->a1L = 2.f * R * cL;
-        md->a2L = -R * R;
-        md->a1R = 2.f * R * cR;
-        md->a2R = -R * R;
+// Safety clamp to avoid infinite gain or R==1
+if (d_i < 1e-5f) d_i = 1e-5f;
 
-        // Energy normalization + decay compensation + safety normalization
-        float gainL = (1.f - R*R) * sinf(thetaL);
-        float gainR = (1.f - R*R) * sinf(thetaR);
+// Pole radii per channel (frequency differs with broadness)
+float RL = expf(-(float)M_PI * HzL * d_i / x->sr);
+float RR = expf(-(float)M_PI * HzR * d_i / x->sr);
+if (RL > 0.99999f) RL = 0.99999f; else if (RL < 0.f) RL = 0.f;
+if (RR > 0.99999f) RR = 0.99999f; else if (RR < 0.f) RR = 0.f;
 
-        // Total_Gain = gain / (sqrt(tau_i) * sqrt(N))
-        float inv_sqrt_tau = 1.f / sqrtf(tau_i);
-        md->normL = gainL * inv_sqrt_tau * inv_sqrtN;
-        md->normR = gainR * inv_sqrt_tau * inv_sqrtN;
+float cL = cosf(thetaL), cR = cosf(thetaR);
+md->a1L = 2.f * RL * cL;
+md->a2L = -RL * RL;
+md->a1R = 2.f * RR * cR;
+md->a2R = -RR * RR;
 
-        // Store an informative decay time (T60 seconds) for metering/debug
-        md->t60_s = 6.907755278982137f * tau_i;
+// Energy normalization (RipplerX): gain = (1 - R^2) * sin(theta)
+float gainL = (1.f - RL*RL) * sinf(thetaL);
+float gainR = (1.f - RR*RR) * sinf(thetaR);
 
+// Total_Gain = gain / (sqrt(d_i) * sqrt(N))
+float inv_sqrt_d = 1.f / sqrtf(d_i);
+md->normL = gainL * inv_sqrt_d * inv_sqrtN;
+md->normR = gainR * inv_sqrt_d * inv_sqrtN;
+
+// Store an informative decay time (T60 seconds) for metering/debug (use average radius)
+{
+    float Ravg = 0.5f * (RL + RR);
+    if (Ravg < 1e-6f) Ravg = 1e-6f;
+    md->t60_s = (logf(0.001f) / logf(Ravg)) / x->sr;
+    if (md->t60_s < 0.f) md->t60_s = 0.f;
+}
         if (bw_amt > 0.f){
             float mode_scale = (n_modes>1)? ((float)i/(float)(n_modes-1)) : 0.f;
             float max_det = 0.0005f + 0.0015f * mode_scale;
@@ -1928,8 +1942,8 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
             float w2R = thetaR * (1.f + detR);
             float c2L = cosf(w2L);
             float c2R = cosf(w2R);
-            md->a1bL = 2.f*R*c2L; md->a2bL = -R*R;
-            md->a1bR = 2.f*R*c2R; md->a2bR = -R*R;
+            md->a1bL = 2.f*RL*c2L; md->a2bL = -RL*RL;
+            md->a1bR = 2.f*RR*c2R; md->a2bR = -RR*RR;
         } else {
             md->a1bL=md->a2bL=0.f; md->a1bR=md->a2bR=0.f;
         }
