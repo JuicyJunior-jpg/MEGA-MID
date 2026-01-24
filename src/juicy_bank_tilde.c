@@ -1,4 +1,3 @@
-
 // juicy_bank~ — modal resonator bank (V5.0)
 // 4-voice poly, true stereo banks, Behavior + Body + Individual inlets.
 // NEW (V5.0):
@@ -1053,19 +1052,15 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
     *outR *= norm;
 }
 // ---------- helpers ----------
-static float jb_bright_gain(float ratio_rel, float b){
-    // Brightness tilt (defines spectral slope):
-    //  - b in [-1,1]
-    //  - b = 0   : saw reference (gain ~ 1/ratio_rel)
-    //  - b = +1  : flat spectrum (all modes ~ equal gain)
-    //  - b = -1  : dark (gain ~ 1/ratio_rel^2)
-    //
-    // Implementation: gain = ratio_rel^(-alpha), alpha = 1 - b
-    //  -> b=-1 => alpha=2 ; b=0 => alpha=1 ; b=+1 => alpha=0
-    float bb = jb_clamp(b, -1.f, 1.f);
-    float rr = jb_clamp(ratio_rel, 1.f, 1e6f);
-    float alpha = 1.f - bb;
-    return powf(rr, -alpha);
+#define JB_TONE_FACTOR_MAX 1.05f  /* Tone factor at brightness=+1 (raised to mode index) */
+static float jb_tone_weight_from_rank(int rank, int N, float tone){
+    (void)N;
+    float t = jb_clamp(tone, -1.f, 1.f);
+    int n = rank + 1;   // 1..N
+    if (n < 1) n = 1;
+    // Tone_Factor in [1/JB_TONE_FACTOR_MAX, JB_TONE_FACTOR_MAX]
+    float tone_factor = powf(JB_TONE_FACTOR_MAX, t);
+    return powf(tone_factor, (float)n);
 }
 // ---------- density mapping ----------
 // Only keytracked modes are spread by density; absolute-Hz modes keep base_ratio.
@@ -1816,21 +1811,21 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
     v->rip_slope01_sm[bank]    = slope01_sm;
 
     // Internal RipplerX damping coefficient d_base (smaller = longer ring).
-    // UI Decay (0..1): 0=short -> larger d, 1=long -> smaller d.
-    const float d_min = 1e-5f;
-    const float d_max = 0.10f;
-    float d_base = d_max * powf(d_min / d_max, decay01_sm);
-    if (d_base < d_min) d_base = d_min;
-    if (d_base > d_max) d_base = d_max;
+    // UI Decay (0..1) -> Global time constant Tau (seconds), RipplerX-style.
+// 0 = short, 1 = long.
+    float tau_base = jb_expmap01(decay01_sm, JB_GLOBAL_DECAY_MIN_S, JB_GLOBAL_DECAY_MAX_S);
 
-    // Material frequency-dependent damping coefficient b3.
-    // Used in: d_i = d_base + b3 * (f_norm^2)^curve
-    const float b3_max = 1.0f;
-    float b3 = b3_max * mat01_sm;
-    // Slope curves the frequency-squared term: curve in [0.5..2.0] => exponent in [1..4] on f_norm.
-    float f2_curve = 0.5f + 1.5f * slope01_sm;
+// Damping/Material amount (0..1): 0=woody (more HF damping), 1=metallic (less HF damping).
+    float mat_woody = 1.f - mat01_sm;
 
-    // Safety normalization: fixed max partial count per bank.
+// Slope now curves the index-based term.
+// 0 => linear, 1 => steeper.
+    float idx_curve = 1.f + 3.f * slope01_sm;
+
+// Max attenuation of Tau at the highest mode under fully-woody material.
+    const float TAU_ATTN_MAX = 0.95f;
+
+// Safety normalization: fixed max partial count per bank.
     const float inv_sqrtN = 1.f / sqrtf((float)n_modes);
 
 
@@ -1875,12 +1870,15 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
             md->a1L=md->a2L=md->a1bL=md->a2bL=0.f;
             md->a1R=md->a2R=md->a1bR=md->a2bR=0.f;
             md->normL = md->normR = 1.f;
+            md->t60_s = 0.f;
+            continue;
         }
 
         
                 // --- RipplerX resonator coefficients + normalization (baked per block) ---
-        // d_i is a damping coefficient (smaller -> longer ring), not "T60 seconds".
-        // d_i = d_base + (b3 * f_norm^2)
+// Tau per mode: Tau_i = Tau_base * Material_Factor(index)
+// Woody material (mat_woody=1) shortens higher modes more.
+// NOTE: this is index-based (reference-scaled), so behavior stays consistent across notes.
         const float theta_eps = 1e-4f;
         float thetaL = wL;
         float thetaR = wR;
@@ -1889,32 +1887,37 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
         if (thetaR < theta_eps) thetaR = theta_eps;
         else if (thetaR > (float)M_PI - theta_eps) thetaR = (float)M_PI - theta_eps;
 
-        float f_normL = (x->sr > 0.f) ? (HzL / x->sr) : 0.f;
-        float f_normR = (x->sr > 0.f) ? (HzR / x->sr) : 0.f;
-        float f2L = f_normL * f_normL;
-        float f2R = f_normR * f_normR;
-        float dL = d_base + b3 * powf(f2L, f2_curve);
-        float dR = d_base + b3 * powf(f2R, f2_curve);
-        if (dL < 1e-5f) dL = 1e-5f;
-        if (dR < 1e-5f) dR = 1e-5f;
+        // Mode index normalized (1..N -> 0..1]
+        float mode_rel = (n_modes > 0) ? ((float)(i + 1) / (float)n_modes) : 1.f;
+        if (mode_rel < 0.f) mode_rel = 0.f;
+        if (mode_rel > 1.f) mode_rel = 1.f;
 
-        float RL = expf(-(float)M_PI * HzL * dL / x->sr);
-        float RR = expf(-(float)M_PI * HzR * dR / x->sr);
-        // Safety clamps (RipplerX behavior)
-        if (RL > 0.99999f) RL = 0.99999f; else if (RL < 0.f) RL = 0.f;
-        if (RR > 0.99999f) RR = 0.99999f; else if (RR < 0.f) RR = 0.f;
+        float tau_atten = mat_woody * TAU_ATTN_MAX * powf(mode_rel, idx_curve);
+        if (tau_atten > TAU_ATTN_MAX) tau_atten = TAU_ATTN_MAX;
+        float tau_i = tau_base * (1.f - tau_atten);
+        if (tau_i < 1e-4f) tau_i = 1e-4f;
+
+        // Pole radius from time constant (amplitude ~ exp(-t/tau))
+        float R = expf(-1.f / (x->sr * tau_i));
+        if (R > 0.99999f) R = 0.99999f; else if (R < 0.f) R = 0.f;
 
         float cL = cosf(thetaL), cR = cosf(thetaR);
-        md->a1L = 2.f * RL * cL;
-        md->a2L = -RL * RL;
-        md->a1R = 2.f * RR * cR;
-        md->a2R = -RR * RR;
+        md->a1L = 2.f * R * cL;
+        md->a2L = -R * R;
+        md->a1R = 2.f * R * cR;
+        md->a2R = -R * R;
 
-        // Energy normalization term (b0) + decay compensation + safety normalization
-        float gainL = (1.f - RL*RL) * sinf(thetaL);
-        float gainR = (1.f - RR*RR) * sinf(thetaR);
-        md->normL = gainL * (1.f / sqrtf(dL)) * inv_sqrtN;
-        md->normR = gainR * (1.f / sqrtf(dR)) * inv_sqrtN;
+        // Energy normalization + decay compensation + safety normalization
+        float gainL = (1.f - R*R) * sinf(thetaL);
+        float gainR = (1.f - R*R) * sinf(thetaR);
+
+        // Total_Gain = gain / (sqrt(tau_i) * sqrt(N))
+        float inv_sqrt_tau = 1.f / sqrtf(tau_i);
+        md->normL = gainL * inv_sqrt_tau * inv_sqrtN;
+        md->normR = gainR * inv_sqrt_tau * inv_sqrtN;
+
+        // Store an informative decay time (T60 seconds) for metering/debug
+        md->t60_s = 6.907755278982137f * tau_i;
 
         if (bw_amt > 0.f){
             float mode_scale = (n_modes>1)? ((float)i/(float)(n_modes-1)) : 0.f;
@@ -2072,12 +2075,13 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
             continue;
         }
 
-        float ratio = m[i].ratio_now + disp_offset[i];
-        float ratio_rel = base[i].keytrack ? ratio : ((v->f0>0.f)? (ratio / v->f0) : ratio);
+        // RipplerX Tone-style weighting (index-based): Initial_Amplitude_n = Base_Amplitude_n * (Tone_Factor ^ n)
+// brightness_v is in [-1..1].
+        float g = base[i].base_gain * jb_tone_weight_from_rank(i, n_modes, brightness_v);
 
-        float g = base[i].base_gain * jb_bright_gain(ratio_rel, brightness_v);
+        // Reference (Tone=0) => Tone_Factor^n == 1
+        float g_ref = base[i].base_gain;
 
-        float g_ref = base[i].base_gain * jb_bright_gain(ratio_rel, 0.f);
         float w = 1.f;
 
         float gn = g * w;
