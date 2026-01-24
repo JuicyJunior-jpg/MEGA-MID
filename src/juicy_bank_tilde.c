@@ -1118,7 +1118,7 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
 
     // fast silent path (env off + no active pulses)
     if (e->env.stage == JB_EXC_ENV_IDLE && e->pulseL.samples_left<=0 && e->pulseR.samples_left<=0){
-        *outL = 0.f;
+    *outL = 0.f;
         *outR = 0.f;
         return;
     }
@@ -1139,8 +1139,8 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
     colL = jb_exc_hp1_run(&e->hpL, colL);
     colR = jb_exc_hp1_run(&e->hpR, colR);
 
-    float yL = colL * env * e->vel_on * e->gainL;
-    float yR = colR * env * e->vel_on * e->gainR;
+    float yL = colL * env * e->gainL;
+    float yR = colR * env * e->gainR;
 
     // ---------- IMPULSE BRANCH (shape affects impulse only) ----------
     float pL = jb_exc_pulse_next(&e->pulseL);
@@ -1149,36 +1149,7 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
     // Impulse is NOT governed by the exciter ADSR (noise is). We still scale by velocity and per-voice micro-variation.
     pL *= e->vel_on * e->gainL;
     pR *= e->vel_on * e->gainR;
-
-    // --- Loudness matching: impulse branch gain follows noise branch (pre-resonator) ---
-    {
-        float p_noise = 0.5f * (yL*yL + yR*yR);
-        float p_imp   = 0.5f * (pL*pL + pR*pR);
-
-        e->pwr_noise = a_pwr * e->pwr_noise + one_minus_a_pwr * p_noise;
-        e->pwr_imp   = a_pwr * e->pwr_imp   + one_minus_a_pwr * p_imp;
-
-        const float eps = 1e-12f;
-        float rms_noise = sqrtf(e->pwr_noise + eps);
-        float rms_imp   = sqrtf(e->pwr_imp   + eps);
-
-        float target = e->imp_match;
-        if (rms_noise > 1e-7f && rms_imp > 1e-7f){
-            target = rms_noise / rms_imp;
-        }
-
-        const float kMin = 0.125f;
-        const float kMax = 8.0f;
-        if (target < kMin) target = kMin;
-        if (target > kMax) target = kMax;
-
-        e->imp_match = a_match * e->imp_match + one_minus_a_match * target;
-
-        pL *= e->imp_match;
-        pR *= e->imp_match;
-    }
-
-        *outL = w_noise * (yL * x->noise_scale) + w_imp * (pL * x->impulse_scale);
+    *outL = w_noise * (yL * x->noise_scale) + w_imp * (pL * x->impulse_scale);
     *outR = w_noise * (yR * x->noise_scale) + w_imp * (pR * x->impulse_scale);
 
     // RipplerX excitation impulse normalization:
@@ -2789,10 +2760,21 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
         // (Coupling removed) Both banks are always excited by the internal exciter and always summed to the output.
     // Internal exciter mix weights (computed once per block)
-    float exc_f = jb_clamp(x->exc_fader, -1.f, 1.f);
-    float exc_t = 0.5f * (exc_f + 1.f);
-    float exc_w_imp   = sinf(0.5f * (float)M_PI * exc_t);
-    float exc_w_noise = cosf(0.5f * (float)M_PI * exc_t);
+    // exc_fader supports:
+    //   • 0..1  (recommended): 0=impulse, 1=noise
+    //   • -1..1 (legacy): -1=noise, +1=impulse
+    float exc_f = x->exc_fader;
+    float exc_t;
+    if (exc_f < 0.f){
+        // legacy mapping: old t was impulse mix; convert to noise mix
+        float t_imp = 0.5f * (jb_clamp(exc_f, -1.f, 1.f) + 1.f);
+        exc_t = 1.f - t_imp;
+    }else{
+        exc_t = jb_clamp(exc_f, 0.f, 1.f);
+    }
+    // Equal-power crossfade
+    float exc_w_noise = sinf(0.5f * (float)M_PI * exc_t);
+    float exc_w_imp   = cosf(0.5f * (float)M_PI * exc_t);
     // Pressure (reuses former density inlet): feedback-loop AGC target level (0..0.98)
     const float pressure = jb_clamp(x->exc_density, 0.f, 1.f);
     const float fb_target = 0.98f * pressure;
