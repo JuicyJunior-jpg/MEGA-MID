@@ -579,6 +579,7 @@ typedef struct {
     // RipplerX-style parameter smoothing (per voice, per bank)
     float rip_decay01_sm[2];   // smoothed 0..1 UI decay (inverse -> internal damping)
     float rip_material01_sm[2]; // smoothed 0..1 material/damper (frequency-dependent damping)
+    float bright_comp[2];      // RipplerX-style Tone/Brightness loudness compensation (sum-normalized)
 
 // Feedback loop state (per voice, per bank, 1-sample delayed)
     // Each bank ONLY feeds back its own output.
@@ -2255,8 +2256,8 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
 
     // Tela-style brightness normalization: keep loudness stable when brightness changes.
     // We normalize the summed per-mode gains to match the reference spectrum at brightness=0 (saw tilt).
-    float sum_gain2 = 0.f;
-    float sum_ref2  = 0.f;
+    float sum_gain = 0.f;
+    float sum_ref  = 0.f;
 
     // LFO1 -> partials_* : smooth float gating across active modes
     if (lfo1 != 0.f){
@@ -2352,29 +2353,23 @@ gnL     *= wL;
 
         m[i].gain_nowL = gnL;
         m[i].gain_nowR = gnR;
-        // Accumulate RMS energy of per-mode gains (L/R) for brightness normalization.
-
-        // Apply energy-neutral brightness normalization.
-        // Keep overall bank loudness stable as brightness tilts the spectrum by matching RMS energy
-        // to the reference spectrum at brightness=0.
-        {
-            const float eps = 1e-12f;
-            float bright_norm = 1.f;
-            if (sum_gain2 > eps && sum_ref2 > eps){
-                bright_norm = sqrtf(sum_ref2 / (sum_gain2 + eps));
-            }
-            // Safety clamp (RipplerX-style guardrails)
-            if (bright_norm < 0.25f) bright_norm = 0.25f;
-            if (bright_norm > 4.0f)  bright_norm = 4.0f;
-            for (int i = 0; i < n_modes; ++i){
-                if (!base[i].active) continue;
-                m[i].gain_nowL *= bright_norm;
-                m[i].gain_nowR *= bright_norm;
-            }
-        }
+        sum_gain += 0.5f * (fabsf(gnL) + fabsf(gnR));
+        sum_ref  += 0.5f * (fabsf(gn_refL) + fabsf(gn_refR));
     }
-}
 
+    // RipplerX Tone/Brightness compensation:
+    // Compute total energy as SUM of partial gains (not RMS) and apply a global factor C so that
+    // Energy(brightness=0) matches Energy(current brightness).
+    // C = (Energy at Neutral) / (Energy at Current Tone)
+    float comp = 1.f;
+    if (sum_gain > 1e-12f){
+        comp = sum_ref / (sum_gain + 1e-12f);
+        // Safety clamp (prevents insane boosts when most modes are muted)
+        if (comp < 0.125f) comp = 0.125f;
+        if (comp > 8.f)    comp = 8.f;
+    }
+    v->bright_comp[bank] = comp;
+}
 
 
 static void jb_update_voice_gains(const t_juicy_bank_tilde *x, jb_voice_t *v){
@@ -2400,6 +2395,8 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
     v->rip_decay01_sm[1] = jb_clamp(jb_bank_global_decay(x, 1), 0.f, 1.f);
     v->rip_material01_sm[0] = jb_clamp(jb_bank_damping(x, 0), 0.f, 1.f);
     v->rip_material01_sm[1] = jb_clamp(jb_bank_damping(x, 1), 0.f, 1.f);
+    v->bright_comp[0] = 1.f;
+    v->bright_comp[1] = 1.f;
     v->energy = 0.f;
 
     // Internal exciter reset (note-on reset + voice-steal reset)
@@ -3096,6 +3093,14 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     md->y1R=y1R; md->y2R=y2R; md->y1bR=y1bR; md->y2bR=y2bR; md->driveR=driveR; md->envR=envR;                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
                 }
             }
+            // RipplerX Tone/Brightness loudness compensation is applied at the BANK output stage.
+            float bc1 = v->bright_comp[0];
+            float bc2 = v->bright_comp[1];
+            if (!jb_isfinitef(bc1) || bc1 <= 0.f) bc1 = 1.f;
+            if (!jb_isfinitef(bc2) || bc2 <= 0.f) bc2 = 1.f;
+            b1OutL *= bc1; b1OutR *= bc1;
+            b2OutL *= bc2; b2OutR *= bc2;
+
             // Final per-voice sum (pre-space)
             float vOutL = b1OutL + b2OutL;
             float vOutR = b1OutR + b2OutR;
