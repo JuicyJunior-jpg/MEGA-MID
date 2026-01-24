@@ -1928,8 +1928,8 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
             float w2R = thetaR * (1.f + detR);
             float c2L = cosf(w2L);
             float c2R = cosf(w2R);
-            md->a1bL = 2.f*RL*c2L; md->a2bL = -RL*RL;
-            md->a1bR = 2.f*RR*c2R; md->a2bR = -RR*RR;
+            md->a1bL = 2.f*R*c2L; md->a2bL = -R*R;
+            md->a1bR = 2.f*R*c2R; md->a2bR = -R*R;
         } else {
             md->a1bL=md->a2bL=0.f; md->a1bR=md->a2bR=0.f;
         }
