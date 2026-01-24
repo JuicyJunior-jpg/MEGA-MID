@@ -416,11 +416,6 @@ typedef struct {
     jb_exc_pulse_t pulseL, pulseR;
 
     float gainL, gainR;
-
-    // Exciter branch loudness matching (noise vs impulse) - per voice.
-    float pwr_noise;
-    float pwr_imp;
-    float imp_match;
 } jb_exc_voice_t;
 
 static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long seed_base){
@@ -446,11 +441,6 @@ static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long se
     v->mallet_stiff_eff = 0.f;
     v->gainL = 1.f;
     v->gainR = 1.f;
-
-    // branch matching state
-    v->pwr_noise = 0.f;
-    v->pwr_imp   = 0.f;
-    v->imp_match = 1.f;
     // NOTE: old exciter noise diffusion (all-pass cascade) removed.
 }
 
@@ -470,11 +460,6 @@ static inline void jb_exc_voice_reset_runtime(jb_exc_voice_t *e){
     // pulses
     e->pulseL.samples_left = 0; e->pulseL.n = 0.f;
     e->pulseR.samples_left = 0; e->pulseR.n = 0.f;
-
-    // branch matching state
-    e->pwr_noise = 0.f;
-    e->pwr_imp   = 0.f;
-    e->imp_match = 1.f;
 
 
     // filter memories
@@ -538,21 +523,12 @@ typedef struct {
     float mod_env;      // 0..1
     float mod_env_last; // cached for modulation source
     int   mod_env_stage; // 0=off,1=attack,2=decay,3=sustain,4=release
-
     // projected behavior (per voice) — BANK 1
-    float pitch_x;
     float brightness_v;
     float bandwidth_v;
-    float decay_pitch_mul;
-    float decay_vel_mul;
-    float stiffen_add;
-
     // projected behavior — BANK 2
     float brightness_v2;
     float bandwidth_v2;
-    float decay_pitch_mul2;
-    float decay_vel_mul2;
-    float stiffen_add2;
 
     // sympathetic multipliers — BANK 1
     float cr_gain_mul[JB_MAX_MODES];
@@ -579,6 +555,7 @@ typedef struct {
     // RipplerX-style parameter smoothing (per voice, per bank)
     float rip_decay01_sm[2];   // smoothed 0..1 UI decay (inverse -> internal damping)
     float rip_material01_sm[2]; // smoothed 0..1 material/damper (frequency-dependent damping)
+    float rip_slope01_sm[2];   // smoothed 0..1 slope shaping of the f^2 material term
     float bright_comp[2];      // RipplerX-style Tone/Brightness loudness compensation (sum-normalized)
 
 // Feedback loop state (per voice, per bank, 1-sample delayed)
@@ -1107,8 +1084,6 @@ static inline float jb_softclip_thresh(float x, float threshold){
 static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
                                          jb_voice_t *v,
                                          float w_imp, float w_noise,
-                                         float a_pwr, float one_minus_a_pwr,
-                                         float a_match, float one_minus_a_match,
                                          float *outL, float *outR)
 {
     jb_exc_voice_t *e = &v->exc;
@@ -1550,38 +1525,14 @@ static void jb_apply_collision_generic(int n_modes, const jb_mode_base_t *base, 
 
 // ---------- behavior projection ----------
 static void jb_project_behavior_into_voice_bank(t_juicy_bank_tilde *x, jb_voice_t *v, int bank){
-    float xfac = (x->basef0_ref>0.f)? (v->f0 / x->basef0_ref) : 1.f;
-    if (xfac < 1e-6f) xfac = 1e-6f;
-    v->pitch_x = xfac;
-
     const jb_mode_base_t *base = jb_bank_base(x, bank);
     int n_modes = jb_bank_nmodes(x, bank);
 
-    float stiffen_amt = jb_bank_stiffen_amt(x, bank);
-    float shortscale_amt = jb_bank_shortscale_amt(x, bank);
-    float linger_amt = jb_bank_linger_amt(x, bank);
-    float bloom_amt = jb_bank_bloom_amt(x, bank);
+    float *brightness_v_p = bank ? &v->brightness_v2 : &v->brightness_v;
+    float *bandwidth_v_p  = bank ? &v->bandwidth_v2  : &v->bandwidth_v;
+    float *disp_target_p  = bank ? v->disp_target2   : v->disp_target;
 
-    float *stiffen_add_p      = bank ? &v->stiffen_add2      : &v->stiffen_add;
-    float *decay_pitch_mul_p  = bank ? &v->decay_pitch_mul2  : &v->decay_pitch_mul;
-    float *decay_vel_mul_p    = bank ? &v->decay_vel_mul2    : &v->decay_vel_mul;
-    float *brightness_v_p     = bank ? &v->brightness_v2     : &v->brightness_v;
-    float *bandwidth_v_p      = bank ? &v->bandwidth_v2      : &v->bandwidth_v;
-    float *disp_target_p      = bank ? v->disp_target2       : v->disp_target;
-
-    // Stiffen → extra dispersion depth
-    float k_disp = (0.02f + 0.10f * jb_clamp(stiffen_amt,0.f,1.f));
-    float alpha  = 0.60f + 0.20f * stiffen_amt;
-    *stiffen_add_p = k_disp * powf(xfac, alpha);
-
-    // Shortscale → decays shorten with pitch
-    float beta = 0.40f + 0.50f * shortscale_amt;
-    *decay_pitch_mul_p = powf(xfac, -beta);
-
-    // Linger → velocity extends decays
-    *decay_vel_mul_p = (1.f + (0.30f + 1.20f * linger_amt) * jb_clamp(v->vel,0.f,1.f));
-
-    // Brightness: user-controlled
+    // Brightness: user-controlled (-1..1), with optional LFO1 modulation.
     {
         const t_symbol *lfo1_tgt = x->lfo_target[0];
         const float lfo1 = x->lfo_val[0] * x->lfo_amt_v[0];
@@ -1593,24 +1544,21 @@ static void jb_project_behavior_into_voice_bank(t_juicy_bank_tilde *x, jb_voice_
         }
         *brightness_v_p = b;
     }
-    // Bloom → bandwidth
+
+    // Bloom → bandwidth (velocity sensitive)
+    float bloom_amt = jb_bank_bloom_amt(x, bank);
     float baseBW = jb_bank_bandwidth_base(x, bank);
     float addBW  = (0.15f + 0.45f * bloom_amt) * jb_clamp(v->vel,0.f,1.f);
     *bandwidth_v_p = jb_clamp(baseBW + addBW, 0.f, 1.f);
 
-    // per-mode dispersion targets (ignore fundamental)
-    float disp_base = jb_clamp(jb_bank_dispersion(x, bank), 0.f, 1.f);
-    // LFO1 dispersion modulation removed (not a supported target anymore).
-    float total_disp = jb_clamp(disp_base + *stiffen_add_p, 0.f, 1.f);
-float *disp_last_p = jb_bank_dispersion_last(x, bank);
-    if (*disp_last_p < 0.f){ *disp_last_p = -1.f; }
-
+    // Per-mode dispersion targets currently disabled (quantize-only mode).
     for(int i=0;i<n_modes;i++){
-        // Quantize-only mode: we no longer apply dispersion-based random ratio offsets.
-        // Keep targets at 0 so disp_offset remains 0.
         disp_target_p[i] = 0.f;
     }
+
+    (void)base; // silence unused warning if base isn't referenced elsewhere
 }
+
 static void jb_project_behavior_into_voice(t_juicy_bank_tilde *x, jb_voice_t *v){
     jb_project_behavior_into_voice_bank(x, v, 0);
 }
@@ -1988,12 +1936,19 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
 
     float decay01_tgt = jb_clamp(broad_total, 0.f, 1.f);
     float mat01_tgt   = jb_clamp(damping_total, 0.f, 1.f);
-    float decay01_sm = v->rip_decay01_sm[bank];
-    float mat01_sm   = v->rip_material01_sm[bank];
+    float slope01_tgt = jb_clamp(jb_bank_slope(x, bank), 0.f, 1.f);
+
+    float decay01_sm  = v->rip_decay01_sm[bank];
+    float mat01_sm    = v->rip_material01_sm[bank];
+    float slope01_sm  = v->rip_slope01_sm[bank];
+
     decay01_sm = a_rip * decay01_sm + one_minus_a_rip * decay01_tgt;
     mat01_sm   = a_rip * mat01_sm   + one_minus_a_rip * mat01_tgt;
-    v->rip_decay01_sm[bank] = decay01_sm;
+    slope01_sm = a_rip * slope01_sm + one_minus_a_rip * slope01_tgt;
+
+    v->rip_decay01_sm[bank]    = decay01_sm;
     v->rip_material01_sm[bank] = mat01_sm;
+    v->rip_slope01_sm[bank]    = slope01_sm;
 
     // Internal RipplerX damping coefficient d_base (smaller = longer ring).
     // UI Decay (0..1): 0=short -> larger d, 1=long -> smaller d.
@@ -2004,9 +1959,11 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
     if (d_base > d_max) d_base = d_max;
 
     // Material frequency-dependent damping coefficient b3.
-    // Used in: d_i = d_base + b3 * f_norm^2
+    // Used in: d_i = d_base + b3 * (f_norm^2)^curve
     const float b3_max = 1.0f;
     float b3 = b3_max * mat01_sm;
+    // Slope curves the frequency-squared term: curve in [0.5..2.0] => exponent in [1..4] on f_norm.
+    float f2_curve = 0.5f + 1.5f * slope01_sm;
 
     // Safety normalization: fixed max partial count per bank.
     const float inv_sqrtN = 1.f / sqrtf((float)n_modes);
@@ -2069,8 +2026,10 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
 
         float f_normL = (x->sr > 0.f) ? (HzL / x->sr) : 0.f;
         float f_normR = (x->sr > 0.f) ? (HzR / x->sr) : 0.f;
-        float dL = d_base + b3 * (f_normL * f_normL);
-        float dR = d_base + b3 * (f_normR * f_normR);
+        float f2L = f_normL * f_normL;
+        float f2R = f_normR * f_normR;
+        float dL = d_base + b3 * powf(f2L, f2_curve);
+        float dR = d_base + b3 * powf(f2R, f2_curve);
         if (dL < 1e-5f) dL = 1e-5f;
         if (dR < 1e-5f) dR = 1e-5f;
 
@@ -2366,6 +2325,8 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
     v->rip_decay01_sm[1] = jb_clamp(jb_bank_global_decay(x, 1), 0.f, 1.f);
     v->rip_material01_sm[0] = jb_clamp(jb_bank_damping(x, 0), 0.f, 1.f);
     v->rip_material01_sm[1] = jb_clamp(jb_bank_damping(x, 1), 0.f, 1.f);
+    v->rip_slope01_sm[0] = jb_clamp(jb_bank_slope(x, 0), 0.f, 1.f);
+    v->rip_slope01_sm[1] = jb_clamp(jb_bank_slope(x, 1), 0.f, 1.f);
     v->bright_comp[0] = 1.f;
     v->bright_comp[1] = 1.f;
     v->energy = 0.f;
@@ -2804,13 +2765,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     const float one_minus_a_energy = 1.f - a_energy;
     const float tail_energy_thresh = 1e-6f;
 
-    // Exciter loudness matching (noise vs impulse) is done pre-resonator.
-    // We use an RMS follower for each branch and then smooth the gain ratio.
-    const float a_exc_pwr = expf(-1.0f / (x->sr * 0.030f));   // 30ms power follower
-    const float one_minus_a_exc_pwr = 1.f - a_exc_pwr;
-    const float a_exc_match = expf(-1.0f / (x->sr * 0.100f)); // 100ms gain smoothing
-    const float one_minus_a_exc_match = 1.f - a_exc_match;
-
     // Per-block updates that don't change sample-phase
     for(int vix=0; vix<x->total_voices; ++vix){
         jb_voice_t *v = &x->v[vix];
@@ -2961,8 +2915,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             float ex0L = 0.f, ex0R = 0.f;
             jb_exc_process_sample(x, v,
                                  exc_w_imp, exc_w_noise,
-                                 a_exc_pwr, one_minus_a_exc_pwr,
-                                 a_exc_match, one_minus_a_exc_match,
                                  &ex0L, &ex0R);
             ex0L = jb_kill_denorm(ex0L);
             ex0R = jb_kill_denorm(ex0R);
