@@ -1346,9 +1346,10 @@ static inline float jb_bank_damp_point(const t_juicy_bank_tilde *x, int bank){ r
 #endif
 
 static void jb_gpd_solve_bank(t_juicy_bank_tilde *x, int bank){
-    float z1 = jb_clamp(jb_bank_gpd_z1(x, bank), 0.f, 0.5f);
-    float z2 = jb_clamp(jb_bank_gpd_z2(x, bank), 0.f, 0.5f);
-    float z3 = jb_clamp(jb_bank_gpd_z3(x, bank), 0.f, 0.5f);
+    // zetas here are already mapped to sensible ranges by the inlet handlers
+    float z1 = jb_clamp(jb_bank_gpd_z1(x, bank), 0.f, 0.2f);
+    float z2 = jb_clamp(jb_bank_gpd_z2(x, bank), 0.f, 0.2f);
+    float z3 = jb_clamp(jb_bank_gpd_z3(x, bank), 0.f, 0.2f);
     float k  = jb_bank_gpd_k(x, bank);
     if (k < 0.05f) k = 0.05f;
     if (k > 6.f)   k = 6.f;
@@ -1424,7 +1425,8 @@ static inline float jb_gpd_zeta_eval(const t_juicy_bank_tilde *x, int bank, floa
     float k  = jb_bank_gpd_k(x, bank);
     float z = 0.5f * (a0/omega + a1*omega + a2*powf(omega, k));
     if (!isfinite(z) || z < 0.f) z = 0.f;
-    if (z > 0.5f) z = 0.5f;
+    // Keep a sane upper bound. Larger values make everything die instantly.
+    if (z > 0.2f) z = 0.2f;
     return z;
 }
 static inline float jb_bank_brightness(const t_juicy_bank_tilde *x, int bank){
@@ -3399,19 +3401,52 @@ static void juicy_bank_tilde_amps(t_juicy_bank_tilde *x, t_symbol *s, int argc, 
 }
 
 // BODY (GPD damping anchors)
-// Inlets are floats representing damping ratios (zeta). Recommended range: ~0..0.05
+//
+// IMPORTANT (usability): Pd dials typically output 0..1. If we interpret that as a
+// *direct* damping ratio (zeta), the result is extremely overdamped (very short decay)
+// because T60 = ln(1000) / (zeta * omega).
+//
+// Therefore, the 3 anchor inlets (gpd1/gpd2/gpd3) accept **0..1 normalized** values
+// and we map them to zeta on a log scale:
+//   zeta = exp( ln(zmin) + u * (ln(zmax)-ln(zmin)) )
+//
+// Advanced: if you send a value > 1.0, we treat it as a **direct zeta**.
+//
+// Defaults are chosen to ring longer than the previous build.
+
+#ifndef JB_GPD_ZETA_MIN
+#define JB_GPD_ZETA_MIN 1e-6f
+#endif
+#ifndef JB_GPD_ZETA_MAX
+#define JB_GPD_ZETA_MAX 2e-2f
+#endif
+
+static inline float jb_gpd_map_norm_to_zeta(float u){
+    u = jb_clamp(u, 0.f, 1.f);
+    const float zmin = JB_GPD_ZETA_MIN;
+    const float zmax = JB_GPD_ZETA_MAX;
+    // log-space interpolation
+    return expf(logf(zmin) + u * (logf(zmax) - logf(zmin)));
+}
+
+static inline float jb_gpd_param_to_zeta(float f){
+    if (!isfinite(f)) return 0.f;
+    if (f <= 1.f) return jb_gpd_map_norm_to_zeta(f);
+    // direct zeta (power-user)
+    return jb_clamp(f, 0.f, 0.2f);
+}
 static void juicy_bank_tilde_gpd1(t_juicy_bank_tilde *x, t_floatarg f){
-    float v = jb_clamp((float)f, 0.f, 0.5f);
+    float v = jb_gpd_param_to_zeta((float)f);
     if (x->edit_bank) { x->gpd_z1_2 = v; x->gpd_dirty2 = 1; }
     else             { x->gpd_z1   = v; x->gpd_dirty  = 1; }
 }
 static void juicy_bank_tilde_gpd2(t_juicy_bank_tilde *x, t_floatarg f){
-    float v = jb_clamp((float)f, 0.f, 0.5f);
+    float v = jb_gpd_param_to_zeta((float)f);
     if (x->edit_bank) { x->gpd_z2_2 = v; x->gpd_dirty2 = 1; }
     else             { x->gpd_z2   = v; x->gpd_dirty  = 1; }
 }
 static void juicy_bank_tilde_gpd3(t_juicy_bank_tilde *x, t_floatarg f){
-    float v = jb_clamp((float)f, 0.f, 0.5f);
+    float v = jb_gpd_param_to_zeta((float)f);
     if (x->edit_bank) { x->gpd_z3_2 = v; x->gpd_dirty2 = 1; }
     else             { x->gpd_z3   = v; x->gpd_dirty  = 1; }
 }
@@ -3948,12 +3983,13 @@ static void jb_apply_default_saw_bank(t_juicy_bank_tilde *x, int bank){
 
     // sensible body defaults (per bank)
     if (!bank){
-        x->brightness = 0.f; x->gpd_z1 = 0.0030f; x->gpd_z2 = 0.0045f; x->gpd_z3 = 0.0200f; x->gpd_k = 3.f; x->gpd_dirty = 1;
+        // Longer, more playable defaults (these are direct zetas, not 0..1 knobs)
+        x->brightness = 0.f; x->gpd_z1 = 0.0012f; x->gpd_z2 = 0.0007f; x->gpd_z3 = 0.00025f; x->gpd_k = 0.6f; x->gpd_dirty = 1;
         x->density_amt = 0.f; x->density_mode = DENSITY_PIVOT;
         x->dispersion = 0.f; x->dispersion_last = -1.f;
 x->release_amt = 1.f;
     } else {
-        x->brightness2 = 0.f; x->gpd_z1_2 = 0.0030f; x->gpd_z2_2 = 0.0045f; x->gpd_z3_2 = 0.0200f; x->gpd_k_2 = 3.f; x->gpd_dirty2 = 1;
+        x->brightness2 = 0.f; x->gpd_z1_2 = 0.0012f; x->gpd_z2_2 = 0.0007f; x->gpd_z3_2 = 0.00025f; x->gpd_k_2 = 0.6f; x->gpd_dirty2 = 1;
         x->density_amt2 = 0.f; x->density_mode2 = DENSITY_PIVOT;
         x->dispersion2 = 0.f; x->dispersion_last2 = -1.f;
 x->release_amt2 = 1.f;
@@ -3977,10 +4013,10 @@ static void *juicy_bank_tilde_new(void){
     x->dispersion=0.f; x->dispersion_last=-1.f;
 
     // GPD damping defaults (zeta anchors + profile)
-    x->gpd_z1 = 0.0030f;  // body (around ~2s @ 200 Hz)
-    x->gpd_z2 = 0.0045f;  // warmth
-    x->gpd_z3 = 0.0200f;  // high damping
-    x->gpd_k  = 3.f;
+    x->gpd_z1 = 0.0012f;  // body (longer ring)
+    x->gpd_z2 = 0.0007f;  // warmth (mid)
+    x->gpd_z3 = 0.00025f; // high damping (air)
+    x->gpd_k  = 0.6f;     // tube-ish profile, gentler HF loss
     x->gpd_a0 = x->gpd_a1 = x->gpd_a2 = 0.f;
     x->gpd_dirty = 1;
     x->offset_amt=0.f;
