@@ -4356,12 +4356,12 @@ static void juicy_bank_tilde_index_backward(t_juicy_bank_tilde *x){
     if (x->out_index) outlet_float(x->out_index, (t_float)(*edit_idx_p + 1));
 }
 
-// ---------- SNAPSHOT: bake current SINE mask into base gains and DAMPER into base decays ----------
+// ---------- SNAPSHOT: undo checkpoint for base gains/decays (does NOT bake damping) ----------
 static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
     // Snapshot applies to the *selected* bank (x->edit_bank), and undo restores that same bank.
+    // IMPORTANT: GPD damping (anchors/k) is NOT snapshotted. Snapshot is an undo checkpoint only.
     int bank = x->edit_bank ? 1 : 0;
     jb_mode_base_t *base = bank ? x->base2 : x->base;
-    int n_modes = bank ? x->n_modes2 : x->n_modes;
 
     // Save undo of base fields (gain + decay) for that bank.
     for (int i = 0; i < JB_MAX_MODES; ++i){
@@ -4370,32 +4370,7 @@ static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
     }
     x->_undo_valid = 1;
     x->_undo_bank  = bank;
-
-    // NOTE: SINE pattern is NOT snapshotted (gain-only, runtime mask).
-
-// --- GPD bake into base_decay_ms (per-mode frequency-dependent T60) ---
-    {
-        jb_gpd_ensure(x, bank);
-        jb_mode_base_t *base = bank ? x->base2 : x->base;
-
-        float f0_ref = x->basef0_ref;
-        if (f0_ref <= 0.f) f0_ref = 440.f;
-
-        const float LN1000 = 6.907755278982137f;
-
-        for (int i = 0; i < n_modes; ++i){
-            if (!base[i].active) continue;
-
-            float Hz = base[i].keytrack ? (f0_ref * base[i].base_ratio) : base[i].base_ratio;
-            float omega = 2.f * (float)M_PI * Hz;
-            float zeta = jb_gpd_zeta_eval(x, bank, omega);
-            float T60 = (zeta <= 1e-9f) ? 1e9f : (LN1000 / (zeta * omega));
-
-            float ms = T60 * 1000.f;
-            if (ms < 1.f) ms = 1.f;
-            base[i].base_decay_ms = ms;
-        }
-    }
+}
 
 static void juicy_bank_tilde_snapshot_undo(t_juicy_bank_tilde *x){
     if (!x->_undo_valid) return;
