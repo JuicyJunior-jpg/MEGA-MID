@@ -1829,6 +1829,8 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
     const float inv_sqrtN = 1.f / sqrtf((float)n_modes);
 
 
+
+    int n_eff = 0; // effective (non-Nyquist) active mode count for this voice+bank
     for(int i=0;i<n_modes;i++){
         jb_mode_rt_t *md=&m[i];
         if(!base[i].active){
@@ -1869,12 +1871,13 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
         if (md->nyq_kill){
             md->a1L=md->a2L=md->a1bL=md->a2bL=0.f;
             md->a1R=md->a2R=md->a1bR=md->a2bR=0.f;
-            md->normL = md->normR = 1.f;
+            md->normL = md->normR = 0.f;
             md->t60_s = 0.f;
             continue;
         }
 
         
+        n_eff++;
                 // --- RipplerX resonator coefficients + normalization (baked per block) ---
 // Tau per mode: Tau_i = Tau_base * Material_Factor(index)
 // Woody material (mat_woody=1) shortens higher modes more.
@@ -1897,7 +1900,27 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
         float tau_i = tau_base * (1.f - tau_atten);
         if (tau_i < 1e-4f) tau_i = 1e-4f;
 
-        // Pole radius from time constant (amplitude ~ exp(-t/tau))
+        // Real-time DAMPER: frequency-dependent damping (more damping toward Nyquist),
+        // shaped by SLOPE (power-law). This is applied at runtime (no snapshot required).
+        {
+            const float LN1000 = 6.907755278982137f;
+            float damper01 = jb_clamp(mat01_sm, 0.f, 1.f);
+            float power_law = jb_slope_to_powerlaw(slope01_sm);
+            float nyq = 0.5f * x->sr;
+            float Hz_max = (HzL > HzR) ? HzL : HzR;
+            float f_norm = (nyq > 0.f) ? (Hz_max / nyq) : 0.f;
+            f_norm = jb_clamp(f_norm, 0.f, 1.f);
+
+            float alpha = 1.f / tau_i; // alpha = 1/tau  (since tau = T60/LN1000)
+            float alpha_hi_max = LN1000 / JB_DAMP_T60_MIN_S; // max added damping at Nyquist
+            alpha += damper01 * powf(f_norm, power_law) * alpha_hi_max;
+
+            if (alpha < 1e-6f) alpha = 1e-6f;
+            tau_i = 1.f / alpha;
+            if (tau_i < 1e-4f) tau_i = 1e-4f;
+        }
+
+        // Pole radius from time constant (amplitude ~ exp(-t/tau)) from time constant (amplitude ~ exp(-t/tau))
         float R = expf(-1.f / (x->sr * tau_i));
         if (R > 0.99999f) R = 0.99999f; else if (R < 0.f) R = 0.f;
 
@@ -1910,15 +1933,21 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
         // Energy normalization:
         // Use sqrt(1 - R^2) so perceived loudness stays much more stable when decay/tau changes.
         // (Older versions used (1-R^2) * (1/sqrt(tau)), which attenuated long decays far too much.)
-        float one_minus_r2 = fmaxf(1.f - R*R, 0.f);
-        float gainL = sqrtf(one_minus_r2) * sinf(thetaL);
-        float gainR = sqrtf(one_minus_r2) * sinf(thetaR);
+                // Normalization: keep perceived loudness more stable across *frequency* and *decay*.
+        // We use the resonator denominator term |1 - R·e^{-jw}|^2 = (1 - 2R cos(w) + R^2),
+        // but apply a gentler exponent (sqrt) so long decays don't "lose punch" too aggressively.
+        float denomL = 1.f - 2.f*R*cosf(wL) + R*R;
+        float denomR = 1.f - 2.f*R*cosf(wR) + R*R;
+        if (denomL < 1e-9f) denomL = 1e-9f;
+        if (denomR < 1e-9f) denomR = 1e-9f;
 
-        // Safety normalization across number of modes
-        md->normL = gainL * inv_sqrtN;
-        md->normR = gainR * inv_sqrtN;
+        float gainL = sqrtf(denomL);
+        float gainR = sqrtf(denomR);
 
-        // Store an informative decay time (T60 seconds) for metering/debug
+        // We'll apply per-bank "mode count" normalization after we know how many modes survive Nyquist.
+        md->normL = gainL;
+        md->normR = gainR;
+// Store an informative decay time (T60 seconds) for metering/debug
         md->t60_s = 6.907755278982137f * tau_i;
 
         if (bw_amt > 0.f){
@@ -1936,6 +1965,17 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
             md->a1bL=md->a2bL=0.f; md->a1bR=md->a2bR=0.f;
         }
     }
+    // Normalize by the *effective* number of audible modes for this voice+bank.
+    // This prevents high notes (where more modes hit Nyquist) from sounding artificially quieter.
+    int n_eff_safe = (n_eff > 0) ? n_eff : 1;
+    float inv_sqrtN_eff = 1.f / sqrtf((float)n_eff_safe);
+    for (int i = 0; i < n_modes; ++i){
+        jb_mode_rt_t *md = &m[i];
+        if (!base[i].active || md->nyq_kill) continue;
+        md->normL *= inv_sqrtN_eff;
+        md->normR *= inv_sqrtN_eff;
+    }
+
 }
 static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
     jb_update_voice_coeffs_bank(x, v, 0);
@@ -4078,43 +4118,10 @@ static void juicy_bank_tilde_snapshot(t_juicy_bank_tilde *x){
 
     // NOTE: SINE pattern is NOT snapshotted (gain-only, runtime mask).
 
-// --- DAMPER bake into base_decay_ms (frequency-based damping + global decay) ---
-    {
-        float damper01 = jb_clamp(jb_bank_damping(x, bank), 0.f, 1.f);
-        float gdecay01 = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
-        float slope01  = jb_clamp(jb_bank_slope(x, bank), 0.f, 1.f);
-        float power_law = jb_slope_to_powerlaw(slope01);
 
-        if ((damper01 != 0.f || gdecay01 != 0.f) && n_modes > 0){
-            const float LN1000 = 6.907755278982137f;
-            float T60_base = jb_expmap01(gdecay01, JB_GLOBAL_DECAY_MIN_S, JB_GLOBAL_DECAY_MAX_S);
+    // DAMPER is now applied in real time inside jb_update_voice_coeffs_bank(),
+    // so snapshot only bakes the SINE gain mask (no decay baking).
 
-            // Use current reference f0 for keytracked modes
-            float f0_ref = x->basef0_ref;
-            if (f0_ref <= 0.f) f0_ref = 440.f;
-
-            for (int i = 0; i < n_modes; ++i){
-                if (!base[i].active) continue;
-
-                float Hz = base[i].keytrack ? (f0_ref * base[i].base_ratio) : base[i].base_ratio;
-                float nyq = 0.5f * x->sr;
-                float f_norm = (nyq > 0.f) ? (Hz / nyq) : 0.f;
-                f_norm = jb_clamp(f_norm, 0.f, 1.f);
-
-                float alpha_base = LN1000 / jb_clamp(T60_base, 1e-6f, 1e9f);
-                float alpha_hi_max = LN1000 / JB_DAMP_T60_MIN_S;
-
-                float alpha_add = damper01 * powf(f_norm, power_law) * alpha_hi_max;
-                float alpha_total = alpha_base + alpha_add;
-                if (alpha_total < 1e-6f) alpha_total = 1e-6f;
-
-                float T60 = LN1000 / alpha_total;
-                float ms = T60 * 1000.f;
-                if (ms < 1.f) ms = 1.f;
-                base[i].base_decay_ms = ms;
-            }
-        }
-    }
 }
 static void juicy_bank_tilde_snapshot_undo(t_juicy_bank_tilde *x){
     if (!x->_undo_valid) return;
