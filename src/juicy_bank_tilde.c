@@ -575,7 +575,12 @@ typedef struct {
     float rel_env2;
 
 
-    // Feedback loop state (per voice, per bank, 1-sample delayed)
+    
+    // RipplerX-style parameter smoothing (per voice, per bank)
+    float rip_decay01_sm[2];   // smoothed 0..1 UI decay (inverse -> internal damping)
+    float rip_material01_sm[2]; // smoothed 0..1 material/damper (frequency-dependent damping)
+
+// Feedback loop state (per voice, per bank, 1-sample delayed)
     // Each bank ONLY feeds back its own output.
     float fb_prevL[2], fb_prevR[2];         // last bank output (pre-space), L/R
     float fb_hp_x1L[2], fb_hp_y1L[2];       // 20Hz DC-blocker state (L)
@@ -2002,6 +2007,39 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
 
     float disp = jb_bank_dispersion(x, bank);
 
+    // ---- RipplerX-style smoothing + damping-coefficient mapping (per block) ----
+    // RipplerX ramps Decay/Material params to avoid clicks with high-Q resonators.
+    // We smooth at control-rate (per DSP block), not per-sample.
+    const float rip_tau = 0.030f; // 30ms smoothing
+    const float a_rip = expf(-1.0f / (x->sr * rip_tau));
+    const float one_minus_a_rip = 1.f - a_rip;
+
+    float decay01_tgt = jb_clamp(broad_total, 0.f, 1.f);
+    float mat01_tgt   = jb_clamp(damping_total, 0.f, 1.f);
+    float decay01_sm = v->rip_decay01_sm[bank];
+    float mat01_sm   = v->rip_material01_sm[bank];
+    decay01_sm = a_rip * decay01_sm + one_minus_a_rip * decay01_tgt;
+    mat01_sm   = a_rip * mat01_sm   + one_minus_a_rip * mat01_tgt;
+    v->rip_decay01_sm[bank] = decay01_sm;
+    v->rip_material01_sm[bank] = mat01_sm;
+
+    // Internal RipplerX damping coefficient d_base (smaller = longer ring).
+    // UI Decay (0..1): 0=short -> larger d, 1=long -> smaller d.
+    const float d_min = 1e-5f;
+    const float d_max = 0.10f;
+    float d_base = d_max * powf(d_min / d_max, decay01_sm);
+    if (d_base < d_min) d_base = d_min;
+    if (d_base > d_max) d_base = d_max;
+
+    // Material frequency-dependent damping coefficient b3.
+    // Used in: d_i = d_base + b3 * f_norm^2
+    const float b3_max = 1.0f;
+    float b3 = b3_max * mat01_sm;
+
+    // Safety normalization: fixed max partial count per bank.
+    const float inv_sqrtN = 1.f / sqrtf((float)n_modes);
+
+
     for(int i=0;i<n_modes;i++){
         jb_mode_rt_t *md=&m[i];
         if(!base[i].active){
@@ -2046,95 +2084,49 @@ float broad_base   = jb_clamp(jb_bank_global_decay(x, bank), 0.f, 1.f);
         }
 
         
-        // --- Global decay (base T60) ---
-        // NOTE: global_decay sets the baseline decay for ALL modes (uniform), before frequency-based damping.
-        float gdecay01 = jb_clamp(broad_total, 0.f, 1.f);
-        float T60 = jb_expmap01(gdecay01, JB_GLOBAL_DECAY_MIN_S, JB_GLOBAL_DECAY_MAX_S);
+                // --- RipplerX resonator coefficients + normalization (baked per block) ---
+        // d_i is a damping coefficient (smaller -> longer ring), not "T60 seconds".
+        // d_i = d_base + (b3 * f_norm^2)
+        const float theta_eps = 1e-4f;
+        float thetaL = wL;
+        float thetaR = wR;
+        if (thetaL < theta_eps) thetaL = theta_eps;
+        else if (thetaL > (float)M_PI - theta_eps) thetaL = (float)M_PI - theta_eps;
+        if (thetaR < theta_eps) thetaR = theta_eps;
+        else if (thetaR > (float)M_PI - theta_eps) thetaR = (float)M_PI - theta_eps;
 
-        float decay_pitch_mul = bank ? v->decay_pitch_mul2 : v->decay_pitch_mul;
-        float decay_vel_mul   = bank ? v->decay_vel_mul2   : v->decay_vel_mul;
+        float f_normL = (x->sr > 0.f) ? (HzL / x->sr) : 0.f;
+        float f_normR = (x->sr > 0.f) ? (HzR / x->sr) : 0.f;
+        float dL = d_base + b3 * (f_normL * f_normL);
+        float dR = d_base + b3 * (f_normR * f_normR);
+        if (dL < 1e-5f) dL = 1e-5f;
+        if (dR < 1e-5f) dR = 1e-5f;
 
-        T60 *= decay_pitch_mul;
-        T60 *= decay_vel_mul;
-        T60 *= cr_decay_mul[i];
+        float RL = expf(-(float)M_PI * HzL * dL / x->sr);
+        float RR = expf(-(float)M_PI * HzR * dR / x->sr);
+        // Safety clamps (RipplerX behavior)
+        if (RL > 0.99999f) RL = 0.99999f; else if (RL < 0.f) RL = 0.f;
+        if (RR > 0.99999f) RR = 0.99999f; else if (RR < 0.f) RR = 0.f;
 
-        // --- Frequency-based damping ("damper remastered") ---
-        // decay_rate (alpha) = alpha_base + (damper * pow(f_norm, power_law) * alpha_hi_max)
-        // where f_norm is normalized to Nyquist.
-        {
-            const float LN1000 = 6.907755278982137f; // ln(1000)
-            float damper01 = jb_clamp(damping_total, 0.f, 1.f);
-            float slope01  = jb_clamp(jb_bank_slope(x, bank), 0.f, 1.f);
-            float power_law = jb_slope_to_powerlaw(slope01);
+        float cL = cosf(thetaL), cR = cosf(thetaR);
+        md->a1L = 2.f * RL * cL;
+        md->a2L = -RL * RL;
+        md->a1R = 2.f * RR * cR;
+        md->a2R = -RR * RR;
 
-            float Hz = 0.5f * (HzL + HzR);
-            float nyq = 0.5f * x->sr;
-            float f_norm = (nyq > 0.f) ? (Hz / nyq) : 0.f;
-            f_norm = jb_clamp(f_norm, 0.f, 1.f);
+        // Energy normalization term (b0) + decay compensation + safety normalization
+        float gainL = (1.f - RL*RL) * sinf(thetaL);
+        float gainR = (1.f - RR*RR) * sinf(thetaR);
+        md->normL = gainL * (1.f / sqrtf(dL)) * inv_sqrtN;
+        md->normR = gainR * (1.f / sqrtf(dR)) * inv_sqrtN;
 
-            float alpha_base = (T60 <= 1e-9f) ? (LN1000 / 1e-9f) : (LN1000 / T60);
-            float alpha_hi_max = LN1000 / JB_DAMP_T60_MIN_S;
-
-            float alpha_add = damper01 * powf(f_norm, power_law) * alpha_hi_max;
-            float alpha_total = alpha_base + alpha_add;
-
-            if (alpha_total < 1e-6f) alpha_total = 1e-6f;
-            T60 = LN1000 / alpha_total;
-        }
-
-        md->t60_s = T60;
-
-        // --- RipplerX resonator coefficients + normalization ---
-// In RipplerX:
-//   * UI "Decay" up -> internal damping coefficient d down (inverse mapping).
-//   * d is a per-partial damping coefficient (smaller = longer ring).
-//   * R = exp(-pi * f * d / fs)
-//   * gain = (1 - R^2) * sin(theta)
-//   * Total_Gain = gain / (sqrt(d) * sqrt(N)), with N fixed at 64.
-//
-// Our engine maintains a per-mode decay time in seconds as md->t60_s (after all damping logic).
-// To match RipplerX behavior, we map decay-time -> damping coefficient via d = 1 / T.
-float T = jb_clamp(md->t60_s, 0.01f, 10.f); // seconds (RipplerX typical)
-float d = 1.f / T;                          // damping coefficient (smaller = longer ring)
-d = jb_clamp(d, 0.1f, 100.f);               // implied by T clamp above (1/10 .. 1/0.01)
-
-// R = exp(-pi * f * d / fs)
-float RL = expf(-(float)M_PI * HzL * d / x->sr);
-float RR = expf(-(float)M_PI * HzR * d / x->sr);
-if (RL > 0.999999f) RL = 0.999999f; else if (RL < 0.f) RL = 0.f;
-if (RR > 0.999999f) RR = 0.999999f; else if (RR < 0.f) RR = 0.f;
-
-// Resonator coefficients:
-// a1 = 2 * R * cos(theta)
-// a2 = -R^2
-float cL = cosf(wL), cR = cosf(wR);
-md->a1L = 2.f * RL * cL;
-md->a2L = -RL * RL;
-md->a1R = 2.f * RR * cR;
-md->a2R = -RR * RR;
-
-// Per-resonator input gain (b0):
-// gain = (1 - R^2) * sin(theta)
-float gainL = (1.f - RL*RL) * sinf(wL);
-float gainR = (1.f - RR*RR) * sinf(wR);
-
-// Decay-to-amplitude compensation (RipplerX):
-// Amplitude_Scale = 1 / sqrt(d)
-float amp_scale = 1.f / sqrtf(d);
-
-// Safety normalization (RipplerX, fixed N=64):
-const float inv_sqrtN = 1.f / sqrtf(64.f);
-
-// Total_Gain = gain / (sqrt(d) * sqrt(N))
-md->normL = gainL * amp_scale * inv_sqrtN;
-md->normR = gainR * amp_scale * inv_sqrtN;
         if (bw_amt > 0.f){
             float mode_scale = (n_modes>1)? ((float)i/(float)(n_modes-1)) : 0.f;
             float max_det = 0.0005f + 0.0015f * mode_scale;
             float detL = jb_clamp(md->bw_hit_ratioL, -max_det, max_det) * bw_amt;
             float detR = jb_clamp(md->bw_hit_ratioR, -max_det, max_det) * bw_amt;
-            float w2L = wL * (1.f + detL);
-            float w2R = wR * (1.f + detR);
+            float w2L = thetaL * (1.f + detL);
+            float w2R = thetaR * (1.f + detR);
             float c2L = cosf(w2L);
             float c2R = cosf(w2R);
             md->a1bL = 2.f*RL*c2L; md->a2bL = -RL*RL;
@@ -2383,6 +2375,12 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
     }
     v->rel_env  = 1.f;
     v->rel_env2 = 1.f;
+
+    // Init RipplerX-style smoothing states from current params
+    v->rip_decay01_sm[0] = jb_clamp(jb_bank_global_decay(x, 0), 0.f, 1.f);
+    v->rip_decay01_sm[1] = jb_clamp(jb_bank_global_decay(x, 1), 0.f, 1.f);
+    v->rip_material01_sm[0] = jb_clamp(jb_bank_damping(x, 0), 0.f, 1.f);
+    v->rip_material01_sm[1] = jb_clamp(jb_bank_damping(x, 1), 0.f, 1.f);
     v->energy = 0.f;
 
     // Internal exciter reset (note-on reset + voice-steal reset)
