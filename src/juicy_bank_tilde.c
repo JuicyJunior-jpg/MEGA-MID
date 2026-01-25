@@ -2117,18 +2117,22 @@ md->t60_s = T60;
 
         md->a1L=2.f*r*cL; md->a2L=-r*r;
         md->a1R=2.f*r*cR; md->a2R=-r*r;
-        // --- Injection normalization (physically-meaningful) ---
-        // IMPORTANT: We do *not* scale excitation by decay.
-        // In earlier versions, b0 depended on r (e.g. (1-r) or sqrt(1-r^2)), which
-        // makes lightly-damped (long T60, r→1) modes *quieter* than heavily-damped ones.
-        // That is the opposite of what a physical resonator does for the same strike.
+        // --- Resonator peak normalization (0 dB at center frequency) ---
+        // Our per‑mode resonator is an all‑pole 2nd order section:
+        //   y[n] = a1*y[n-1] + a2*y[n-2] + norm*x[n]
+        // with poles at r·e^{±jw0} (a1 = 2 r cos(w0), a2 = -r^2).
+        // The peak gain grows as r→1 (long T60), which can make long decays painfully loud
+        // and short decays feel comparatively quiet. We normalize the *drive* so that
+        // |H(e^{jw0})| ≈ 1 for any r.
         //
-        // Here we treat the exciter as an applied force/drive and keep per-mode injection
-        // independent of damping. All decay differences come purely from the pole radius r.
-        // Any loudness sculpting should be done with per-mode gains (gain_nowL/R), pickup
-        // position, and brightness shaping — not by punishing long decays.
-        md->normL = 1.f;
-        md->normR = 1.f;
+        // Denominator: D(z) = 1 - a1 z^{-1} - a2 z^{-2} = (1 - r e^{j w0} z^{-1})(1 - r e^{-j w0} z^{-1})
+        // => |D(e^{j w0})| = (1 - r) * |1 - r e^{-j 2 w0}| = (1 - r) * sqrt(1 + r^2 - 2 r cos(2 w0))
+        float denL = (1.f - r) * sqrtf(1.f + r*r - 2.f*r*cosf(2.f*wL));
+        float denR = (1.f - r) * sqrtf(1.f + r*r - 2.f*r*cosf(2.f*wR));
+        if (denL < 1e-12f) denL = 1e-12f;
+        if (denR < 1e-12f) denR = 1e-12f;
+        md->normL = denL;
+        md->normR = denR;
 
         if (bw_amt > 0.f){
             float mode_scale = (n_modes>1)? ((float)i/(float)(n_modes-1)) : 0.f;
