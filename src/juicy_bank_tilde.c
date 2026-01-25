@@ -2131,8 +2131,24 @@ md->t60_s = T60;
         float denR = (1.f - r) * sqrtf(1.f + r*r - 2.f*r*cosf(2.f*wR));
         if (denL < 1e-12f) denL = 1e-12f;
         if (denR < 1e-12f) denR = 1e-12f;
-        md->normL = denL;
-        md->normR = denR;
+        // --- Energy / impact normalization ---
+        // Peak normalization (den*) keeps |H(e^{jw0})| ≈ 1, but short-decay (heavy damping) modes can still
+        // feel overly "poppy/aggressive" compared to long-decay modes. We apply a physically-motivated
+        // additional scaling based on the per-sample damping rate.
+        //
+        // Define a damping-rate proxy (bandwidth-like quantity): d = -ln(r)  (≈ 1-r when r ~ 1).
+        // Larger d => heavier damping (shorter decay). We scale drive by ~1/sqrt(d) (clamped) so heavily
+        // damped modes contribute less "impact" while long-decay modes are not punished.
+        const float JB_DAMP_DREF = 1.0e-4f;  // reference damping rate (tuned for musical T60 range)
+        const float JB_DAMP_EPS  = 1.0e-12f;
+        float r_safe = jb_clamp(r, 1.0e-12f, 0.99999994f);
+        float d = -logf(r_safe); // positive
+        float energy_scale = sqrtf(JB_DAMP_DREF / (d + JB_DAMP_EPS));
+        // Keep sane: avoid reintroducing "ear killer" long-decay boosting or making short decays vanish.
+        energy_scale = jb_clamp(energy_scale, 0.25f, 2.0f);
+
+        md->normL = denL * energy_scale;
+        md->normR = denR * energy_scale;
 
         if (bw_amt > 0.f){
             float mode_scale = (n_modes>1)? ((float)i/(float)(n_modes-1)) : 0.f;
