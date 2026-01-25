@@ -2117,38 +2117,32 @@ md->t60_s = T60;
 
         md->a1L=2.f*r*cL; md->a2L=-r*r;
         md->a1R=2.f*r*cR; md->a2R=-r*r;
-        // --- Resonator peak normalization (0 dB at center frequency) ---
-        // Our per‑mode resonator is an all‑pole 2nd order section:
-        //   y[n] = a1*y[n-1] + a2*y[n-2] + norm*x[n]
-        // with poles at r·e^{±jw0} (a1 = 2 r cos(w0), a2 = -r^2).
-        // The peak gain grows as r→1 (long T60), which can make long decays painfully loud
-        // and short decays feel comparatively quiet. We normalize the *drive* so that
-        // |H(e^{jw0})| ≈ 1 for any r.
-        //
-        // Denominator: D(z) = 1 - a1 z^{-1} - a2 z^{-2} = (1 - r e^{j w0} z^{-1})(1 - r e^{-j w0} z^{-1})
-        // => |D(e^{j w0})| = (1 - r) * |1 - r e^{-j 2 w0}| = (1 - r) * sqrt(1 + r^2 - 2 r cos(2 w0))
-        float denL = (1.f - r) * sqrtf(1.f + r*r - 2.f*r*cosf(2.f*wL));
-        float denR = (1.f - r) * sqrtf(1.f + r*r - 2.f*r*cosf(2.f*wR));
-        if (denL < 1e-12f) denL = 1e-12f;
-        if (denR < 1e-12f) denR = 1e-12f;
-        // --- Energy / impact normalization ---
-        // Peak normalization (den*) keeps |H(e^{jw0})| ≈ 1, but short-decay (heavy damping) modes can still
-        // feel overly "poppy/aggressive" compared to long-decay modes. We apply a physically-motivated
-        // additional scaling based on the per-sample damping rate.
-        //
-        // Define a damping-rate proxy (bandwidth-like quantity): d = -ln(r)  (≈ 1-r when r ~ 1).
-        // Larger d => heavier damping (shorter decay). We scale drive by ~1/sqrt(d) (clamped) so heavily
-        // damped modes contribute less "impact" while long-decay modes are not punished.
-        const float JB_DAMP_DREF = 1.0e-4f;  // reference damping rate (tuned for musical T60 range)
-        const float JB_DAMP_EPS  = 1.0e-12f;
-        float r_safe = jb_clamp(r, 1.0e-12f, 0.99999994f);
-        float d = -logf(r_safe); // positive
-        float energy_scale = sqrtf(JB_DAMP_DREF / (d + JB_DAMP_EPS));
-        // Keep sane: avoid reintroducing "ear killer" long-decay boosting or making short decays vanish.
-        energy_scale = jb_clamp(energy_scale, 0.25f, 2.0f);
+        // Scaling Factor normalization (frequency + decay-aware, constant-energy target):
+// The old choice:
+//   b0 = (1 - r) * sqrt(1 + r^2 - 2 r cos(2 w0))
+// normalizes the *steady-state sinusoid* gain at resonance (|H(e^{jw0})|=1),
+// which makes long decays (r→1) inject very little energy for burst/noise exciters.
+//
+// For burst/noise excitation, a better perceptual target is roughly constant injected
+// power/energy vs decay. Replace (1 - r) with sqrt(1 - r^2).
+float tL = 1.f + r*r - 2.f*r*cosf(2.f*wL);
+float tR = 1.f + r*r - 2.f*r*cosf(2.f*wR);
+if (tL < 0.f) tL = 0.f;
+if (tR < 0.f) tR = 0.f;
 
-        md->normL = denL * energy_scale;
-        md->normR = denR * energy_scale;
+float qL = 1.f - r*r;
+float qR = 1.f - r*r;
+if (qL < 0.f) qL = 0.f;
+if (qR < 0.f) qR = 0.f;
+
+float b0L = sqrtf(qL) * sqrtf(tL);
+float b0R = sqrtf(qR) * sqrtf(tR);
+
+if (b0L < 1e-9f) b0L = 1e-9f;
+if (b0R < 1e-9f) b0R = 1e-9f;
+
+md->normL = b0L;
+md->normR = b0R;
 
         if (bw_amt > 0.f){
             float mode_scale = (n_modes>1)? ((float)i/(float)(n_modes-1)) : 0.f;
