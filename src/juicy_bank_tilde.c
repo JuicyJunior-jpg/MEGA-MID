@@ -2117,32 +2117,18 @@ md->t60_s = T60;
 
         md->a1L=2.f*r*cL; md->a2L=-r*r;
         md->a1R=2.f*r*cR; md->a2R=-r*r;
-        // Scaling Factor normalization (frequency + decay-aware, constant-energy target):
-// The old choice:
-//   b0 = (1 - r) * sqrt(1 + r^2 - 2 r cos(2 w0))
-// normalizes the *steady-state sinusoid* gain at resonance (|H(e^{jw0})|=1),
-// which makes long decays (r→1) inject very little energy for burst/noise exciters.
-//
-// For burst/noise excitation, a better perceptual target is roughly constant injected
-// power/energy vs decay. Replace (1 - r) with sqrt(1 - r^2).
-float tL = 1.f + r*r - 2.f*r*cosf(2.f*wL);
-float tR = 1.f + r*r - 2.f*r*cosf(2.f*wR);
-if (tL < 0.f) tL = 0.f;
-if (tR < 0.f) tR = 0.f;
-
-float qL = 1.f - r*r;
-float qR = 1.f - r*r;
-if (qL < 0.f) qL = 0.f;
-if (qR < 0.f) qR = 0.f;
-
-float b0L = sqrtf(qL) * sqrtf(tL);
-float b0R = sqrtf(qR) * sqrtf(tR);
-
-if (b0L < 1e-9f) b0L = 1e-9f;
-if (b0R < 1e-9f) b0R = 1e-9f;
-
-md->normL = b0L;
-md->normR = b0R;
+        // --- Injection normalization (physically-meaningful) ---
+        // IMPORTANT: We do *not* scale excitation by decay.
+        // In earlier versions, b0 depended on r (e.g. (1-r) or sqrt(1-r^2)), which
+        // makes lightly-damped (long T60, r→1) modes *quieter* than heavily-damped ones.
+        // That is the opposite of what a physical resonator does for the same strike.
+        //
+        // Here we treat the exciter as an applied force/drive and keep per-mode injection
+        // independent of damping. All decay differences come purely from the pole radius r.
+        // Any loudness sculpting should be done with per-mode gains (gain_nowL/R), pickup
+        // position, and brightness shaping — not by punishing long decays.
+        md->normL = 1.f;
+        md->normR = 1.f;
 
         if (bw_amt > 0.f){
             float mode_scale = (n_modes>1)? ((float)i/(float)(n_modes-1)) : 0.f;
