@@ -1356,7 +1356,7 @@ static void jb_gpd_solve_bank(t_juicy_bank_tilde *x, int bank){
     const float W3 = 2.f * (float)M_PI * JB_GPD_F3_HZ;
 
     float A[3][4] = {
-        { 1.f/W1, W1, powf(W1, k), 2.f*z1 },
+        { 1.f/W1, W1, (W1*W1*W1), 2.f*z1 },
         { 1.f/W2, W2, (W2*W2*W2), 2.f*z2 },
         { 1.f/W3, W3, (W3*W3*W3), 2.f*z3 }
     };
