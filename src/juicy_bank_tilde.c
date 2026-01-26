@@ -2094,55 +2094,64 @@ float md_amt = jb_clamp(jb_bank_micro_detune(x, bank),0.f,1.f);
 
         
                 // --- GPD damping baseline (frequency-dependent) ---
-        // omega is rad/sec (not rad/sample)
+        // omega is rad/sec (not rad/sample).
+        // IMPORTANT: We recompute damping (T60 -> r) from the *current* mode frequency.
+        // When L/R frequencies differ (micro-detune / stereo offsets), we compute r per ear.
         const float LN1000 = 6.907755278982137f; // ln(1000)
-        float Hz = 0.5f * (HzL + HzR);
-        float omega = 2.f * (float)M_PI * Hz;
-        float zeta = jb_bell_zeta_eval(x, bank, omega);
-        // Convert damping ratio to T60: exp(-zeta*omega*T60) = 1/1000
-        float T60 = (zeta <= 1e-9f) ? 1e9f : (LN1000 / (zeta * omega));
 
         float decay_pitch_mul = bank ? v->decay_pitch_mul2 : v->decay_pitch_mul;
         float decay_vel_mul   = bank ? v->decay_vel_mul2   : v->decay_vel_mul;
 
-        T60 *= decay_pitch_mul;
-        T60 *= decay_vel_mul;
-        T60 *= cr_decay_mul[i];
+        // LEFT
+        float omegaL = 2.f * (float)M_PI * HzL;
+        float zetaL  = (omegaL > 1e-9f) ? jb_bell_zeta_eval(x, bank, omegaL) : 0.f;
+        float T60L   = (zetaL <= 1e-9f || omegaL <= 1e-9f) ? 1e9f : (LN1000 / (zetaL * omegaL));
 
-        
-md->t60_s = T60;
+        // RIGHT
+        float omegaR = 2.f * (float)M_PI * HzR;
+        float zetaR  = (omegaR > 1e-9f) ? jb_bell_zeta_eval(x, bank, omegaR) : 0.f;
+        float T60R   = (zetaR <= 1e-9f || omegaR <= 1e-9f) ? 1e9f : (LN1000 / (zetaR * omegaR));
 
-        float r = (T60 <= 0.f) ? 0.f : powf(10.f, -3.f / (T60 * x->sr));
-        float cL=cosf(wL), cR=cosf(wR);
+        // Global scaling (pitch/velocity) + per-mode crossring scaling
+        T60L *= decay_pitch_mul;
+        T60L *= decay_vel_mul;
+        T60L *= cr_decay_mul[i];
 
-        md->a1L=2.f*r*cL; md->a2L=-r*r;
-        md->a1R=2.f*r*cR; md->a2R=-r*r;
-        // Scaling Factor normalization (frequency + decay-aware, constant-energy target):
-// The old choice:
-//   b0 = (1 - r) * sqrt(1 + r^2 - 2 r cos(2 w0))
-// normalizes the *steady-state sinusoid* gain at resonance (|H(e^{jw0})|=1),
-// which makes long decays (r→1) inject very little energy for burst/noise exciters.
-//
-// For burst/noise excitation, a better perceptual target is roughly constant injected
-// power/energy vs decay. Replace (1 - r) with sqrt(1 - r^2).
-float tL = 1.f + r*r - 2.f*r*cosf(2.f*wL);
-float tR = 1.f + r*r - 2.f*r*cosf(2.f*wR);
-if (tL < 0.f) tL = 0.f;
-if (tR < 0.f) tR = 0.f;
+        T60R *= decay_pitch_mul;
+        T60R *= decay_vel_mul;
+        T60R *= cr_decay_mul[i];
 
-float qL = 1.f - r*r;
-float qR = 1.f - r*r;
-if (qL < 0.f) qL = 0.f;
-if (qR < 0.f) qR = 0.f;
+        md->t60_s = 0.5f * (T60L + T60R);
 
-float b0L = sqrtf(qL) * sqrtf(tL);
-float b0R = sqrtf(qR) * sqrtf(tR);
+        // Discrete-time radius (per ear)
+        float rL = (T60L <= 0.f) ? 0.f : powf(10.f, -3.f / (T60L * x->sr));
+        float rR = (T60R <= 0.f) ? 0.f : powf(10.f, -3.f / (T60R * x->sr));
 
-if (b0L < 1e-9f) b0L = 1e-9f;
-if (b0R < 1e-9f) b0R = 1e-9f;
+        // Defensive clamps
+        if (rL < 0.f) rL = 0.f; else if (rL > 0.999999f) rL = 0.999999f;
+        if (rR < 0.f) rR = 0.f; else if (rR > 0.999999f) rR = 0.999999f;
 
-md->normL = b0L;
-md->normR = b0R;
+        float cL = cosf(wL), cR = cosf(wR);
+
+        md->a1L = 2.f * rL * cL; md->a2L = -rL * rL;
+        md->a1R = 2.f * rR * cR; md->a2R = -rR * rR;
+
+        // Per-resonator gain normalization vs decay:
+        // Keep injected energy roughly stable as r changes (so damping doesn't act like a volume knob).
+        // Chosen normalization: G = sqrt(1 - r^2).
+        float qL = 1.f - rL * rL;
+        float qR = 1.f - rR * rR;
+        if (qL < 0.f) qL = 0.f;
+        if (qR < 0.f) qR = 0.f;
+
+        float GL = sqrtf(qL);
+        float GR = sqrtf(qR);
+
+        if (GL < 1e-9f) GL = 1e-9f;
+        if (GR < 1e-9f) GR = 1e-9f;
+
+        md->normL = GL;
+        md->normR = GR;
 
         if (bw_amt > 0.f){
             float mode_scale = (n_modes>1)? ((float)i/(float)(n_modes-1)) : 0.f;
@@ -2153,8 +2162,8 @@ md->normR = b0R;
             float w2R = wR * (1.f + detR);
             float c2L = cosf(w2L);
             float c2R = cosf(w2R);
-            md->a1bL = 2.f*r*c2L; md->a2bL = -r*r;
-            md->a1bR = 2.f*r*c2R; md->a2bR = -r*r;
+            md->a1bL = 2.f*rL*c2L; md->a2bL = -rL*rL;
+            md->a1bR = 2.f*rR*c2R; md->a2bR = -rR*rR;
         } else {
             md->a1bL=md->a2bL=0.f; md->a1bR=md->a2bR=0.f;
         }
