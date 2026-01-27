@@ -2295,83 +2295,376 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
     jb_exc_voice_reset_runtime(&v->exc);
     v->exc_env_last = 0.f;
 
-    // BANK 1
-    for(int i=0;i<x->n_modes;i++){
-        jb_mode_rt_t *md=&v->m[i];
-        md->ratio_now = x->base[i].base_ratio;
-        md->decay_ms_now = x->base[i].base_decay_ms;
-        md->gain_nowL = x->base[i].base_gain; md->gain_nowR = x->base[i].base_gain;
-        md->t60_s = md->decay_ms_now*0.001f;
-        md->a1L=md->a2L=md->y1L=md->y2L=0.f; md->a1bL=md->a2bL=md->y1bL=md->y2bL=0.f;
-        md->a1R=md->a2R=md->y1R=md->y2R=0.f; md->a1bR=md->a2bR=md->y1bR=md->y2bR=0.f;
-        md->driveL=md->driveR=0.f; md->envL=md->envR=0.f;
-        md->y_pre_lastL=md->y_pre_lastR=0.f;
-        md->hit_gateL=md->hit_gateR=0; md->hit_coolL=md->hit_coolR=0;
-        md->md_hit_offsetL = 0.f; md->md_hit_offsetR = 0.f;
-        md->bw_hit_ratioL = 0.f;  md->bw_hit_ratioR = 0.f;
-        md->normL = md->normR = 1.f;
-        md->nyq_kill = 0;
+}
 
-        v->disp_offset[i]=0.f; v->disp_target[i]=0.f;
-        v->cr_gain_mul[i]=1.f; v->cr_decay_mul[i]=1.f;
-        (void)rng;
-    }
+// Forward decls for note helpers (some are defined later in the file)
+static int jb_find_voice_to_steal(t_juicy_bank_tilde *x);
+static void jb_voice_panic_reset(t_juicy_bank_tilde *x, jb_voice_t *v);
 
-    // BANK 2
-    for(int i=0;i<x->n_modes2;i++){
-        jb_mode_rt_t *md=&v->m2[i];
-        md->ratio_now = x->base2[i].base_ratio;
-        md->decay_ms_now = x->base2[i].base_decay_ms;
-        md->gain_nowL = x->base2[i].base_gain; md->gain_nowR = x->base2[i].base_gain;
-        md->t60_s = md->decay_ms_now*0.001f;
-        md->a1L=md->a2L=md->y1L=md->y2L=0.f; md->a1bL=md->a2bL=md->y1bL=md->y2bL=0.f;
-        md->a1R=md->a2R=md->y1R=md->y2R=0.f; md->a1bR=md->a2bR=md->y1bR=md->y2bR=0.f;
-        md->driveL=md->driveR=0.f; md->envL=md->envR=0.f;
-        md->y_pre_lastL=md->y_pre_lastR=0.f;
-        md->hit_gateL=md->hit_gateR=0; md->hit_coolL=md->hit_coolR=0;
-        md->md_hit_offsetL = 0.f; md->md_hit_offsetR = 0.f;
-        md->bw_hit_ratioL = 0.f;  md->bw_hit_ratioR = 0.f;
-        md->normL = md->normR = 1.f;
-        md->nyq_kill = 0;
+static inline void jb_exc_note_on(t_juicy_bank_tilde *x, jb_voice_t *v, float vel){
+    jb_exc_voice_t *e = &v->exc;
+    e->vel_cur = jb_clamp(vel, 0.f, 1.f);
+    if (e->vel_cur > 0.f){
+        e->vel_on = e->vel_cur;
+        jb_exc_adsr_note_on(&e->env);
 
-        v->disp_offset2[i]=0.f; v->disp_target2[i]=0.f;
-        v->cr_gain_mul2[i]=1.f; v->cr_decay_mul2[i]=1.f;
+        // tiny stereo variation per strike
+        e->gainL = 1.f + 0.02f * jb_exc_noise_tpdf(&e->rngL);
+        e->gainR = 1.f + 0.02f * jb_exc_noise_tpdf(&e->rngR);
+
+        jb_exc_pulse_trigger(&e->pulseL);
+        jb_exc_pulse_trigger(&e->pulseR);
+    }else{
+        jb_exc_adsr_note_off(&e->env);
     }
 }
 
-static int jb_find_voice_to_steal(t_juicy_bank_tilde *x){
-    int best=-1; float bestE=1e9f;
-    for(int i=0;i<x->max_voices;i++){
-        if (x->v[i].state==V_IDLE) return i;
+static inline void jb_exc_note_off(jb_voice_t *v){
+    jb_exc_adsr_note_off(&v->exc.env);
+}
+static int jb_find_idle_tail_voice(const t_juicy_bank_tilde *x){
+    if (!x) return -1;
+    int start = x->max_voices;
+    int end   = x->total_voices;
+    if (start < 0) start = 0;
+    if (start > JB_MAX_VOICES) start = JB_MAX_VOICES;
+    if (end < 0) end = 0;
+    if (end > JB_MAX_VOICES) end = JB_MAX_VOICES;
+    if (end <= start) return -1;
+
+    for(int i=start; i<end; ++i){
+        if (x->v[i].state == V_IDLE) return i;
+    }
+    return -1;
+}
+static int jb_find_quietest_tail_voice(const t_juicy_bank_tilde *x){
+    if (!x) return -1;
+    int start = x->max_voices;
+    int end   = x->total_voices;
+    if (start < 0) start = 0;
+    if (start > JB_MAX_VOICES) start = JB_MAX_VOICES;
+    if (end < 0) end = 0;
+    if (end > JB_MAX_VOICES) end = JB_MAX_VOICES;
+    if (end <= start) return -1;
+
+    int best = start;
+    float bestE = 1e9f;
+
+    for(int i=start; i<end; ++i){
+        // Prefer stealing already-low-energy tails; if an idle slot exists, use it immediately.
+        if (x->v[i].state == V_IDLE) return i;
         float e = x->v[i].energy;
-        if (e<bestE){ bestE=e; best=i; }
+        if (e < bestE){ bestE = e; best = i; }
     }
-    return (best<0)?0:best;
+    return best;
 }
 
-// ---------- INTERNAL EXCITER (Fusion STEP 2) — note triggers ----------
+static void jb_note_on(t_juicy_bank_tilde *x, float f0, float vel){
+    // Pick an ATTACK voice (0..max_voices-1). Tail voices are never selected for new attacks.
+    int idx = jb_find_voice_to_steal(x);
+    jb_voice_t *v = &x->v[idx];
 
-// Hard reset used only as a "panic" guard if a voice goes unstable (NaN/INF/runaway).
-// This does NOT change normal sound; it only triggers on broken states.
-static void jb_voice_panic_reset(t_juicy_bank_tilde *x, jb_voice_t *v){
-    if (!x || !v) return;
+    // If we're stealing a currently-sounding voice, migrate it into the tail pool so it can
+    // ring out naturally (as if a key was released) while we reuse this attack slot immediately.
+    if (v->state != V_IDLE){
+        int tidx = jb_find_idle_tail_voice(x);
+        if (tidx < 0) tidx = jb_find_quietest_tail_voice(x);
+        jb_voice_t *t = &x->v[tidx];
 
-    v->state = V_IDLE;
-    v->rel_env = 0.f;
-    v->rel_env2 = 0.f;
-    v->energy = 0.f;
-    // Feedback loop state (per bank)
-    for (int b = 0; b < 2; ++b){
-        v->fb_prevL[b] = v->fb_prevR[b] = 0.f;
-        v->fb_hp_x1L[b] = v->fb_hp_y1L[b] = 0.f;
-        v->fb_hp_x1R[b] = v->fb_hp_y1R[b] = 0.f;
-        v->fb_agc_gain[b] = 1.f;
-        v->fb_agc_env[b]  = 0.f;
+        *t = *v; // POD copy: includes resonator states + exciter runtime + env state
+
+        // Convert copied voice to a natural NOTE-OFF release tail.
+        jb_exc_note_off(t);
+        t->state = V_RELEASE;
+        // keep rel_env/rel_env2 as-is (they're 1 while held/releasing), they will decay in DSP loop
     }
 
-    // Internal exciter reset
-    jb_exc_voice_reset_runtime(&v->exc);
-    v->exc_env_last = 0.f;
+    // Start (or restart) the attack voice immediately
+    v->state = V_HELD;
+    v->f0  = (f0<=0.f)?1.f:f0;
+    // Velocity is accepted as either 0..1 or MIDI 0..127, and always stored 0..1.
+    v->vel = jb_exc_midi_to_vel01(vel);
+
+    jb_voice_reset_states(x, v, &x->rng);
+    jb_project_behavior_into_voice(x, v);
+    jb_project_behavior_into_voice2(x, v);
+    jb_exc_note_on(x, v, v->vel);
+}
+
+static void jb_note_off(t_juicy_bank_tilde *x, float f0){
+    int match=-1; float best=1e9f; float tol=0.5f;
+    for(int i=0;i<x->max_voices;i++){
+        if (x->v[i].state==V_HELD){
+            float d=fabsf(x->v[i].f0 - f0);
+            if (d<tol){ match=i; break; }
+            if (x->v[i].energy<best){ best=x->v[i].energy; match=i; }
+        }
+    }
+}
+
+// ===== Explicit voice-addressed control (for Pd [poly]) =====
+static inline void jb_migrate_to_tail_if_needed(t_juicy_bank_tilde *x, const jb_voice_t *src){
+    if (!x || !src) return;
+    if (src->state == V_IDLE) return;
+
+    int tidx = jb_find_idle_tail_voice(x);
+    if (tidx < 0) tidx = jb_find_quietest_tail_voice(x);
+    if (tidx < 0 || tidx >= x->total_voices) return;
+
+    jb_voice_t *t = &x->v[tidx];
+    *t = *src; // deep copy (struct contains full per-mode state)
+
+    // Convert copied voice to a natural NOTE-OFF release tail.
+    jb_exc_note_off(t);
+    t->state = V_RELEASE;
+
+    // Ensure tails are audible even if the stolen voice was already in release.
+    t->rel_env  = 1.f;
+    t->rel_env2 = 1.f;
+}
+
+static void jb_note_on_voice(t_juicy_bank_tilde *x, int vix1, float f0, float vel){
+    // This path is used by [note_poly]/[poly]-style voice addressing.
+    // We still want tail behavior here: stealing a busy attack voice migrates it into the tail pool.
+    if (vix1 < 1) vix1 = 1;
+    if (vix1 > x->max_voices) vix1 = x->max_voices;
+    int idx = vix1 - 1;
+
+    if (f0 <= 0.f) f0 = 1.f;
+    // Velocity is accepted as either 0..1 or MIDI 0..127.
+    vel = jb_exc_midi_to_vel01(vel);
+
+    jb_voice_t *v = &x->v[idx];
+
+    // If this voice is currently sounding, migrate it into a tail slot so it can ring out naturally.
+    jb_migrate_to_tail_if_needed(x, v);
+
+    // Start the new note immediately in the requested attack slot.
+    v->state = V_HELD;
+    v->f0 = f0;
+    v->vel = vel;
+
+    jb_voice_reset_states(x, v, &x->rng);
+    jb_project_behavior_into_voice(x, v);
+    jb_project_behavior_into_voice2(x, v);
+    jb_exc_note_on(x, v, v->vel);
+}
+
+static void jb_note_off_voice(t_juicy_bank_tilde *x, int vix1){
+    // Voice-index only (legacy / hard off). Kept for off_poly.
+    if (vix1 < 1) vix1 = 1;
+    if (vix1 > x->max_voices) vix1 = x->max_voices;
+    int idx = vix1 - 1;
+    if (x->v[idx].state != V_IDLE){
+        jb_exc_note_off(&x->v[idx]);
+        x->v[idx].state = V_RELEASE;
+    }
+}
+
+static void jb_note_off_voice_pitch(t_juicy_bank_tilde *x, int vix1, float f0){
+    // Safer NOTE-OFF for voice-addressed poly:
+    // Only releases if the pitch matches the current voice pitch (prevents old note-offs
+    // from killing a newer note after voice stealing).
+    if (vix1 < 1) vix1 = 1;
+    if (vix1 > x->max_voices) vix1 = x->max_voices;
+    int idx = vix1 - 1;
+
+    jb_voice_t *v = &x->v[idx];
+    if (v->state == V_IDLE) return;
+
+    if (f0 > 0.f && v->f0 > 0.f){
+        float ratio = v->f0 / f0;
+        if (ratio < 1.f) ratio = 1.f / ratio;
+
+        // ~20 cents tolerance
+        const float tol = 1.0116f;
+        if (ratio > tol){
+            return; // ignore mismatched note-off
+        }
+    }
+
+    jb_exc_note_off(v);
+    v->state = V_RELEASE;
+}
+
+// Message handlers (voice-addressed)
+static void juicy_bank_tilde_note_poly(t_juicy_bank_tilde *x, t_floatarg vix, t_floatarg f0, t_floatarg vel){
+    if (vel <= 0.f) { jb_note_off_voice_pitch(x, (int)vix, f0); }
+    else            { jb_note_on_voice(x, (int)vix, f0, vel); }
+}
+
+static void juicy_bank_tilde_note_poly_midi(t_juicy_bank_tilde *x, t_floatarg vix, t_floatarg midi, t_floatarg vel){
+    float f0 = jb_midi_to_hz(midi);
+    if (vel <= 0.f) { jb_note_off_voice_pitch(x, (int)vix, f0); }
+    else            { jb_note_on_voice(x, (int)vix, f0, vel); }
+}
+
+static void juicy_bank_tilde_off_poly(t_juicy_bank_tilde *x, t_floatarg vix){
+    jb_note_off_voice(x, (int)vix);
+}
+
+static t_int *juicy_bank_tilde_perform(t_int *w){
+    t_juicy_bank_tilde *x=(t_juicy_bank_tilde *)(w[1]);
+    // outputs (no signal inlets; internal exciter generator)
+    t_sample *outL=(t_sample *)(w[2]);
+    t_sample *outR=(t_sample *)(w[3]);
+    int n=(int)(w[4]);
+
+#if defined(__SSE__) || defined(__SSE2__)
+    // Avoid denormal/subnormal slowdowns on Intel CPUs (does not affect audible quality).
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+  #if defined(__SSE3__)
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+  #endif
+#endif
+
+    // clear outputs
+    for(int i=0;i<n;i++){ outL[i]=0; outR[i]=0; }
+
+    // update LFOs once per block (for modulation matrix sources)
+    jb_update_lfos_block(x, n);
+
+    // NEW MOD LANES: LFO1 output (scaled by its amount) + a few global mods that must happen pre-exciter-update
+    const t_symbol *lfo1_tgt = x->lfo_target[0];
+    const float lfo1_amt = jb_clamp(x->lfo_amt_v[0], -1.f, 1.f);
+    const float lfo1_out = x->lfo_val[0] * lfo1_amt;
+
+    // store effective LFO amounts for downstream use
+    x->lfo_amt_eff[0] = lfo1_amt;
+    x->lfo_amt_eff[1] = jb_clamp(x->lfo_amt_v[1], -1.f, 1.f);
+    if (lfo1_out != 0.f && lfo1_tgt == gensym("lfo2_amount")) {
+        x->lfo_amt_eff[1] = jb_clamp(x->lfo_amt_eff[1] + lfo1_out, -1.f, 1.f);
+    }
+
+    // LFO1 -> Exciter params (0..1, additive, clamped) must be applied before jb_exc_update_block()
+    const float exc_shape_saved = x->exc_shape;         // Noise Color
+    const float exc_imp_shape_saved = x->exc_imp_shape; // Impulse Shape
+    if (lfo1_out != 0.f){
+        if (lfo1_tgt == gensym("exc_shape")) {
+            x->exc_shape = jb_clamp(exc_shape_saved + lfo1_out, 0.f, 1.f);
+        } else if (lfo1_tgt == gensym("exc_imp_shape")) {
+            x->exc_imp_shape = jb_clamp(exc_imp_shape_saved + lfo1_out, 0.f, 1.f);
+        }
+    }
+
+    // Internal exciter: update shared params -> per-voice filters + ADSR times/curves
+    jb_exc_update_block(x);
+    x->exc_shape = exc_shape_saved;
+    x->exc_imp_shape = exc_imp_shape_saved;        // (Coupling removed) Both banks are always excited by the internal exciter and always summed to the output.
+    // Internal exciter mix weights (computed once per block)
+    float exc_f = jb_clamp(x->exc_fader, -1.f, 1.f);
+    float exc_t = 0.5f * (exc_f + 1.f);
+    float exc_w_imp   = sinf(0.5f * (float)M_PI * exc_t);
+    float exc_w_noise = cosf(0.5f * (float)M_PI * exc_t);
+    // Pressure (reuses former density inlet): feedback-loop AGC target level (0..0.98)
+    const float pressure = jb_clamp(x->exc_density, 0.f, 1.f);
+    const float fb_target = 0.98f * pressure;
+
+    // Feedback AGC smoothing coefficients (per block)
+    // Attack:  0..1 -> 1ms..200ms  (fast clamp-down)
+    // Release: 0..1 -> 10ms..2500ms (slow recovery)
+    const float fb_tauA = 0.001f + 0.199f * jb_clamp(x->fb_agc_attack,  0.f, 1.f);
+    const float fb_tauR = 0.010f + 2.490f * jb_clamp(x->fb_agc_release, 0.f, 1.f);
+    const float a_fb_attack  = expf(-1.0f / (x->sr * fb_tauA));
+    const float a_fb_release = expf(-1.0f / (x->sr * fb_tauR));
+    const float one_minus_a_fb_attack  = 1.f - a_fb_attack;
+    const float one_minus_a_fb_release = 1.f - a_fb_release;
+
+    // Level detector (abs follower) for AGC: fixed 10ms time constant
+    const float a_fb_env = expf(-1.0f / (x->sr * 0.010f));
+    const float one_minus_a_fb_env = 1.f - a_fb_env;
+    // Energy meter (per voice) used for voice stealing and tail cleanup.
+    // 50ms time constant -> responsive but stable.
+    const float a_energy = expf(-1.0f / (x->sr * 0.050f));
+    const float one_minus_a_energy = 1.f - a_energy;
+    const float tail_energy_thresh = 1e-6f;
+
+    // Exciter loudness matching (noise vs impulse) is done pre-resonator.
+    // We use an RMS follower for each branch and then smooth the gain ratio.
+    const float a_exc_pwr = expf(-1.0f / (x->sr * 0.030f));   // 30ms power follower
+    const float one_minus_a_exc_pwr = 1.f - a_exc_pwr;
+    const float a_exc_match = expf(-1.0f / (x->sr * 0.100f)); // 100ms gain smoothing
+    const float one_minus_a_exc_match = 1.f - a_exc_match;
+
+    // Per-block updates that don't change sample-phase
+    for(int vix=0; vix<x->total_voices; ++vix){
+        jb_voice_t *v = &x->v[vix];
+        if (v->state==V_IDLE) continue;
+        jb_update_crossring(x, vix);
+        jb_project_behavior_into_voice(x, v); // keep behavior up-to-date
+        jb_update_voice_coeffs(x, v);
+        jb_update_voice_gains(x, v);
+        // bank 2 runtime prep (render/mix happens in STEP 2B-2)
+        jb_update_crossring2(x, vix);
+        jb_project_behavior_into_voice2(x, v);
+        jb_update_voice_coeffs2(x, v);
+        jb_update_voice_gains2(x, v);
+    }
+
+    // constants
+
+    // Process per-voice, sample-major so feedback uses only a 2-sample delay (no block latency)
+    for(int vix=0; vix<x->total_voices; ++vix){
+        jb_voice_t *v = &x->v[vix];
+        if (v->state==V_IDLE) continue;
+
+        const float bw_amt1 = jb_clamp(v->bandwidth_v, 0.f, 1.f);
+        const float bw_amt2 = jb_clamp(v->bandwidth_v2, 0.f, 1.f);        // (STEP 2) Internal exciter replaces external input routing (no more srcL/srcR per voice)
+        float (*mm1)[JB_N_MODTGT] = x->mod_matrix;
+        float (*mm2)[JB_N_MODTGT] = x->mod_matrix2;
+
+        float master_base1 = x->bank_master[0];
+        float master_base2 = x->bank_master[1];
+
+        float master_mod1 = 0.f;
+        float master_mod2 = 0.f;
+        for (int src = 0; src < JB_N_MODSRC; ++src){
+            float src_v = jb_mod_source_value(x, v, src);
+            if (src_v == 0.f) continue;
+            master_mod1 += mm1[src][11] * src_v;
+            master_mod2 += mm2[src][11] * src_v;
+        }
+        if (master_mod1 > 1.f) master_mod1 = 1.f; else if (master_mod1 < -1.f) master_mod1 = -1.f;
+        if (master_mod2 > 1.f) master_mod2 = 1.f; else if (master_mod2 < -1.f) master_mod2 = -1.f;
+
+        float bank_gain1;
+        if (master_mod1 >= 0.f) bank_gain1 = master_base1 + master_mod1 * (1.f - master_base1);
+        else                    bank_gain1 = master_base1 + master_mod1 * master_base1;
+
+        float bank_gain2;
+        if (master_mod2 >= 0.f) bank_gain2 = master_base2 + master_mod2 * (1.f - master_base2);
+        else                    bank_gain2 = master_base2 + master_mod2 * master_base2;
+
+        // LFO1 -> master_* (bank output volume): additive + clamp (0..1)
+        if (lfo1_out != 0.f){
+            if (lfo1_tgt == gensym("master_1")){
+                bank_gain1 = jb_clamp(bank_gain1 + lfo1_out, 0.f, 1.f);
+            }else if (lfo1_tgt == gensym("master_2")){
+                bank_gain2 = jb_clamp(bank_gain2 + lfo1_out, 0.f, 1.f);
+            }
+        }
+
+        // --- pan modulation (target index 13 = "pan") ---
+        float pan_mod1 = 0.f;
+        float pan_mod2 = 0.f;
+        for (int src = 0; src < JB_N_MODSRC; ++src){
+            float src_v = jb_mod_source_value(x, v, src);
+            if (src_v == 0.f) continue;
+            float a1 = mm1[src][13];
+            float a2 = mm2[src][13];
+            if (a1 != 0.f) pan_mod1 += a1 * src_v;
+            if (a2 != 0.f) pan_mod2 += a2 * src_v;
+        }
+        if (pan_mod1 > 1.f) pan_mod1 = 1.f; else if (pan_mod1 < -1.f) pan_mod1 = -1.f;
+        if (pan_mod2 > 1.f) pan_mod2 = 1.f; else if (pan_mod2 < -1.f) pan_mod2 = -1.f;
+
+        const jb_mode_base_t *base1 = x->base;
+        const jb_mode_base_t *base2 = x->base2;
+
+        for(int i=0;i<n;i++){
+            // Per-bank voice outputs (pre-space)
+            float b1OutL = 0.f, b1OutR = 0.f;
+            float b2OutL = 0.f, b2OutR = 0.f;
             // ---------- FEEDBACK (per-bank, per-voice) ----------
             // Each bank ONLY feeds back its own output. Feedback is injected at the
             // same junction as the exciter input, but it does NOT pass through the
@@ -2707,9 +3000,8 @@ static void jb_voice_panic_reset(t_juicy_bank_tilde *x, jb_voice_t *v){
     }
     x->hpL_x1=x1L; x->hpL_y1=y1L; x->hpR_x1=x1R; x->hpR_y1=y1R;
 
-    return (w + 7);
+    return (w + 5);
 }
-
 // ---------- base setters & messages ----------
 static void juicy_bank_tilde_modes(t_juicy_bank_tilde *x, t_floatarg nf){
     int n = (int)nf;
@@ -3206,10 +3498,6 @@ static void juicy_bank_tilde_quantize(t_juicy_bank_tilde *x, t_floatarg f){
     *disp_p = v;
 }
 
-static void juicy_bank_tilde_quantize(t_juicy_bank_tilde *x, t_floatarg f){
-    // Preferred name: quantize 0..1
-    juicy_bank_tilde_quantize(x, f);
-}
 static void juicy_bank_tilde_seed(t_juicy_bank_tilde *x, t_floatarg f){
     int *n_modes_p = x->edit_bank ? &x->n_modes2 : &x->n_modes;
     jb_mode_base_t *base = x->edit_bank ? x->base2 : x->base;
@@ -3566,8 +3854,6 @@ x->excite_pos_y2  = x->excite_pos_y;
         x->lfo_target[li] = gensym("none");
     }
     x->lfo_amount = 0.f;
-    x->mod_a_inc = 1.f; x->mod_d_dec = 1.f; x->mod_r_dec = 1.f;
-
     x->midi_amount = 0.f;
     x->midi_target = gensym("none");
 
