@@ -2517,9 +2517,6 @@ static void juicy_bank_tilde_note_poly_midi(t_juicy_bank_tilde *x, t_floatarg vi
     else            { jb_note_on_voice(x, (int)vix, f0, vel); }
 }
 
-    jb_note_off_voice(x, (int)vix);
-}
-
 // ---------- perform ----------
 
 static t_int *juicy_bank_tilde_perform(t_int *w){
@@ -3484,10 +3481,12 @@ static void jb_tgtproxy_anything(jb_tgtproxy *p, t_symbol *s, int argc, t_atom *
     jb_tgtproxy_set(p, s);
 }
 
+static void juicy_bank_tilde_offset(t_juicy_bank_tilde *x, t_floatarg f){
     float v = jb_clamp(f, -1.f, 1.f);
     if (x->edit_bank) x->offset_amt2 = v;
     else              x->offset_amt  = v;
 }
+
 static void juicy_bank_tilde_collision(t_juicy_bank_tilde *x, t_floatarg f){
     float v = jb_clamp(f, 0.f, 1.f);
     if (x->edit_bank) x->collision_amt2 = v;
@@ -4171,6 +4170,7 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_brightness, g
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_quantize, gensym("quantize"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_dispersion, gensym("dispersion"), A_DEFFLOAT, 0); // legacy alias
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_collision, gensym("collision"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_offset,    gensym(\"offset\"),    A_DEFFLOAT, 0);
 
     
     
