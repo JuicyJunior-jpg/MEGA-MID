@@ -108,6 +108,50 @@ static inline float jb_kill_denorm(float x){
     return (fabsf(x) < 1e-20f) ? 0.f : x;
 }
 
+// ---------- ZDF State Variable Filter (SVF) resonators (Topology-Preserving Transform, Zavalishin style) ----------
+// We replace the old 2-pole recursion with a ZDF SVF tick (TPT discretization).
+// Notation (Vadim Zavalishin):
+//   g = tan(pi * f / Fs)
+//   R = damping parameter
+//   d = 1 / (1 + 2*R*g + g*g)
+// Tick (bandpass output):
+//   v1 = (s1 + g*(x - s2)) * d
+//   v2 = s2 + g*v1
+//   s1 = 2*v1 - s1
+//   s2 = 2*v2 - s2
+typedef struct {
+    float g, R, d;
+    float s1, s2;
+} jb_svf_t;
+
+static inline void jb_svf_reset(jb_svf_t *f){
+    f->g = f->R = f->d = 0.f;
+    f->s1 = f->s2 = 0.f;
+}
+
+static inline void jb_svf_set_params(jb_svf_t *f, float g, float R){
+    if (!isfinite(g) || g < 0.f) g = 0.f;
+    if (!isfinite(R) || R < 0.f) R = 0.f;
+    // our damper provides sane values, but clamp as a last resort
+    if (R > 2.0f) R = 2.0f;
+    f->g = g;
+    f->R = R;
+    float denom = 1.f + 2.f * R * g + g * g;
+    if (!isfinite(denom) || denom <= 1e-20f) denom = 1e-20f;
+    f->d = 1.f / denom;
+}
+
+static inline float jb_svf_bp_tick(jb_svf_t *f, float x){
+    const float g = f->g;
+    const float d = f->d;
+    if (g == 0.f || d == 0.f) return 0.f;
+    const float v1 = (f->s1 + g * (x - f->s2)) * d;
+    const float v2 = f->s2 + g * v1;
+    f->s1 = jb_kill_denorm(2.f * v1 - f->s1);
+    f->s2 = jb_kill_denorm(2.f * v2 - f->s2);
+    return v1; // bandpass
+}
+
 // ---------- INTERNAL EXCITER (Fusion STEP 1) ----------
 // This is the former juicy_exciter~ DSP engine embedded into juicy_bank~.
 // STEP 1: adds exciter DSP structs + helpers + per-voice exciter state storage + param inlets.
@@ -1087,59 +1131,7 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
 }
 // ---------
 
-// ---------- ZDF State Variable Filter (SVF) resonators (Topology-Preserving Transform, Zavalishin style) ----------
-// We replace the old biquad/2-pole recursion with a ZDF SVF tick (TPT discretization).
-// Notation (Vadim Zavalishin):
-//   g = tan(pi * f / Fs)
-//   R = damping parameter (≈ damping ratio ζ), stable for 0..~0.2 in our use
-//   d = 1 / (1 + 2*R*g + g*g)
-// Tick (bandpass output):
-//   v1 = (s1 + g*(x - s2)) * d
-//   v2 = s2 + g*v1
-//   s1 = 2*v1 - s1
-//   s2 = 2*v2 - s2
-typedef struct {
-    float g, R, d;   // parameters
-    float s1, s2;    // integrator states (TPT)
-} jb_svf_t;
-
-static inline void jb_svf_reset(jb_svf_t *f){
-    f->g = f->R = f->d = 0.f;
-    f->s1 = f->s2 = 0.f;
-}
-
-static inline void jb_svf_set_params(jb_svf_t *f, float g, float R){
-    if (!isfinite(g) || g < 0.f) g = 0.f;
-    if (!isfinite(R) || R < 0.f) R = 0.f;
-    // keep it sane (our damper already caps, but double-safety)
-    if (R > 0.2f) R = 0.2f;
-
-    f->g = g;
-    f->R = R;
-
-    float denom = 1.f + 2.f * R * g + g * g;
-    if (!isfinite(denom) || denom <= 1e-20f) denom = 1e-20f;
-    f->d = 1.f / denom;
-}
-
-static inline float jb_svf_bp_tick(jb_svf_t *f, float x){
-    float g = f->g;
-    float d = f->d;
-
-    // fast silent path
-    if (g == 0.f || d == 0.f) return 0.f;
-
-    float v1 = (f->s1 + g * (x - f->s2)) * d;
-    float v2 = f->s2 + g * v1;
-
-    // trapezoidal integrator state updates
-    f->s1 = jb_kill_denorm(2.f * v1 - f->s1);
-    f->s2 = jb_kill_denorm(2.f * v2 - f->s2);
-
-    return v1; // bandpass
-}
-
-- helpers ----------
+// ---------- helpers ----------
 static float jb_bright_gain(float ratio_rel, float b){
     // Brightness slope (defines spectral slope):
     //  - b in [-1,1]
@@ -2125,6 +2117,7 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
     }
 
     for(int i = 0; i < n_modes; ++i){
+        jb_mode_rt_t *md = &m[i];
         if(!base[i].active){
             jb_svf_reset(&md->svfL);
             jb_svf_reset(&md->svfR);
@@ -2749,8 +2742,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     float gR = md->gain_nowR;
                     if ((fabsf(gL) + fabsf(gR)) <= 0.f || md->nyq_kill) continue;
 
-                    jb_svf_t svfL = md->svfL;
-                    jb_svf_t svfR = md->svfR;
                     float driveL = md->driveL;
                     float driveR = md->driveR;
                     const float att_a = 1.f;
@@ -2758,15 +2749,13 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     float excR = exR * gR;
 
                     driveL += att_a*(excL - driveL);
-                    float y_totalL = jb_svf_bp_tick(&svfL, driveL);
+                    float y_totalL = jb_svf_bp_tick(&md->svfL, driveL);
                     y_totalL = jb_kill_denorm(y_totalL);
 
                     driveR += att_a*(excR - driveR);
-                    float y_totalR = jb_svf_bp_tick(&svfR, driveR);
+                    float y_totalR = jb_svf_bp_tick(&md->svfR, driveR);
                     y_totalR = jb_kill_denorm(y_totalR);
 
-                    md->svfL = svfL;
-                    md->svfR = svfR;
                     md->driveL = driveL;
                     md->driveR = driveR;
                     md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
@@ -2785,8 +2774,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     float gR = md->gain_nowR;
                     if ((fabsf(gL) + fabsf(gR)) <= 0.f || md->nyq_kill) continue;
 
-                    jb_svf_t svfL = md->svfL;
-                    jb_svf_t svfR = md->svfR;
                     float driveL = md->driveL;
                     float driveR = md->driveR;
                     const float att_a = 1.f;
@@ -2794,15 +2781,13 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     float excR = exR * gR;
 
                     driveL += att_a*(excL - driveL);
-                    float y_totalL = jb_svf_bp_tick(&svfL, driveL);
+                    float y_totalL = jb_svf_bp_tick(&md->svfL, driveL);
                     y_totalL = jb_kill_denorm(y_totalL);
 
                     driveR += att_a*(excR - driveR);
-                    float y_totalR = jb_svf_bp_tick(&svfR, driveR);
+                    float y_totalR = jb_svf_bp_tick(&md->svfR, driveR);
                     y_totalR = jb_kill_denorm(y_totalR);
 
-                    md->svfL = svfL;
-                    md->svfR = svfR;
                     md->driveL = driveL;
                     md->driveR = driveR;
                     md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
