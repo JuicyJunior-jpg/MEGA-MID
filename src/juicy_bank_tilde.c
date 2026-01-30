@@ -566,6 +566,12 @@ typedef struct _jb_tgtproxy{
 
 typedef struct _juicy_bank_tilde {
 
+    // Pd object header (required for inlet_new/outlet_new, class registration, etc.)
+    t_object x_obj;
+
+    // Cached sample-rate (set in dsp(), used throughout DSP helpers)
+    float sr;
+
     int n_modes;
     int active_modes;              // number of currently active partials (0..n_modes)
     int n_modes2;
