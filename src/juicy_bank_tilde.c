@@ -2652,19 +2652,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             }
         }
 
-        // --- pan modulation (target index 13 = "pan") ---
-        float pan_mod1 = 0.f;
-        float pan_mod2 = 0.f;
-        for (int src = 0; src < JB_N_MODSRC; ++src){
-            float src_v = jb_mod_source_value(x, v, src);
-            if (src_v == 0.f) continue;
-            float a1 = mm1[src][13];
-            float a2 = mm2[src][13];
-            if (a1 != 0.f) pan_mod1 += a1 * src_v;
-            if (a2 != 0.f) pan_mod2 += a2 * src_v;
-        }
-        if (pan_mod1 > 1.f) pan_mod1 = 1.f; else if (pan_mod1 < -1.f) pan_mod1 = -1.f;
-        if (pan_mod2 > 1.f) pan_mod2 = 1.f; else if (pan_mod2 < -1.f) pan_mod2 = -1.f;
+        // Pan is intentionally not used in this synth anymore.
 
         const jb_mode_base_t *base1 = x->base;
         const jb_mode_base_t *base2 = x->base2;
@@ -2749,16 +2737,23 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     float excR = exR * gR;
 
                     driveL += att_a*(excL - driveL);
-                    float y_totalL = jb_svf_bp_tick(&md->svfL, driveL);
-                    y_totalL = jb_kill_denorm(y_totalL);
+	                    float y_rawL = jb_svf_bp_tick(&md->svfL, driveL);
+	                    y_rawL = jb_kill_denorm(y_rawL);
 
                     driveR += att_a*(excR - driveR);
-                    float y_totalR = jb_svf_bp_tick(&md->svfR, driveR);
-                    y_totalR = jb_kill_denorm(y_totalR);
+	                    float y_rawR = jb_svf_bp_tick(&md->svfR, driveR);
+	                    y_rawR = jb_kill_denorm(y_rawR);
 
                     md->driveL = driveL;
                     md->driveR = driveR;
-                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
+	                    // Pre-master, pre-envelope signal snapshot (for meters / hit detection)
+	                    md->y_pre_lastL = y_rawL;
+	                    md->y_pre_lastR = y_rawR;
+
+	                    // SUM into bank-2 voice output (no pan)
+	                    float e2 = v->rel_env2;
+	                    b2OutL = jb_kill_denorm(b2OutL + (y_rawL * e2) * bank_gain2);
+	                    b2OutR = jb_kill_denorm(b2OutR + (y_rawR * e2) * bank_gain2);
                 }
             }
             // BANK 1 input: exciter + bank1 feedback
@@ -2781,16 +2776,22 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     float excR = exR * gR;
 
                     driveL += att_a*(excL - driveL);
-                    float y_totalL = jb_svf_bp_tick(&md->svfL, driveL);
-                    y_totalL = jb_kill_denorm(y_totalL);
+	                    float y_rawL = jb_svf_bp_tick(&md->svfL, driveL);
+	                    y_rawL = jb_kill_denorm(y_rawL);
 
                     driveR += att_a*(excR - driveR);
-                    float y_totalR = jb_svf_bp_tick(&md->svfR, driveR);
-                    y_totalR = jb_kill_denorm(y_totalR);
+	                    float y_rawR = jb_svf_bp_tick(&md->svfR, driveR);
+	                    y_rawR = jb_kill_denorm(y_rawR);
 
                     md->driveL = driveL;
                     md->driveR = driveR;
-                    md->y_pre_lastL = y_totalL; md->y_pre_lastR = y_totalR;
+	                    md->y_pre_lastL = y_rawL;
+	                    md->y_pre_lastR = y_rawR;
+
+	                    // SUM into bank-1 voice output (no pan)
+	                    float e1 = v->rel_env;
+	                    b1OutL = jb_kill_denorm(b1OutL + (y_rawL * e1) * bank_gain1);
+	                    b1OutR = jb_kill_denorm(b1OutR + (y_rawR * e1) * bank_gain1);
                 }
             }
             // Final per-voice sum (pre-space)
@@ -3362,7 +3363,6 @@ static inline int jb_lfo1_target_allowed(t_symbol *s){
     return (
         s == gensym("master_1") || s == gensym("master_2") ||
         s == gensym("pitch_1")  || s == gensym("pitch_2")  ||
-        s == gensym("pan_1")    || s == gensym("pan_2")    ||
         s == gensym("brightness_1") || s == gensym("brightness_2") ||
         s == gensym("density_1")    || s == gensym("density_2")    ||
         s == gensym("partials_1")   || s == gensym("partials_2")   ||
@@ -4193,7 +4193,6 @@ static int jb_modmatrix_parse_selector(const char *name, int *src_out, int *tgt_
     else if (!strcmp(tgt, "offset"))                                    tgt_idx = 8;
     else if (!strcmp(tgt, "master"))                                    tgt_idx = 11;
     else if (!strcmp(tgt, "pitch"))                                     tgt_idx = 12;
-    else if (!strcmp(tgt, "pan"))                                       tgt_idx = 13;
     else if (!strcmp(tgt, "partials"))                                  tgt_idx = 14;
     else return 0;
 
