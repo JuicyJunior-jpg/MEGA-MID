@@ -1,5 +1,5 @@
 // juicy_bank~ — modal resonator bank (V5.0)
-// 4-voice poly, true stereo banks, Behavior + Body + Individual inlets.
+// 5-voice poly + 2 tail voices, true stereo banks, Behavior + Body + Individual inlets.
 // NEW (V5.0):
 //   • **Spacing** inlet (after dispersion, before anisotropy): nudges each mode toward the *next* harmonic
 //     ratio (ceil or +1 if already integer). 0 = no shift, 1 = fully at next ratio.
@@ -43,8 +43,8 @@
 #define JB_DAMP_T60_MIN_S     0.005f  /* high-frequency minimum T60 at damper=1 (seconds) */
 
 #define JB_MAX_MODES    32
-#define JB_MAX_VOICES    8
-#define JB_ATTACK_VOICES 4
+#define JB_MAX_VOICES    7
+#define JB_ATTACK_VOICES 5
 #define JB_TAIL_VOICES   (JB_MAX_VOICES - JB_ATTACK_VOICES)
 #define JB_N_MODSRC 4
 #define JB_N_MODTGT    15
@@ -486,7 +486,6 @@ typedef struct {
 
     // per-ear per-hit randomizations
     float md_hit_offsetL, md_hit_offsetR;   // micro detune offsets
-    float bw_hit_ratioL, bw_hit_ratioR;     // twin detune ratios
 
     // LEFT states
     float a1L,a2L, y1L,y2L, a1bL,a2bL, y1bL,y2bL, envL, y_pre_lastL, normL;
@@ -506,20 +505,17 @@ typedef struct {
     float f0, vel, energy;
     // Internal exciter runtime state (per voice, stereo)
     jb_exc_voice_t exc;
-    float exc_env_last; // STEP 2: per-voice env (0..1) for mod matrix
     // Dedicated modulation ADSR (independent from exciter ADSR)
 
     // projected behavior (per voice) — BANK 1
     float pitch_x;
     float brightness_v;
-    float bandwidth_v;
     float decay_pitch_mul;
     float decay_vel_mul;
     float stiffness_add;
 
     // projected behavior — BANK 2
     float brightness_v2;
-    float bandwidth_v2;
     float decay_pitch_mul2;
     float decay_vel_mul2;
     float stiffness_add2;
@@ -638,9 +634,7 @@ float brightness;
     float collision_amt2;
 
     // realism/misc
-    float bandwidth;        // base for BW
     float micro_detune;     // base for micro detune
-    float bandwidth2;        // base for BW (bank2)
     float micro_detune2;     // base for micro detune (bank2)
     float basef0_ref;
 
@@ -740,7 +734,6 @@ float brightness;
     t_symbol *lfo_target[JB_N_LFO];   // LFO1/LFO2 targets
     jb_tgtproxy *tgtproxy_lfo1;
     jb_tgtproxy *tgtproxy_lfo2;
-    jb_tgtproxy *tgtproxy_midi;
     float     lfo_amt_v[JB_N_LFO];    // LFO1/LFO2 amounts (-1..+1)
     float     lfo_amt_eff[JB_N_LFO];  // effective amounts (after LFO1->LFO2 amount mod)
     float     lfo_amount;             // UI mirror for currently selected LFO amount (via lfo_index)
@@ -748,7 +741,6 @@ float brightness;
     // Dedicated modulation ADSR (independent of exciter ADSR)
 
     // MIDI lane
-    float midi_amount; t_symbol *midi_target;
 
     // --- INTERNAL EXCITER params (shared, Fusion STEP 1) ---
     float exc_fader;
@@ -800,8 +792,6 @@ float brightness;
 
 
 
-    t_inlet *in_midi_amount;
-    t_inlet *in_midi_target;
 
 // --- CHECKPOINT (bake) revert buffer ---
 } t_juicy_bank_tilde;
@@ -894,33 +884,27 @@ static float jb_mod_source_value(const t_juicy_bank_tilde *x,
     case 0: // velocity
         return jb_clamp(v->vel, 0.f, 1.f);
 
-    case 1: // pitch: normalise semitone offset around basef0_ref
-        if (v->f0 <= 0.f || x->basef0_ref <= 0.f)
-            return 0.f;
-        else {
-            float ratio = v->f0 / x->basef0_ref;
-            if (ratio <= 0.f)
-                return 0.f;
-            // convert to semitones and map roughly +/-24 st -> -1..+1
-            float semis = 12.f * (logf(ratio) / logf(2.f));
-            float norm = semis / 24.f;
-            if (norm > 1.f) norm = 1.f;
-            else if (norm < -1.f) norm = -1.f;
-            return norm;
-        }
+    case 1: // pitch: normalise semitone offset from basef0_ref (clamped)
+    {
+        float f0 = (v->f0 > 1e-6f) ? v->f0 : 1.f;
+        float ratio = f0 / ((x->basef0_ref > 1e-6f) ? x->basef0_ref : 110.f);
+        float semi  = 12.f * logf(ratio) / logf(2.f);
+        // map ~[-48,+48] -> [0,1]
+        float norm = (semi + 48.f) / 96.f;
+        return jb_clamp(norm, 0.f, 1.f);
+    }
 
-    case 2: // ADSR envelope (0..1) — dedicated modulation ADSR
+    case 2: // lfo1 (-1..+1)
+        return jb_clamp(x->lfo_val[0], -1.f, 1.f);
 
-    case 3: // LFO1
-        return jb_clamp(x->lfo_val[0] * x->lfo_amt_eff[0], -1.f, 1.f);
-
-    case 4: // LFO2
-        return jb_clamp(x->lfo_val[1] * x->lfo_amt_eff[1], -1.f, 1.f);
+    case 3: // lfo2 (-1..+1)
+        return jb_clamp(x->lfo_val[1], -1.f, 1.f);
 
     default:
         return 0.f;
     }
 }
+
 
 // ---------- INTERNAL EXCITER (Fusion STEP 2) — block update + per-sample render ----------
 
@@ -1065,7 +1049,6 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
     jb_exc_voice_t *e = &v->exc;
 
     float env = jb_exc_adsr_next(&e->env);
-    v->exc_env_last = env;
 
     // fast silent path (env off + no active pulses)
     if (e->env.stage == JB_EXC_ENV_IDLE && e->pulseL.samples_left<=0 && e->pulseR.samples_left<=0){
@@ -1342,9 +1325,7 @@ static inline float jb_bell_zeta_eval(const t_juicy_bank_tilde *x, int bank, flo
 static inline float jb_bank_brightness(const t_juicy_bank_tilde *x, int bank){
     return bank ? x->brightness2 : x->brightness;
 }
-static inline float jb_bank_bandwidth_base(const t_juicy_bank_tilde *x, int bank){
-    return bank ? x->bandwidth2 : x->bandwidth;
-}
+
 static inline float jb_bank_micro_detune(const t_juicy_bank_tilde *x, int bank){
     return bank ? x->micro_detune2 : x->micro_detune;
 }
@@ -1589,7 +1570,6 @@ static void jb_project_behavior_into_voice_bank(t_juicy_bank_tilde *x, jb_voice_
     float *decay_pitch_mul_p  = bank ? &v->decay_pitch_mul2  : &v->decay_pitch_mul;
     float *decay_vel_mul_p    = bank ? &v->decay_vel_mul2    : &v->decay_vel_mul;
     float *brightness_v_p     = bank ? &v->brightness_v2     : &v->brightness_v;
-    float *bandwidth_v_p      = bank ? &v->bandwidth_v2      : &v->bandwidth_v;
     float *disp_target_p      = bank ? v->disp_target2       : v->disp_target;
 
     // Deprecated behavior controls removed: keep neutral multipliers.
@@ -1609,10 +1589,6 @@ static void jb_project_behavior_into_voice_bank(t_juicy_bank_tilde *x, jb_voice_
         }
         *brightness_v_p = b;
     }
-
-    // Bandwidth: base control only (velocity add-on removed)
-    float baseBW = jb_bank_bandwidth_base(x, bank);
-    *bandwidth_v_p = jb_clamp(baseBW, 0.f, 1.f);
 
     // Dispersion targets: keep current quantize-only approach (targets remain 0 => no ratio offsets)
     (void)n_modes;
@@ -1915,7 +1891,6 @@ jb_lock_fundamental_generic(n_modes, base, m);
         // --- GPD damping (solve once per change) ---
 
 float md_amt = jb_clamp(jb_bank_micro_detune(x, bank),0.f,1.f);
-    float bw_amt = bank ? jb_clamp(v->bandwidth_v2, 0.f, 1.f) : jb_clamp(v->bandwidth_v, 0.f, 1.f);
 
     float disp = jb_bank_dispersion(x, bank);
 
@@ -2010,21 +1985,7 @@ if (b0R < 1e-9f) b0R = 1e-9f;
 
 md->normL = b0L;
 md->normR = b0R;
-
-        if (bw_amt > 0.f){
-            float mode_scale = (n_modes>1)? ((float)i/(float)(n_modes-1)) : 0.f;
-            float max_det = 0.0005f + 0.0015f * mode_scale;
-            float detL = jb_clamp(md->bw_hit_ratioL, -max_det, max_det) * bw_amt;
-            float detR = jb_clamp(md->bw_hit_ratioR, -max_det, max_det) * bw_amt;
-            float w2L = wL * (1.f + detL);
-            float w2R = wR * (1.f + detR);
-            float c2L = cosf(w2L);
-            float c2R = cosf(w2R);
-            md->a1bL = 2.f*r*c2L; md->a2bL = -r*r;
-            md->a1bR = 2.f*r*c2R; md->a2bR = -r*r;
-        } else {
-            md->a1bL=md->a2bL=0.f; md->a1bR=md->a2bR=0.f;
-        }
+        md->a1bL=md->a2bL=0.f; md->a1bR=md->a2bR=0.f;
     }
 }
 static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
@@ -2273,7 +2234,6 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
 
     // Internal exciter reset (note-on reset + voice-steal reset)
     jb_exc_voice_reset_runtime(&v->exc);
-    v->exc_env_last = 0.f;
 
     // BANK 1
     for(int i=0;i<x->n_modes;i++){
@@ -2288,7 +2248,6 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
         md->y_pre_lastL=md->y_pre_lastR=0.f;
         md->hit_gateL=md->hit_gateR=0; md->hit_coolL=md->hit_coolR=0;
         md->md_hit_offsetL = 0.f; md->md_hit_offsetR = 0.f;
-        md->bw_hit_ratioL = 0.f;  md->bw_hit_ratioR = 0.f;
         md->normL = md->normR = 1.f;
         md->nyq_kill = 0;
 
@@ -2309,7 +2268,6 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
         md->y_pre_lastL=md->y_pre_lastR=0.f;
         md->hit_gateL=md->hit_gateR=0; md->hit_coolL=md->hit_coolR=0;
         md->md_hit_offsetL = 0.f; md->md_hit_offsetR = 0.f;
-        md->bw_hit_ratioL = 0.f;  md->bw_hit_ratioR = 0.f;
         md->normL = md->normR = 1.f;
         md->nyq_kill = 0;
 
@@ -2349,7 +2307,6 @@ static void jb_voice_panic_reset(t_juicy_bank_tilde *x, jb_voice_t *v){
 
     // Internal exciter reset
     jb_exc_voice_reset_runtime(&v->exc);
-    v->exc_env_last = 0.f;
 
 
     // Clear resonator runtime states (keep ratios/decays/gains as-is so next note is consistent)
@@ -2461,16 +2418,7 @@ static void jb_note_on(t_juicy_bank_tilde *x, float f0, float vel){
     jb_exc_note_on(x, v, v->vel);
 }
 
-static void jb_note_off(t_juicy_bank_tilde *x, float f0){
-    int match=-1; float best=1e9f; float tol=0.5f;
-    for(int i=0;i<x->max_voices;i++){
-        if (x->v[i].state==V_HELD){
-            float d=fabsf(x->v[i].f0 - f0);
-            if (d<tol){ match=i; break; }
-            if (x->v[i].energy<best){ best=x->v[i].energy; match=i; }
-        }
-    }
-}
+
 
 // ===== Explicit voice-addressed control (for Pd [poly]) =====
 static inline void jb_migrate_to_tail_if_needed(t_juicy_bank_tilde *x, const jb_voice_t *src){
@@ -2569,7 +2517,6 @@ static void juicy_bank_tilde_note_poly_midi(t_juicy_bank_tilde *x, t_floatarg vi
     else            { jb_note_on_voice(x, (int)vix, f0, vel); }
 }
 
-static void juicy_bank_tilde_off_poly(t_juicy_bank_tilde *x, t_floatarg vix){
     jb_note_off_voice(x, (int)vix);
 }
 
@@ -2678,9 +2625,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     for(int vix=0; vix<x->total_voices; ++vix){
         jb_voice_t *v = &x->v[vix];
         if (v->state==V_IDLE) continue;
-
-        const float bw_amt1 = jb_clamp(v->bandwidth_v, 0.f, 1.f);
-        const float bw_amt2 = jb_clamp(v->bandwidth_v2, 0.f, 1.f);        // (STEP 2) Internal exciter replaces external input routing (no more srcL/srcR per voice)
+        const float bw_amt1 = 0.f;
+        const float bw_amt2 = 0.f;
 
         // Per-bank master gain (0..1) with modulation-matrix target "master" (index 11).
         float (*mm1)[JB_N_MODTGT] = x->mod_matrix;
@@ -3338,10 +3284,7 @@ static void juicy_bank_tilde_release(t_juicy_bank_tilde *x, t_floatarg f){
 }
 
 // realism & misc
-static void juicy_bank_tilde_bandwidth(t_juicy_bank_tilde *x, t_floatarg f){
-    if (x->edit_bank) x->bandwidth2 = jb_clamp(f, 0.f, 1.f);
-    else              x->bandwidth  = jb_clamp(f, 0.f, 1.f);
-}
+
 static void juicy_bank_tilde_micro_detune(t_juicy_bank_tilde *x, t_floatarg f){
     if (x->edit_bank) x->micro_detune2 = jb_clamp(f, 0.f, 1.f);
     else              x->micro_detune  = jb_clamp(f, 0.f, 1.f);
@@ -3465,10 +3408,9 @@ static inline int jb_target_is_none(t_symbol *s){
 }
 static inline int jb_target_taken(const t_juicy_bank_tilde *x, t_symbol *tgt, int exclude_lane){
     if (jb_target_is_none(tgt)) return 0;
-    // lanes: 0=LFO1, 1=LFO2, 2=ADSR, 3=MIDI
+    // lanes: 0=LFO1, 1=LFO2
     if (exclude_lane != 0 && x->lfo_target[0] == tgt) return 1;
     if (exclude_lane != 1 && x->lfo_target[1] == tgt) return 1;
-    if (exclude_lane != 3 && x->midi_target   == tgt) return 1;
     return 0;
 }
 
@@ -3512,18 +3454,8 @@ static void juicy_bank_tilde_lfo2_target(t_juicy_bank_tilde *x, t_symbol *s){
 }
 
 
-static void juicy_bank_tilde_midi_amount(t_juicy_bank_tilde *x, t_floatarg f){
-    x->midi_amount = jb_clamp(f, -1.f, 1.f);
-}
-static void juicy_bank_tilde_midi_target(t_juicy_bank_tilde *x, t_symbol *s){
-    if (!s) return;
-    if (jb_target_is_none(s)){
-        x->midi_target = gensym("none");
-        return;
-    }
-    if (jb_target_taken(x, s, 3)) return;
-    x->midi_target = s;
-}
+
+
 
 // ---------- target inlet proxy (accepts bare selectors like 'brightness_1') ----------
 static void jb_tgtproxy_set(jb_tgtproxy *p, t_symbol *tgt){
@@ -3531,7 +3463,6 @@ static void jb_tgtproxy_set(jb_tgtproxy *p, t_symbol *tgt){
     switch(p->lane){
         case 0: juicy_bank_tilde_lfo1_target(p->owner, tgt); break;
         case 1: juicy_bank_tilde_lfo2_target(p->owner, tgt); break;
-        case 3: juicy_bank_tilde_midi_target(p->owner, tgt); break;
         default: break;
     }
 }
@@ -3553,7 +3484,6 @@ static void jb_tgtproxy_anything(jb_tgtproxy *p, t_symbol *s, int argc, t_atom *
     jb_tgtproxy_set(p, s);
 }
 
-static void juicy_bank_tilde_offset(t_juicy_bank_tilde *x, t_floatarg f){
     float v = jb_clamp(f, -1.f, 1.f);
     if (x->edit_bank) x->offset_amt2 = v;
     else              x->offset_amt  = v;
@@ -3612,11 +3542,11 @@ static void juicy_bank_tilde_note(t_juicy_bank_tilde *x, t_floatarg f0, t_floata
     if (f0<=0.f){ f0=1.f; }
     jb_note_on(x, f0, vel);
 }
-static void juicy_bank_tilde_off(t_juicy_bank_tilde *x, t_floatarg f0){ jb_note_off(x, (f0<=0.f)?1.f:f0); }
+
 static void juicy_bank_tilde_voices(t_juicy_bank_tilde *x, t_floatarg nf){
     (void)nf; x->max_voices = JB_ATTACK_VOICES;
     x->total_voices = JB_MAX_VOICES;
-// fixed 4
+// fixed playable/tail split
 }
 
 static void juicy_bank_tilde_note_midi(t_juicy_bank_tilde *x, t_floatarg midi, t_floatarg vel){
@@ -3634,7 +3564,6 @@ static void juicy_bank_tilde_reset(t_juicy_bank_tilde *x){
     for(int v=0; v<JB_MAX_VOICES; ++v){
         x->v[v].state = V_IDLE; x->v[v].f0 = x->basef0_ref; x->v[v].vel = 0.f; x->v[v].energy=0.f; x->v[v].rel_env = 1.f; x->v[v].rel_env2 = 1.f;
         jb_exc_voice_reset_runtime(&x->v[v].exc);
-        x->v[v].exc_env_last = 0.f;
         for (int b = 0; b < 2; ++b){
             x->v[v].fb_prevL[b] = x->v[v].fb_prevR[b] = 0.f;
             x->v[v].fb_hp_x1L[b] = x->v[v].fb_hp_y1L[b] = 0.f;
@@ -3659,7 +3588,6 @@ static void juicy_bank_tilde_preset_recall(t_juicy_bank_tilde *x){
         x->v[v].rel_env = 1.f;
         x->v[v].rel_env2 = 1.f;
         jb_exc_voice_reset_runtime(&x->v[v].exc);
-        x->v[v].exc_env_last = 0.f;
         for (int b = 0; b < 2; ++b){
             x->v[v].fb_prevL[b] = x->v[v].fb_prevR[b] = 0.f;
             x->v[v].fb_hp_x1L[b] = x->v[v].fb_hp_y1L[b] = 0.f;
@@ -3725,13 +3653,10 @@ inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     if (x->in_lfo_amount) inlet_free(x->in_lfo_amount);
     if (x->in_lfo1_target) inlet_free(x->in_lfo1_target);
     if (x->in_lfo2_target) inlet_free(x->in_lfo2_target);
-    if (x->in_midi_amount) inlet_free(x->in_midi_amount);
-    if (x->in_midi_target) inlet_free(x->in_midi_target);
 
     // Target proxies
     if (x->tgtproxy_lfo1) { pd_free((t_pd *)x->tgtproxy_lfo1); x->tgtproxy_lfo1 = 0; }
     if (x->tgtproxy_lfo2) { pd_free((t_pd *)x->tgtproxy_lfo2); x->tgtproxy_lfo2 = 0; }
-    if (x->tgtproxy_midi) { pd_free((t_pd *)x->tgtproxy_midi); x->tgtproxy_midi = 0; }
 
 
     outlet_free(x->outL); outlet_free(x->outR);
@@ -3805,7 +3730,6 @@ static void *juicy_bank_tilde_new(void){
 
         x->warp = 0.f;
 // realism defaults
-    x->bandwidth=0.1f; x->micro_detune=0.1f;
     x->excite_pos=0.33f; x->excite_pos_y=0.33f; x->pickup_x=0.33f; x->pickup_y=0.33f;
 // bank 2 defaults: start as a functional copy of bank 1 (bank 2 is still silent by master=0)
 x->n_modes2 = x->n_modes;
@@ -3834,7 +3758,6 @@ x->offset_amt2    = x->offset_amt;
 x->collision_amt2 = x->collision_amt;
 
 
-x->bandwidth2     = x->bandwidth;
 x->micro_detune2  = x->micro_detune;
 
 
@@ -3888,8 +3811,6 @@ x->excite_pos_y2  = x->excite_pos_y;
 
 
 
-    x->midi_amount = 0.f;
-    x->midi_target = gensym("none");
 
     // clear modulation matrix (bank 1 + bank 2)
     for(int i=0;i<JB_N_MODSRC;i++)
@@ -3909,7 +3830,6 @@ x->excite_pos_y2  = x->excite_pos_y;
         }
         // Internal exciter init (Fusion STEP 1)
         jb_exc_voice_init(&x->v[v].exc, x->sr, 0xC0FFEEull + 1337ull*(unsigned long long)(v*2));
-        x->v[v].exc_env_last = 0.f;
 
     }
 
@@ -4017,7 +3937,7 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->in_fb_agc_attack      = floatinlet_new(&x->x_obj, &x->fb_agc_attack);
     x->in_fb_agc_release     = floatinlet_new(&x->x_obj, &x->fb_agc_release);
 
-    // LFO + ADSR inlets (for future modulation matrix)
+    // LFO inlets
     // --- MOD SECTION (starts after exciter controls) ---
     x->in_lfo_index  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_index"));
     x->in_lfo_shape  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_shape"));
@@ -4029,19 +3949,15 @@ x->excite_pos_y2  = x->excite_pos_y;
     // so we route them through proxies that implement an 'anything' handler.
     x->tgtproxy_lfo1 = (jb_tgtproxy *)pd_new(jb_tgtproxy_class);
     x->tgtproxy_lfo2 = (jb_tgtproxy *)pd_new(jb_tgtproxy_class);
-    x->tgtproxy_midi = (jb_tgtproxy *)pd_new(jb_tgtproxy_class);
 
     if (x->tgtproxy_lfo1){ x->tgtproxy_lfo1->owner = x; x->tgtproxy_lfo1->lane = 0; }
     if (x->tgtproxy_lfo2){ x->tgtproxy_lfo2->owner = x; x->tgtproxy_lfo2->lane = 1; }
-    if (x->tgtproxy_midi){ x->tgtproxy_midi->owner = x; x->tgtproxy_midi->lane = 3; }
 
     x->in_lfo1_target = inlet_new(&x->x_obj, x->tgtproxy_lfo1 ? &x->tgtproxy_lfo1->p_pd : &x->x_obj.ob_pd, 0, 0);
     x->in_lfo2_target = inlet_new(&x->x_obj, x->tgtproxy_lfo2 ? &x->tgtproxy_lfo2->p_pd : &x->x_obj.ob_pd, 0, 0);
 
 
 
-    x->in_midi_amount = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("midi_amount"));
-    x->in_midi_target = inlet_new(&x->x_obj, x->tgtproxy_midi ? &x->tgtproxy_midi->p_pd : &x->x_obj.ob_pd, 0, 0);
 
     // Outs
     x->outL = outlet_new(&x->x_obj, &s_signal);
@@ -4206,42 +4122,7 @@ static void juicy_bank_tilde_anything(t_juicy_bank_tilde *x, t_symbol *s, int ar
         x->mod_matrix[src_idx][tgt_idx] = amt;
     }
 }
-static void juicy_bank_tilde_matrix(t_juicy_bank_tilde *x, t_symbol *s, int argc, t_atom *argv){
-    (void)s;
-    if (argc < 2) return;
 
-    int bank = x->edit_bank; // default: selected bank
-    int a = 0;
-
-    // Optional bank prefix: "b1" or "b2"
-    if (argv[0].a_type == A_SYMBOL){
-        const char *sym0 = atom_getsymbol(argv)->s_name;
-        if (sym0 && (!strcmp(sym0, "b1") || !strcmp(sym0, "b2"))){
-            bank = (sym0[1] == '2') ? 1 : 0;
-            a = 1;
-            if (argc < 3) return; // need selector + amount
-        }
-    }
-
-    if (argv[a].a_type != A_SYMBOL) return;
-    t_symbol *route = atom_getsymbol(argv + a);
-    if (!route) return;
-
-    int src_idx = -1, tgt_idx = -1;
-    if (!jb_modmatrix_parse_selector(route->s_name, &src_idx, &tgt_idx))
-        return;
-
-    t_float amt = atom_getfloat(argv + a + 1);
-    if (amt < -1.f) amt = -1.f;
-    else if (amt > 1.f) amt = 1.f;
-
-    float (*mm)[JB_N_MODTGT] = jb_bank_mod_matrix(x, bank);
-
-    if (src_idx >= 0 && src_idx < JB_N_MODSRC &&
-        tgt_idx >= 0 && tgt_idx < JB_N_MODTGT){
-        mm[src_idx][tgt_idx] = amt;
-    }
-}
 
 void juicy_bank_tilde_setup(void){
     // Target-inlet proxy class (accepts bare selectors like 'brightness_1')
@@ -4289,7 +4170,6 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_brightness, g
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_density_individual, gensym("density_individual"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_quantize, gensym("quantize"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_dispersion, gensym("dispersion"), A_DEFFLOAT, 0); // legacy alias
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_offset, gensym("offset"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_collision, gensym("collision"), A_DEFFLOAT, 0);
 
     
@@ -4313,8 +4193,6 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pickupL,     
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo_amount, gensym("lfo_amount"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo1_target, gensym("lfo1_target"), A_SYMBOL, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo2_target, gensym("lfo2_target"), A_SYMBOL, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_midi_amount, gensym("midi_amount"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_midi_target, gensym("midi_target"), A_SYMBOL, 0);
 // INDIVIDUAL (per-mode)
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index, gensym("index"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_ratio_i, gensym("ratio"), A_DEFFLOAT, 0);
@@ -4333,19 +4211,16 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pickupL,     
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_dispersion_reroll, gensym("dispersion_reroll"), 0);
 
     // realism & misc
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bandwidth, gensym("bandwidth"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_micro_detune, gensym("micro_detune"), A_DEFFLOAT, 0);
 
     // notes/poly (non-voice-specific)
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_note, gensym("note"), A_DEFFLOAT, A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_note_midi, gensym("note_midi"), A_DEFFLOAT, A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_off, gensym("off"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_voices, gensym("voices"), A_DEFFLOAT, 0);
 
     // voice-addressed (for [poly])
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_note_poly, gensym("note_poly"), A_DEFFLOAT, A_DEFFLOAT, A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_note_poly_midi, gensym("note_poly_midi"), A_DEFFLOAT, A_DEFFLOAT, A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_off_poly, gensym("off_poly"), A_DEFFLOAT, 0);
 
     // base & reset
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_basef0, gensym("basef0"), A_DEFFLOAT, 0);
