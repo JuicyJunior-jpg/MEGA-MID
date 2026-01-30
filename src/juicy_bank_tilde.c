@@ -1132,19 +1132,18 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
 // ---------
 
 // ---------- helpers ----------
+#ifndef JB_BRIGHTNESS_BMAX
+#define JB_BRIGHTNESS_BMAX 3.0f
+#endif
 static float jb_bright_gain(float ratio_rel, float b){
-    // Brightness slope (defines spectral slope):
-    //  - b in [-1,1]
-    //  - b = 0   : saw reference (gain ~ 1/ratio_rel)
-    //  - b = +1  : flat spectrum (all modes ~ equal gain)
-    //  - b = -1  : dark (gain ~ 1/ratio_rel^2)
-    //
-    // Implementation: gain = ratio_rel^(-alpha), alpha = 1 - b
-    //  -> b=-1 => alpha=2 ; b=0 => alpha=1 ; b=+1 => alpha=0
+    // van den Doel & Pai spectral tilt:
+    // a_k = a_natural_k * (f_k / f0)^B
+    // ratio_rel is (f_k/f0) for keytracked modes (or a normalized ratio for absolute-Hz modes).
+    // b in [-1,1] maps to B in [-BMAX,+BMAX], with b=0 meaning neutral (no tilt).
+    float rr = jb_clamp(ratio_rel, 1e-6f, 1e6f);
     float bb = jb_clamp(b, -1.f, 1.f);
-    float rr = jb_clamp(ratio_rel, 1.f, 1e6f);
-    float alpha = 1.f - bb;
-    return powf(rr, -alpha);
+    float B  = bb * JB_BRIGHTNESS_BMAX;
+    return powf(rr, B);
 }
 // ---------- density mapping ----------
 // Only keytracked modes are spread by density; absolute-Hz modes keep base_ratio.
@@ -2099,11 +2098,8 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
 
     float brightness_v = bank ? v->brightness_v2 : v->brightness_v;
 
-    // Tela-style brightness normalization: keep loudness stable when brightness changes.
-    // We normalize the summed per-mode gains to match the reference spectrum at brightness=0 (saw slope).
-    float sum_gain = 0.f;
-    float sum_ref  = 0.f;
 
+    // van den Doel & Pai brightness: a_k = a_natural_k * (f_k/f0)^B (no loudness normalization).
     // LFO1 -> partials_* : smooth float gating across active modes
     if (lfo1 != 0.f){
         if ((bank == 0 && lfo1_tgt == gensym("partials_1")) || (bank != 0 && lfo1_tgt == gensym("partials_2"))){
@@ -2116,9 +2112,9 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
         }
     }
 
-    for(int i = 0; i < n_modes; ++i){
+    for (int i = 0; i < n_modes; ++i){
         jb_mode_rt_t *md = &m[i];
-        if(!base[i].active){
+        if (!base[i].active){
             jb_svf_reset(&md->svfL);
             jb_svf_reset(&md->svfR);
             md->t60_s = 0.f;
@@ -2127,88 +2123,56 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
         }
 
         float ratio = m[i].ratio_now + disp_offset[i];
-        float ratio_rel = base[i].keytrack ? ratio : ((v->f0>0.f)? (ratio / v->f0) : ratio);
+        float ratio_rel = base[i].keytrack ? ratio : ((v->f0 > 0.f) ? (ratio / v->f0) : ratio);
 
-        float g = base[i].base_gain * jb_bright_gain(ratio_rel, brightness_v);
+        // natural gain (base_gain) * brightness tilt
+        float gn = base[i].base_gain * jb_bright_gain(ratio_rel, brightness_v);
+        if (m[i].nyq_kill) gn = 0.f;
 
-        float g_ref = base[i].base_gain * jb_bright_gain(ratio_rel, 0.f);
-        float w = 1.f;
-        float gn = g * w;
-        float gn_ref = g_ref * w;
-        if (m[i].nyq_kill) { gn = 0.f; gn_ref = 0.f; gn_ref = 0.f; }
-
+        // Partial-count limiter (fade out the highest modes smoothly)
         if (active_modes <= 0){
-            gn = 0.f; gn_ref = 0.f;
+            gn = 0.f;
         } else if (active_modes < n_modes){
             int K = active_modes;
             if (i >= K){
                 float fade_width = 3.f;
                 float u = ((float)i - (float)K) / fade_width;
                 if (u >= 1.f){
-                    gn = 0.f; gn_ref = 0.f;
+                    gn = 0.f;
                 } else if (u > 0.f){
                     float w_fade = 0.5f * (1.f + cosf((float)M_PI * u));
                     gn *= w_fade;
-                    gn_ref *= w_fade;
                 }
             }
         }
 
         // LFO1 partials gating (smooth float: 0..32)
-
         if (lfo1_partials_enabled){
-
             const int r = rank_of_id[i];
-
             float w_p = 0.f;
-
             if (r < lfo1_partials_k) w_p = 1.f;
-
             else if (r == lfo1_partials_k) w_p = lfo1_partials_frac;
-
             else w_p = 0.f;
-
             gn *= w_p;
-
-            gn_ref *= w_p;
-
         }
+
         // --- Spatial coupling (2D excitation, 2D pickup; signed) ---
         float gnL = gn, gnR = gn;
-        float gn_refL = gn_ref, gn_refR = gn_ref;
         {
             const int n = freq_rank_of_id[i]; // 0..active_count-1 (ascending frequency)
             if (n >= 0){
-                // Excitation is 2D: ge = sin(nx*pi*posx) * sin(ny*pi*posy)
                 int nx, ny;
                 jb_rank_to_nm(n, &nx, &ny);
                 const float ge  = (sinf((float)nx * PI * posx) * sinf((float)ny * PI * posy)) * pos_norm;
-
-                // Pickup (mic) reads displacement at a single 2D mic position (X,Y).
-                // We keep one pickup point for both L/R outputs (no stereo mic spread here).
-                const float gp = (sinf((float)nx * PI * micX) * sinf((float)ny * PI * micY)) * mic_norm;
-
-                const float wL = ge * gp;
-                const float wR = ge * gp;
-gnL     *= wL;
-                gnR     *= wR;
-                gn_refL *= wL;
-                gn_refR *= wR;
+                const float gp  = (sinf((float)nx * PI * micX) * sinf((float)ny * PI * micY)) * mic_norm;
+                const float w = ge * gp;
+                gnL *= w;
+                gnR *= w;
             }
         }
 
         m[i].gain_nowL = gnL;
         m[i].gain_nowR = gnR;
-        sum_gain += 0.5f * (fabsf(gnL) + fabsf(gnR));
-        sum_ref  += 0.5f * (fabsf(gn_refL) + fabsf(gn_refR));
-    }
-
-    // Apply normalization so brightness redistributes energy without changing overall level.
-    float norm = (sum_gain > 1e-12f) ? (sum_ref / sum_gain) : 1.f;
-    if (norm < 0.f) norm = 0.f;
-    for (int i = 0; i < n_modes; ++i){
-        m[i].gain_nowL *= norm;
-        m[i].gain_nowR *= norm;
     }
 }
 
@@ -3771,7 +3735,7 @@ static void jb_apply_default_saw_bank(t_juicy_bank_tilde *x, int bank){
         base[i].active = 1;
         base[i].base_ratio = (float)(i+1);
         base[i].base_decay_ms = 1000.f;   // 1 second
-        // Flat per-mode gain by default (brightness defines the spectral slope)
+        // Flat per-mode gain by default (brightness applies spectral tilt)
         base[i].base_gain = 1.0f;        base[i].keytrack = 1;
         base[i].disp_signature = 0.f;
         base[i].micro_sig      = 0.f;
@@ -4071,7 +4035,7 @@ static void juicy_bank_tilde_INIT(t_juicy_bank_tilde *x){
     int b = (x->edit_bank != 0) ? 1 : 0;
     jb_apply_default_saw_bank(x, b);
     juicy_bank_tilde_restart(x);
-    post("juicy_bank~: INIT complete (selected bank=%d, 32 modes, flat per-mode gains, brightness=0 -> saw slope, decay=1s).", b+1);
+    post("juicy_bank~: INIT complete (selected bank=%d, 32 modes, flat per-mode gains, brightness=0 -> neutral tilt, decay=1s).", b+1);
 }
 static void juicy_bank_tilde_init_alias(t_juicy_bank_tilde *x){ juicy_bank_tilde_INIT(x); }
 
