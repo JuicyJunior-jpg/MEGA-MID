@@ -662,8 +662,10 @@ float density_amt; jb_density_mode density_mode;
     float density_amt2; jb_density_mode density_mode2;
     float dispersion, dispersion_last;
     float dispersion2, dispersion_last2;
-    float offset_amt;
-    float offset_amt2;
+    float odd_skew;
+    float even_skew;
+    float odd_skew2;
+    float even_skew2;
     float collision_amt;
     float collision_amt2;
 
@@ -716,7 +718,7 @@ float density_amt; jb_density_mode density_mode;
     
         t_inlet *in_release;
 // Body controls (damping, brightness, density, dispersion, anisotropy)
-    t_inlet *in_bell_peak_hz, *in_bell_peak_zeta, *in_bell_npl, *in_bell_npr, *in_bell_npm, *in_damper_sel, *in_brightness, *in_density, *in_stretch, *in_warp, *in_dispersion, *in_offset, *in_collision;
+    t_inlet *in_bell_peak_hz, *in_bell_peak_zeta, *in_bell_npl, *in_bell_npr, *in_bell_npm, *in_damper_sel, *in_brightness, *in_density, *in_stretch, *in_warp, *in_dispersion, *in_odd_skew, *in_even_skew, *in_collision;
     // Individual
     t_inlet *in_index, *in_ratio, *in_gain, *in_decay;
         // --- Spatial coupling (node/antinode; gain-level only) ---
@@ -1244,8 +1246,11 @@ static inline float jb_bank_dispersion(const t_juicy_bank_tilde *x, int bank){
 static inline float *jb_bank_dispersion_last(t_juicy_bank_tilde *x, int bank){
     return bank ? &x->dispersion_last2 : &x->dispersion_last;
 }
-static inline float jb_bank_offset_amt(const t_juicy_bank_tilde *x, int bank){
-    return bank ? x->offset_amt2 : x->offset_amt;
+static inline float jb_bank_odd_skew(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->odd_skew2 : x->odd_skew;
+}
+static inline float jb_bank_even_skew(const t_juicy_bank_tilde *x, int bank){
+    return bank ? x->even_skew2 : x->even_skew;
 }
 static inline float jb_bank_collision_amt(const t_juicy_bank_tilde *x, int bank){
     return bank ? x->collision_amt2 : x->collision_amt;
@@ -1531,16 +1536,21 @@ static void jb_apply_stretch_generic(int n_modes, const jb_mode_base_t *base, fl
     }
 }
 
-static void jb_apply_offset_generic(int n_modes, const jb_mode_base_t *base, float offset_amt, jb_mode_rt_t *m){
-    float amt = jb_clamp(offset_amt, -1.f, 1.f);
-    if (amt == 0.f) return;
-    float ratio = powf(2.f, amt);
+static void jb_apply_odd_even_skew_generic(int n_modes, const jb_mode_base_t *base, float odd_skew, float even_skew, jb_mode_rt_t *m){
+    const float intensity = 1.0f; // max skew in octaves when skew=±1
+    float os = jb_clamp(odd_skew,  -1.f, 1.f);
+    float es = jb_clamp(even_skew, -1.f, 1.f);
+    if (os == 0.f && es == 0.f) return;
+
+    const float odd_fac  = exp2f(os * intensity);
+    const float even_fac = exp2f(es * intensity);
+
     for (int i = 0; i < n_modes; ++i){
         if (!base[i].active) continue;
         if (!base[i].keytrack) continue;
-        if (i % 2 == 1){
-            m[i].ratio_now *= ratio;
-        }
+        const int n = i + 1; // 1-based mode index
+        if ((n & 1) == 1) m[i].ratio_now *= odd_fac;
+        else              m[i].ratio_now *= even_fac;
     }
 }
 
@@ -1654,20 +1664,6 @@ static void jb_apply_stretch(const t_juicy_bank_tilde *x, jb_voice_t *v){
     jb_apply_stretch_generic(x->n_modes, x->base, x->stretch, x->warp, v->m);
 }
 
-static void jb_apply_offset(const t_juicy_bank_tilde *x, jb_voice_t *v){
-    float amt = jb_clamp(x->offset_amt, -1.f, 1.f);
-    if (amt == 0.f)
-        return;
-    float ratio = powf(2.f, amt); // offset in octaves
-    for (int i = 0; i < x->n_modes; ++i){
-        if (!x->base[i].active) continue;
-        if (!x->base[i].keytrack) continue;
-        if (i % 2 == 1){ // every other partial (skip fundamental at index 0)
-            v->m[i].ratio_now *= ratio;
-        }
-    }
-}
-
 static void jb_apply_collision(const t_juicy_bank_tilde *x, jb_voice_t *v){
     float c = jb_clamp(x->collision_amt, 0.f, 1.f);
     if (c <= 0.f || x->n_modes <= 2)
@@ -1740,8 +1736,8 @@ static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, in
         jb_apply_density_generic(n_modes, base, density_amt_eff, m);
     }
 jb_lock_fundamental_generic(n_modes, base, m);
+    jb_apply_odd_even_skew_generic(n_modes, base, jb_bank_odd_skew(x, bank), jb_bank_even_skew(x, bank), m);
     jb_apply_stretch_generic(n_modes, base, jb_bank_stretch_amt(x, bank), jb_bank_warp_amt(x, bank), m);
-    jb_apply_offset_generic(n_modes, base, jb_bank_offset_amt(x, bank), m);
     jb_apply_collision_generic(n_modes, base, jb_bank_collision_amt(x, bank), m);
 
     // --- pitch base (bank semitone + pitch-mod from matrix) ---
@@ -3361,10 +3357,16 @@ static void jb_tgtproxy_anything(jb_tgtproxy *p, t_symbol *s, int argc, t_atom *
     jb_tgtproxy_set(p, s);
 }
 
-static void juicy_bank_tilde_offset(t_juicy_bank_tilde *x, t_floatarg f){
+static void juicy_bank_tilde_odd_skew(t_juicy_bank_tilde *x, t_floatarg f){
     float v = jb_clamp(f, -1.f, 1.f);
-    if (x->edit_bank) x->offset_amt2 = v;
-    else              x->offset_amt  = v;
+    if (x->edit_bank) x->odd_skew2 = v;
+    else              x->odd_skew  = v;
+}
+
+static void juicy_bank_tilde_even_skew(t_juicy_bank_tilde *x, t_floatarg f){
+    float v = jb_clamp(f, -1.f, 1.f);
+    if (x->edit_bank) x->even_skew2 = v;
+    else              x->even_skew  = v;
 }
 
 static void juicy_bank_tilde_collision(t_juicy_bank_tilde *x, t_floatarg f){
@@ -3641,7 +3643,8 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
 
     inlet_free(x->in_bell_peak_hz); inlet_free(x->in_bell_peak_zeta); inlet_free(x->in_bell_npl); inlet_free(x->in_bell_npr); inlet_free(x->in_bell_npm); inlet_free(x->in_damper_sel); inlet_free(x->in_brightness); inlet_free(x->in_density);
     inlet_free(x->in_warp); inlet_free(x->in_dispersion);
-    inlet_free(x->in_offset);
+    inlet_free(x->in_odd_skew);
+    inlet_free(x->in_even_skew);
     inlet_free(x->in_collision);
 
             inlet_free(x->in_stretch);
@@ -3766,7 +3769,8 @@ static void *juicy_bank_tilde_new(void){
         x->bell_npm[0][d]       = 0.f;
     }
 
-x->offset_amt=0.f;
+x->odd_skew = 0.f;
+    x->even_skew = 0.f;
     x->collision_amt=0.f;
 
     // Stretch default
@@ -3801,8 +3805,9 @@ x->density_mode2  = x->density_mode;
 x->dispersion2      = x->dispersion;
 x->dispersion_last2 = x->dispersion_last;
 
-x->offset_amt2    = x->offset_amt;
-x->collision_amt2 = x->collision_amt;
+x->odd_skew2      = x->odd_skew;
+    x->even_skew2     = x->even_skew;
+    x->collision_amt2 = x->collision_amt;
 
 
 x->micro_detune2  = x->micro_detune;
@@ -3908,7 +3913,7 @@ x->excite_pos_y2  = x->excite_pos_y;
     // Behavior (reduced)
     x->in_release    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("release")); // release 0..1
 
-    // Body (order: bell_freq, bell_zeta, bell_npl, bell_npr, bell_npm, damper_sel, brightness, density, stretch, warp, quantize, offset, collision)
+    // Body (order: bell_freq, bell_zeta, bell_npl, bell_npr, bell_npm, damper_sel, brightness, density, stretch, warp, quantize, odd_skew, even_skew, collision)
     x->in_bell_peak_hz   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("bell_freq"));
     x->in_bell_peak_zeta = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("bell_zeta"));
     x->in_bell_npl       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("bell_npl"));
@@ -3920,7 +3925,8 @@ x->excite_pos_y2  = x->excite_pos_y;
     x->in_stretch    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("stretch"));
     x->in_warp       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("warp"));
     x->in_dispersion = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("quantize"));
-    x->in_offset     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("offset"));
+    x->in_odd_skew   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("odd_skew"));
+    x->in_even_skew  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("even_skew"));
     x->in_collision  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("collision"));
     // Spatial coupling controls (node/antinode; gain-level only)
     x->in_position      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("position_x"));    // excitation X pos 0..1
@@ -4148,7 +4154,8 @@ static int jb_modmatrix_parse_selector(const char *name, int *src_out, int *tgt_
     else if (!strcmp(tgt, "density"))                                   tgt_idx = 5;
     else if (!strcmp(tgt, "stretch"))                                   tgt_idx = 6;
     else if (!strcmp(tgt, "warp"))                                      tgt_idx = 7;
-    else if (!strcmp(tgt, "offset"))                                    tgt_idx = 8;
+    else if (!strcmp(tgt, "odd_skew"))                                  tgt_idx = 8;
+    else if (!strcmp(tgt, "even_skew"))                                 tgt_idx = 9;
     else if (!strcmp(tgt, "master"))                                    tgt_idx = 11;
     else if (!strcmp(tgt, "pitch"))                                     tgt_idx = 12;
     else if (!strcmp(tgt, "partials"))                                  tgt_idx = 14;
@@ -4226,7 +4233,8 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_brightness, g
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_quantize, gensym("quantize"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_dispersion, gensym("dispersion"), A_DEFFLOAT, 0); // legacy alias
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_collision, gensym("collision"), A_DEFFLOAT, 0);
-    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_offset,    gensym("offset"),    A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_odd_skew,  gensym("odd_skew"),  A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_even_skew, gensym("even_skew"), A_DEFFLOAT, 0);
 
     
     
