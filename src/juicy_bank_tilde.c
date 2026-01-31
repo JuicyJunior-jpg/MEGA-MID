@@ -50,6 +50,7 @@
 #define JB_N_MODSRC 4
 #define JB_N_MODTGT    15
 #define JB_N_LFO       2
+#define JB_N_DAMPERS  3
 #define JB_PITCH_MOD_SEMITONES  2.0f
 
 // ---------- SPACE (global stereo room) ----------
@@ -610,6 +611,7 @@ typedef struct _juicy_bank_tilde {
     int active_modes2;
     // Bank editing focus (1-based UI: 1=bank1, 2=bank2)
     int   edit_bank;              // 0..1
+    int   edit_damper;            // 0..JB_N_DAMPERS-1 (selected Type-4 damper to edit)
     float bank_master[2];          // per-bank master (0..1)
     int   bank_semitone[2];        // per-bank semitone transpose (-12..+12)
     int   bank_octave[2];          // per-bank octave (-2..+2, snapped)
@@ -643,24 +645,20 @@ typedef struct _juicy_bank_tilde {
     float warp2;
 float brightness;
 
-    // --- TYPE-4 CAUGHEY damping (single bell, per-bank) ---
+    // --- TYPE-4 CAUGHEY damping (Type-4 bell, stackable 3x per-bank) ---
     // One bell basis B(omega) centered at omega_p:
     //   B(omega) = (2 + n_pm) / ( (omega/omega_p)^(-n_pl) + n_pm + (omega/omega_p)^(n_pr) )
-    //   zeta(omega) = zeta_p * B(omega)
-    float bell_peak_hz;     // peak frequency (Hz)
-    float bell_peak_zeta;   // peak damping ratio at the peak (zeta_p)
-    float bell_npl;         // left power  (n_pl > 0)
-    float bell_npr;         // right power (n_pr > 0)
-    float bell_npm;         // model parameter (n_pm > -2)
+    //   zeta_k(omega) = zeta_p[k] * B_k(omega)
+    // Stacking (faithful): zeta_total(omega) = sum_k zeta_k(omega)
+    float bell_peak_hz[2][JB_N_DAMPERS];     // per-bank, per-damper peak frequency (Hz)
+    float bell_peak_zeta[2][JB_N_DAMPERS];   // per-bank, per-damper peak damping ratio at the peak (zeta_p)
+    float bell_npl[2][JB_N_DAMPERS];         // per-bank, per-damper left power  (n_pl > 0)
+    float bell_npr[2][JB_N_DAMPERS];         // per-bank, per-damper right power (n_pr > 0)
+    float bell_npm[2][JB_N_DAMPERS];         // per-bank, per-damper model parameter (n_pm > -2)
 
     float brightness2;
-    float bell_peak_hz_2;
-    float bell_peak_zeta_2;
-    float bell_npl_2;
-    float bell_npr_2;
-    float bell_npm_2;
 
-    float density_amt; jb_density_mode density_mode;
+float density_amt; jb_density_mode density_mode;
     float density_amt2; jb_density_mode density_mode2;
     float dispersion, dispersion_last;
     float dispersion2, dispersion_last2;
@@ -718,7 +716,7 @@ float brightness;
     
         t_inlet *in_release;
 // Body controls (damping, brightness, density, dispersion, anisotropy)
-    t_inlet *in_bell_peak_hz, *in_bell_peak_zeta, *in_bell_npl, *in_bell_npr, *in_bell_npm, *in_brightness, *in_density, *in_stretch, *in_warp, *in_dispersion, *in_offset, *in_collision;
+    t_inlet *in_bell_peak_hz, *in_bell_peak_zeta, *in_bell_npl, *in_bell_npr, *in_bell_npm, *in_damper_sel, *in_brightness, *in_density, *in_stretch, *in_warp, *in_dispersion, *in_offset, *in_collision;
     // Individual
     t_inlet *in_index, *in_ratio, *in_gain, *in_decay;
         // --- Spatial coupling (node/antinode; gain-level only) ---
@@ -1132,18 +1130,19 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
 // ---------
 
 // ---------- helpers ----------
-#ifndef JB_BRIGHTNESS_BMAX
-#define JB_BRIGHTNESS_BMAX 3.0f
-#endif
 static float jb_bright_gain(float ratio_rel, float b){
-    // van den Doel & Pai spectral tilt:
-    // a_k = a_natural_k * (f_k / f0)^B
-    // ratio_rel is (f_k/f0) for keytracked modes (or a normalized ratio for absolute-Hz modes).
-    // b in [-1,1] maps to B in [-BMAX,+BMAX], with b=0 meaning neutral (no tilt).
-    float rr = jb_clamp(ratio_rel, 1e-6f, 1e6f);
+    // Brightness slope (defines spectral slope):
+    //  - b in [-1,1]
+    //  - b = 0   : saw reference (gain ~ 1/ratio_rel)
+    //  - b = +1  : flat spectrum (all modes ~ equal gain)
+    //  - b = -1  : dark (gain ~ 1/ratio_rel^2)
+    //
+    // Implementation: gain = ratio_rel^(-alpha), alpha = 1 - b
+    //  -> b=-1 => alpha=2 ; b=0 => alpha=1 ; b=+1 => alpha=0
     float bb = jb_clamp(b, -1.f, 1.f);
-    float B  = bb * JB_BRIGHTNESS_BMAX;
-    return powf(rr, B);
+    float rr = jb_clamp(ratio_rel, 1.f, 1e6f);
+    float alpha = 1.f - bb;
+    return powf(rr, -alpha);
 }
 // ---------- density mapping ----------
 // Only keytracked modes are spread by density; absolute-Hz modes keep base_ratio.
@@ -1257,27 +1256,38 @@ static inline float jb_bank_warp_amt(const t_juicy_bank_tilde *x, int bank){
     return bank ? x->warp2 : x->warp;
 }
 
-// --- TYPE-4 Caughey damping (single bell, per-bank) ---
+// --- TYPE-4 Caughey damping (Type-4 bell, stackable 3x per-bank) ---
 // We operate directly in modal coordinates:
-//   zeta(omega) = zeta_p * B(omega)
-//   B(omega)    = (2 + n_pm) / ( (omega/omega_p)^(-n_pl) + n_pm + (omega/omega_p)^(n_pr) )
-//   c_n         = 2 * zeta(omega_n) * omega_n
+//   zeta_k(omega) = zeta_p[k] * B_k(omega)
+//   B_k(omega)    = (2 + n_pm[k]) / ( (omega/omega_p[k])^(-n_pl[k]) + n_pm[k] + (omega/omega_p[k])^(n_pr[k]) )
+// Stacking (faithful):
+//   zeta_total(omega) = sum_{k=0..JB_N_DAMPERS-1} zeta_k(omega)
 // Then we convert zeta to T60 via: exp(-zeta*omega*T60)=1/1000.
 
-static inline float jb_bank_bell_peak_hz(const t_juicy_bank_tilde *x, int bank){
-    return bank ? x->bell_peak_hz_2 : x->bell_peak_hz;
+static inline float jb_bank_bell_peak_hz(const t_juicy_bank_tilde *x, int bank, int damper){
+    if (bank < 0) bank = 0; else if (bank > 1) bank = 1;
+    if (damper < 0) damper = 0; else if (damper >= JB_N_DAMPERS) damper = JB_N_DAMPERS - 1;
+    return x->bell_peak_hz[bank][damper];
 }
-static inline float jb_bank_bell_peak_zeta(const t_juicy_bank_tilde *x, int bank){
-    return bank ? x->bell_peak_zeta_2 : x->bell_peak_zeta;
+static inline float jb_bank_bell_peak_zeta(const t_juicy_bank_tilde *x, int bank, int damper){
+    if (bank < 0) bank = 0; else if (bank > 1) bank = 1;
+    if (damper < 0) damper = 0; else if (damper >= JB_N_DAMPERS) damper = JB_N_DAMPERS - 1;
+    return x->bell_peak_zeta[bank][damper];
 }
-static inline float jb_bank_bell_npl(const t_juicy_bank_tilde *x, int bank){
-    return bank ? x->bell_npl_2 : x->bell_npl;
+static inline float jb_bank_bell_npl(const t_juicy_bank_tilde *x, int bank, int damper){
+    if (bank < 0) bank = 0; else if (bank > 1) bank = 1;
+    if (damper < 0) damper = 0; else if (damper >= JB_N_DAMPERS) damper = JB_N_DAMPERS - 1;
+    return x->bell_npl[bank][damper];
 }
-static inline float jb_bank_bell_npr(const t_juicy_bank_tilde *x, int bank){
-    return bank ? x->bell_npr_2 : x->bell_npr;
+static inline float jb_bank_bell_npr(const t_juicy_bank_tilde *x, int bank, int damper){
+    if (bank < 0) bank = 0; else if (bank > 1) bank = 1;
+    if (damper < 0) damper = 0; else if (damper >= JB_N_DAMPERS) damper = JB_N_DAMPERS - 1;
+    return x->bell_npr[bank][damper];
 }
-static inline float jb_bank_bell_npm(const t_juicy_bank_tilde *x, int bank){
-    return bank ? x->bell_npm_2 : x->bell_npm;
+static inline float jb_bank_bell_npm(const t_juicy_bank_tilde *x, int bank, int damper){
+    if (bank < 0) bank = 0; else if (bank > 1) bank = 1;
+    if (damper < 0) damper = 0; else if (damper >= JB_N_DAMPERS) damper = JB_N_DAMPERS - 1;
+    return x->bell_npm[bank][damper];
 }
 
 static inline float jb_type4_basis(float omega, float omega_p, float npl, float npr, float npm){
@@ -1309,29 +1319,41 @@ static inline float jb_type4_basis(float omega, float omega_p, float npl, float 
 
 static inline float jb_bell_zeta_eval(const t_juicy_bank_tilde *x, int bank, float omega){
     // Parameters (already mapped/clamped by inlet handlers)
-    float peak_hz   = jb_bank_bell_peak_hz(x, bank);
-    float zeta_p    = jb_bank_bell_peak_zeta(x, bank);
-    float npl       = jb_bank_bell_npl(x, bank);
-    float npr       = jb_bank_bell_npr(x, bank);
-    float npm       = jb_bank_bell_npm(x, bank);
+    // Stacked Type-4 bell damping: zeta_total(omega) = sum_k zeta_k(omega)
+    float zsum = 0.f;
 
-    // Convert peak frequency to omega_p (rad/sec)
-    if (!isfinite(peak_hz) || peak_hz < 1.f) peak_hz = 1.f;
     // avoid peaks above Nyquist (if sr is known)
     float sr = x->sr;
-    if (sr > 1.f){
-        float nyq = 0.5f * sr;
-        if (peak_hz > 0.95f * nyq) peak_hz = 0.95f * nyq;
+    float nyq = (sr > 1.f) ? (0.5f * sr) : 0.f;
+
+    for (int k = 0; k < JB_N_DAMPERS; ++k){
+        float zeta_p = jb_bank_bell_peak_zeta(x, bank, k);
+        if (!isfinite(zeta_p) || zeta_p <= 0.f) continue; // treat <=0 as "off"
+
+        float peak_hz = jb_bank_bell_peak_hz(x, bank, k);
+        float npl     = jb_bank_bell_npl(x, bank, k);
+        float npr     = jb_bank_bell_npr(x, bank, k);
+        float npm     = jb_bank_bell_npm(x, bank, k);
+
+        // Convert peak frequency to omega_p (rad/sec)
+        if (!isfinite(peak_hz) || peak_hz < 1.f) peak_hz = 1.f;
+        if (nyq > 0.f && peak_hz > 0.95f * nyq) peak_hz = 0.95f * nyq;
+
+        float omega_p = 2.f * (float)M_PI * peak_hz;
+
+        float B = jb_type4_basis(omega, omega_p, npl, npr, npm);
+        float z = zeta_p * B;
+
+        if (!isfinite(z) || z < 0.f) z = 0.f;
+        zsum += z;
     }
-    float omega_p = 2.f * (float)M_PI * peak_hz;
 
-    float B = jb_type4_basis(omega, omega_p, npl, npr, npm);
-    float z = zeta_p * B;
-
-    if (!isfinite(z) || z < 0.f) z = 0.f;
+    if (!isfinite(zsum) || zsum < 0.f) zsum = 0.f;
     // Hard cap to keep it sane (zeta above ~0.2 dies basically instantly)
-    if (z > 0.2f) z = 0.2f;
-    return z;
+    if (zsum > 0.2f) zsum = 0.2f;
+    return zsum;
+}
+
 }
 
 static inline float jb_bank_brightness(const t_juicy_bank_tilde *x, int bank){
@@ -2098,8 +2120,11 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
 
     float brightness_v = bank ? v->brightness_v2 : v->brightness_v;
 
+    // Tela-style brightness normalization: keep loudness stable when brightness changes.
+    // We normalize the summed per-mode gains to match the reference spectrum at brightness=0 (saw slope).
+    float sum_gain = 0.f;
+    float sum_ref  = 0.f;
 
-    // van den Doel & Pai brightness: a_k = a_natural_k * (f_k/f0)^B (no loudness normalization).
     // LFO1 -> partials_* : smooth float gating across active modes
     if (lfo1 != 0.f){
         if ((bank == 0 && lfo1_tgt == gensym("partials_1")) || (bank != 0 && lfo1_tgt == gensym("partials_2"))){
@@ -2112,9 +2137,9 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
         }
     }
 
-    for (int i = 0; i < n_modes; ++i){
+    for(int i = 0; i < n_modes; ++i){
         jb_mode_rt_t *md = &m[i];
-        if (!base[i].active){
+        if(!base[i].active){
             jb_svf_reset(&md->svfL);
             jb_svf_reset(&md->svfR);
             md->t60_s = 0.f;
@@ -2123,56 +2148,88 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
         }
 
         float ratio = m[i].ratio_now + disp_offset[i];
-        float ratio_rel = base[i].keytrack ? ratio : ((v->f0 > 0.f) ? (ratio / v->f0) : ratio);
+        float ratio_rel = base[i].keytrack ? ratio : ((v->f0>0.f)? (ratio / v->f0) : ratio);
 
-        // natural gain (base_gain) * brightness tilt
-        float gn = base[i].base_gain * jb_bright_gain(ratio_rel, brightness_v);
-        if (m[i].nyq_kill) gn = 0.f;
+        float g = base[i].base_gain * jb_bright_gain(ratio_rel, brightness_v);
 
-        // Partial-count limiter (fade out the highest modes smoothly)
+        float g_ref = base[i].base_gain * jb_bright_gain(ratio_rel, 0.f);
+        float w = 1.f;
+        float gn = g * w;
+        float gn_ref = g_ref * w;
+        if (m[i].nyq_kill) { gn = 0.f; gn_ref = 0.f; gn_ref = 0.f; }
+
         if (active_modes <= 0){
-            gn = 0.f;
+            gn = 0.f; gn_ref = 0.f;
         } else if (active_modes < n_modes){
             int K = active_modes;
             if (i >= K){
                 float fade_width = 3.f;
                 float u = ((float)i - (float)K) / fade_width;
                 if (u >= 1.f){
-                    gn = 0.f;
+                    gn = 0.f; gn_ref = 0.f;
                 } else if (u > 0.f){
                     float w_fade = 0.5f * (1.f + cosf((float)M_PI * u));
                     gn *= w_fade;
+                    gn_ref *= w_fade;
                 }
             }
         }
 
         // LFO1 partials gating (smooth float: 0..32)
-        if (lfo1_partials_enabled){
-            const int r = rank_of_id[i];
-            float w_p = 0.f;
-            if (r < lfo1_partials_k) w_p = 1.f;
-            else if (r == lfo1_partials_k) w_p = lfo1_partials_frac;
-            else w_p = 0.f;
-            gn *= w_p;
-        }
 
+        if (lfo1_partials_enabled){
+
+            const int r = rank_of_id[i];
+
+            float w_p = 0.f;
+
+            if (r < lfo1_partials_k) w_p = 1.f;
+
+            else if (r == lfo1_partials_k) w_p = lfo1_partials_frac;
+
+            else w_p = 0.f;
+
+            gn *= w_p;
+
+            gn_ref *= w_p;
+
+        }
         // --- Spatial coupling (2D excitation, 2D pickup; signed) ---
         float gnL = gn, gnR = gn;
+        float gn_refL = gn_ref, gn_refR = gn_ref;
         {
             const int n = freq_rank_of_id[i]; // 0..active_count-1 (ascending frequency)
             if (n >= 0){
+                // Excitation is 2D: ge = sin(nx*pi*posx) * sin(ny*pi*posy)
                 int nx, ny;
                 jb_rank_to_nm(n, &nx, &ny);
                 const float ge  = (sinf((float)nx * PI * posx) * sinf((float)ny * PI * posy)) * pos_norm;
-                const float gp  = (sinf((float)nx * PI * micX) * sinf((float)ny * PI * micY)) * mic_norm;
-                const float w = ge * gp;
-                gnL *= w;
-                gnR *= w;
+
+                // Pickup (mic) reads displacement at a single 2D mic position (X,Y).
+                // We keep one pickup point for both L/R outputs (no stereo mic spread here).
+                const float gp = (sinf((float)nx * PI * micX) * sinf((float)ny * PI * micY)) * mic_norm;
+
+                const float wL = ge * gp;
+                const float wR = ge * gp;
+gnL     *= wL;
+                gnR     *= wR;
+                gn_refL *= wL;
+                gn_refR *= wR;
             }
         }
 
         m[i].gain_nowL = gnL;
         m[i].gain_nowR = gnR;
+        sum_gain += 0.5f * (fabsf(gnL) + fabsf(gnR));
+        sum_ref  += 0.5f * (fabsf(gn_refL) + fabsf(gn_refR));
+    }
+
+    // Apply normalization so brightness redistributes energy without changing overall level.
+    float norm = (sum_gain > 1e-12f) ? (sum_ref / sum_gain) : 1.f;
+    if (norm < 0.f) norm = 0.f;
+    for (int i = 0; i < n_modes; ++i){
+        m[i].gain_nowL *= norm;
+        m[i].gain_nowR *= norm;
     }
 }
 
@@ -3142,30 +3199,54 @@ static inline float jb_bell_param_to_npm(float f){
 }
 
 static void juicy_bank_tilde_bell_freq(t_juicy_bank_tilde *x, t_floatarg f){
+
     float v = jb_bell_param_to_hz(x, (float)f);
-    if (x->edit_bank) x->bell_peak_hz_2 = v;
-    else              x->bell_peak_hz   = v;
+    int b = x->edit_bank ? 1 : 0;
+    int d = x->edit_damper;
+    if (d < 0) d = 0; else if (d >= JB_N_DAMPERS) d = JB_N_DAMPERS - 1;
+    x->bell_peak_hz[b][d] = v;
 }
 static void juicy_bank_tilde_bell_zeta(t_juicy_bank_tilde *x, t_floatarg f){
+
     float v = jb_bell_param_to_zeta((float)f);
-    if (x->edit_bank) x->bell_peak_zeta_2 = v;
-    else              x->bell_peak_zeta   = v;
+    int b = x->edit_bank ? 1 : 0;
+    int d = x->edit_damper;
+    if (d < 0) d = 0; else if (d >= JB_N_DAMPERS) d = JB_N_DAMPERS - 1;
+    x->bell_peak_zeta[b][d] = v;
 }
 static void juicy_bank_tilde_bell_npl(t_juicy_bank_tilde *x, t_floatarg f){
+
     float v = jb_bell_param_to_pow((float)f);
-    if (x->edit_bank) x->bell_npl_2 = v;
-    else              x->bell_npl   = v;
+    int b = x->edit_bank ? 1 : 0;
+    int d = x->edit_damper;
+    if (d < 0) d = 0; else if (d >= JB_N_DAMPERS) d = JB_N_DAMPERS - 1;
+    x->bell_npl[b][d] = v;
 }
 static void juicy_bank_tilde_bell_npr(t_juicy_bank_tilde *x, t_floatarg f){
+
     float v = jb_bell_param_to_pow((float)f);
-    if (x->edit_bank) x->bell_npr_2 = v;
-    else              x->bell_npr   = v;
+    int b = x->edit_bank ? 1 : 0;
+    int d = x->edit_damper;
+    if (d < 0) d = 0; else if (d >= JB_N_DAMPERS) d = JB_N_DAMPERS - 1;
+    x->bell_npr[b][d] = v;
 }
 static void juicy_bank_tilde_bell_npm(t_juicy_bank_tilde *x, t_floatarg f){
+
     float v = jb_bell_param_to_npm((float)f);
-    if (x->edit_bank) x->bell_npm_2 = v;
-    else              x->bell_npm   = v;
+    int b = x->edit_bank ? 1 : 0;
+    int d = x->edit_damper;
+    if (d < 0) d = 0; else if (d >= JB_N_DAMPERS) d = JB_N_DAMPERS - 1;
+    x->bell_npm[b][d] = v;
 }
+
+static void juicy_bank_tilde_damper_sel(t_juicy_bank_tilde *x, t_floatarg f){
+    // UI: 1..JB_N_DAMPERS
+    int d = (int)floorf(((float)f) + 0.5f);
+    if (d < 1) d = 1;
+    if (d > JB_N_DAMPERS) d = JB_N_DAMPERS;
+    x->edit_damper = d - 1;
+}
+
 
 static void juicy_bank_tilde_brightness(t_juicy_bank_tilde *x, t_floatarg f){
     if (x->edit_bank) x->brightness2 = jb_clamp(f, -1.f, 1.f);
@@ -3735,7 +3816,7 @@ static void jb_apply_default_saw_bank(t_juicy_bank_tilde *x, int bank){
         base[i].active = 1;
         base[i].base_ratio = (float)(i+1);
         base[i].base_decay_ms = 1000.f;   // 1 second
-        // Flat per-mode gain by default (brightness applies spectral tilt)
+        // Flat per-mode gain by default (brightness defines the spectral slope)
         base[i].base_gain = 1.0f;        base[i].keytrack = 1;
         base[i].disp_signature = 0.f;
         base[i].micro_sig      = 0.f;
@@ -3744,12 +3825,26 @@ static void jb_apply_default_saw_bank(t_juicy_bank_tilde *x, int bank){
     // sensible body defaults (per bank)
     if (!bank){
         // Longer, more playable defaults (these are direct zetas, not 0..1 knobs)
-        x->brightness = 0.f; x->bell_peak_hz = 3000.f; x->bell_peak_zeta = 0.00035f; x->bell_npl = 0.7f; x->bell_npr = 2.5f; x->bell_npm = 0.f;
+        x->brightness = 0.f;
+        for (int d = 0; d < JB_N_DAMPERS; ++d){
+            x->bell_peak_hz[0][d]   = 3000.f;
+            x->bell_peak_zeta[0][d] = (d == 0) ? 0.00035f : 0.f; // damper 1 active, others off by default
+            x->bell_npl[0][d]       = 0.7f;
+            x->bell_npr[0][d]       = 2.5f;
+            x->bell_npm[0][d]       = 0.f;
+        }
         x->density_amt = 0.f; x->density_mode = DENSITY_PIVOT;
         x->dispersion = 0.f; x->dispersion_last = -1.f;
 x->release_amt = 1.f;
     } else {
-        x->brightness2 = 0.f; x->bell_peak_hz_2 = 3000.f; x->bell_peak_zeta_2 = 0.00035f; x->bell_npl_2 = 0.7f; x->bell_npr_2 = 2.5f; x->bell_npm_2 = 0.f;
+        x->brightness2 = 0.f;
+        for (int d = 0; d < JB_N_DAMPERS; ++d){
+            x->bell_peak_hz[1][d]   = 3000.f;
+            x->bell_peak_zeta[1][d] = (d == 0) ? 0.00035f : 0.f; // damper 1 active, others off by default
+            x->bell_npl[1][d]       = 0.7f;
+            x->bell_npr[1][d]       = 2.5f;
+            x->bell_npm[1][d]       = 0.f;
+        }
         x->density_amt2 = 0.f; x->density_mode2 = DENSITY_PIVOT;
         x->dispersion2 = 0.f; x->dispersion_last2 = -1.f;
 x->release_amt2 = 1.f;
@@ -3772,13 +3867,16 @@ static void *juicy_bank_tilde_new(void){
     x->brightness=0.f; x->density_amt=0.f; x->density_mode=DENSITY_PIVOT;
     x->dispersion=0.f; x->dispersion_last=-1.f;
 
-    // Type-4 bell damping defaults (single bell)
-    x->bell_peak_hz   = 3000.f;
-    x->bell_peak_zeta = 0.00035f;
-    x->bell_npl       = 0.7f;
-    x->bell_npr       = 2.5f;
-    x->bell_npm       = 0.f;
-    x->offset_amt=0.f;
+    // Type-4 bell damping defaults (stackable 3x; damper 1 active, others off)
+    for (int d = 0; d < JB_N_DAMPERS; ++d){
+        x->bell_peak_hz[0][d]   = 3000.f;
+        x->bell_peak_zeta[0][d] = (d == 0) ? 0.00035f : 0.f;
+        x->bell_npl[0][d]       = 0.7f;
+        x->bell_npr[0][d]       = 2.5f;
+        x->bell_npm[0][d]       = 0.f;
+    }
+
+x->offset_amt=0.f;
     x->collision_amt=0.f;
 
     // Stretch default
@@ -3797,11 +3895,13 @@ x->release_amt2   = x->release_amt;
 x->stretch2       = x->stretch;
 x->warp2          = x->warp;
 
-x->bell_peak_hz_2   = x->bell_peak_hz;
-x->bell_peak_zeta_2 = x->bell_peak_zeta;
-x->bell_npl_2       = x->bell_npl;
-x->bell_npr_2       = x->bell_npr;
-x->bell_npm_2       = x->bell_npm;
+for (int d = 0; d < JB_N_DAMPERS; ++d){
+    x->bell_peak_hz[1][d]   = x->bell_peak_hz[0][d];
+    x->bell_peak_zeta[1][d] = x->bell_peak_zeta[0][d];
+    x->bell_npl[1][d]       = x->bell_npl[0][d];
+    x->bell_npr[1][d]       = x->bell_npr[0][d];
+    x->bell_npm[1][d]       = x->bell_npm[0][d];
+}
 x->brightness2    = x->brightness;
 
 x->density_amt2   = x->density_amt;
@@ -3900,6 +4000,7 @@ x->excite_pos_y2  = x->excite_pos_y;
 
     // Two-bank scaffolding (STEP 1): bank 1 selected; bank 2 silent by default
     x->edit_bank = 0;
+    x->edit_damper = 0;
     x->bank_master[0] = 1.f;
     x->bank_master[1] = 0.f;
     x->bank_semitone[0] = 0;
@@ -3916,12 +4017,13 @@ x->excite_pos_y2  = x->excite_pos_y;
     // Behavior (reduced)
     x->in_release    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("release")); // release 0..1
 
-    // Body (order: bell_freq, bell_zeta, bell_npl, bell_npr, bell_npm, brightness, density, stretch, warp, quantize, offset, collision)
+    // Body (order: bell_freq, bell_zeta, bell_npl, bell_npr, bell_npm, damper_sel, brightness, density, stretch, warp, quantize, offset, collision)
     x->in_bell_peak_hz   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("bell_freq"));
     x->in_bell_peak_zeta = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("bell_zeta"));
     x->in_bell_npl       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("bell_npl"));
     x->in_bell_npr       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("bell_npr"));
     x->in_bell_npm       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("bell_npm"));
+    x->in_damper_sel    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("damper_sel")); // 1..3
     x->in_brightness = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("brightness"));
     x->in_density    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("density"));
     x->in_stretch    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("stretch"));
@@ -4035,7 +4137,7 @@ static void juicy_bank_tilde_INIT(t_juicy_bank_tilde *x){
     int b = (x->edit_bank != 0) ? 1 : 0;
     jb_apply_default_saw_bank(x, b);
     juicy_bank_tilde_restart(x);
-    post("juicy_bank~: INIT complete (selected bank=%d, 32 modes, flat per-mode gains, brightness=0 -> neutral tilt, decay=1s).", b+1);
+    post("juicy_bank~: INIT complete (selected bank=%d, 32 modes, flat per-mode gains, brightness=0 -> saw slope, decay=1s).", b+1);
 }
 static void juicy_bank_tilde_init_alias(t_juicy_bank_tilde *x){ juicy_bank_tilde_INIT(x); }
 
@@ -4217,6 +4319,7 @@ void juicy_bank_tilde_setup(void){
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bell_npl,  gensym("bell_npl"),  A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bell_npr,  gensym("bell_npr"),  A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bell_npm,  gensym("bell_npm"),  A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_damper_sel, gensym("damper_sel"), A_DEFFLOAT, 0);
     // Friendly aliases
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bell_freq, gensym("peak_freq"),  A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bell_zeta, gensym("peak_zeta"),  A_DEFFLOAT, 0);
