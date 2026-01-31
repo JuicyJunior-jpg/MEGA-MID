@@ -734,13 +734,17 @@ float density_amt; jb_density_mode density_mode;
     float excite_pos_y2;    // 0..1 (strike Y position, bank2)
     float pickup_x2;     // 0..1 (mic X position, bank2)
     float pickup_y2;     // 0..1 (mic Y position, bank2)
-    // inlet pointers for spatial position controls
+        // Odd vs Even emphasis (-1..+1). Applied as an index-based gain mask.
+    float odd_even_bias;  // bank1
+    float odd_even_bias2; // bank2
+// inlet pointers for spatial position controls
     t_inlet *in_position;
     t_inlet *in_positionY;
     t_inlet *in_pickupX;
     t_inlet *in_pickupY;
 
-    // --- LFO globals (for modulation matrix UI) ---
+        t_inlet *in_odd_even; // odd vs even emphasis
+// --- LFO globals (for modulation matrix UI) ---
     // lfo_shape / lfo_rate / lfo_phase always reflect the *currently selected* LFO,
     // as chosen by lfo_index (1 or 2). Per-LFO values live in the arrays below.
     float lfo_shape;   // 1..4 (1=saw,2=square,3=sine,4=SH)
@@ -2020,6 +2024,9 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
     // NEW MOD LANES (partial): LFO1 direct-to-target modulation values
     const t_symbol *lfo1_tgt = x->lfo_target[0];
     const float lfo1 = x->lfo_val[0] * x->lfo_amt_v[0];
+    // Odd vs Even emphasis bias (-1..+1): index-based mode gain mask
+    const float odd_even = jb_clamp(bank ? x->odd_even_bias2 : x->odd_even_bias, -1.f, 1.f);
+
 
     // LFO1 -> partials_* : smooth float gating across active modes (0..active_count_idx)
     int   lfo1_partials_k = -1;
@@ -2215,6 +2222,15 @@ gnL     *= wL;
                 gn_refR *= wR;
             }
         }
+
+        // Odd vs Even mask by mode index (1-based): odd => (1-bias), even => (1+bias)
+        const int mode_num = i + 1;
+        float oe = (mode_num & 1) ? (1.f - odd_even) : (1.f + odd_even);
+        oe = jb_clamp(oe, 0.f, 1.f);
+        gnL     *= oe;
+        gnR     *= oe;
+        gn_refL *= oe;
+        gn_refR *= oe;
 
         m[i].gain_nowL = gnL;
         m[i].gain_nowR = gnR;
@@ -3322,6 +3338,15 @@ static void juicy_bank_tilde_pickupR(t_juicy_bank_tilde *x, t_floatarg f){
     if (x->edit_bank) x->pickup_y2 = v;
     else              x->pickup_y  = v;
 }
+
+static void juicy_bank_tilde_odd_even(t_juicy_bank_tilde *x, t_floatarg f){
+    // Odd vs Even emphasis bias: -1..+1
+    // -1 => silence even modes, 0 => neutral, +1 => silence odd modes
+    float v = jb_clamp(f, -1.f, 1.f);
+    if (x->edit_bank) x->odd_even_bias2 = v;
+    else              x->odd_even_bias  = v;
+}
+
 static void juicy_bank_tilde_pickup(t_juicy_bank_tilde *x, t_floatarg f){
     // legacy: set BOTH pickup coordinates (X and Y) (0..1)
     float v = jb_clamp(f, 0.f, 1.f);
@@ -3758,6 +3783,7 @@ static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
     inlet_free(x->in_positionY);
 inlet_free(x->in_pickupX);
     inlet_free(x->in_pickupY);
+    inlet_free(x->in_odd_even);
 inlet_free(x->in_partials); // free 'partials' inlet
 inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     inlet_free(x->in_decay);
@@ -3883,6 +3909,7 @@ x->offset_amt=0.f;
         x->warp = 0.f;
 // realism defaults
     x->excite_pos=0.33f; x->excite_pos_y=0.33f; x->pickup_x=0.33f; x->pickup_y=0.33f;
+x->odd_even_bias = 0.f; x->odd_even_bias2 = 0.f;
 // bank 2 defaults: start as a functional copy of bank 1 (bank 2 is still silent by master=0)
 x->n_modes2 = x->n_modes;
 x->active_modes2 = x->active_modes;
@@ -4036,6 +4063,7 @@ x->excite_pos_y2  = x->excite_pos_y;
 // 0..5
     x->in_pickupX       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("pickup_x"));       // pickup X pos 0..1
     x->in_pickupY       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("pickup_y"));       // pickup Y pos 0..1
+    x->in_odd_even      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("odd_even"));      // -1..+1 (odd vs even emphasis)
 // pickup width 0..1
 // -1..+1 (closed..open)
 
@@ -4345,6 +4373,7 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_position_x,  
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_position_y,    gensym("position_y"),    A_DEFFLOAT, 0);
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pickupL,      gensym("pickup_x"),       A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pickupR,      gensym("pickup_y"),       A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_odd_even,     gensym("odd_even"),       A_DEFFLOAT, 0);
 // legacy alias (sets both X and Y)
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pickup,       gensym("pickup"),        A_DEFFLOAT, 0);
 // LFO + ADSR methods
