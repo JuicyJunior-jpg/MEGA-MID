@@ -1464,12 +1464,22 @@ static void jb_lock_fundamental_generic(int n_modes, const jb_mode_base_t *base,
     }
 }
 
-static float jb_stretch_warp_coord(float t_raw, float s, float w);
 
 static void jb_apply_stretch_generic(int n_modes, const jb_mode_base_t *base, float stretch, float warp, jb_mode_rt_t *m){
+    // "Normal" stretch/warp:
+    //  - Work in log-frequency (octaves): d = log2(ratio)
+    //  - Stretch (s) expands (+) or contracts (-) partial spacing progressively toward the top.
+    //  - Warp (w) shapes *where* the bend is concentrated (low vs high spectrum).
+    //
+    //  u = rank/(count-1) in [0..1] (rank = low->high in the modal sequence)
+    //  p = 2^(w*2)  => w=-1..1 maps to p=0.25..4
+    //  b(u) = u^p
+    //  d' = d0 + (d-d0) * (1 + s*b(u))
+    //
+    //  This anchors the lowest mode (d0) and avoids any moving "pivot".
     float s = jb_clamp(stretch, -1.f, 1.f);
     float w = jb_clamp(warp,   -1.f, 1.f);
-    if (s == 0.f && w == 0.f) return;
+    if (s == 0.f) return; // warp only matters when stretch is non-zero
 
     int idxs[JB_MAX_MODES];
     int count = 0;
@@ -1480,58 +1490,41 @@ static void jb_apply_stretch_generic(int n_modes, const jb_mode_base_t *base, fl
     }
     if (count <= 1) return;
 
-    // sort by current ratio (post-density)
-    for (int k = 1; k < count; ++k){
-        int id = idxs[k];
+    // Use the modal sequence order as the spectral ordering.
+    // (If your preset ratios are already ascending, this is stable and avoids resorting artifacts.)
+
+    // Anchor to the lowest eligible mode.
+    int id0 = idxs[0];
+    float r0 = m[id0].ratio_now;
+    if (r0 < 0.000001f) r0 = 0.000001f;
+    float d0 = log2f(r0);
+
+    // Warp exponent: p in [0.25..4] when w in [-1..1]
+    const float W = 2.f;
+    float p = exp2f(w * W);
+
+    for (int rank = 0; rank < count; ++rank){
+        int id = idxs[rank];
         float r = m[id].ratio_now;
-        int j = k;
-        while (j > 0 && m[idxs[j-1]].ratio_now > r){
-            idxs[j] = idxs[j-1];
-            --j;
-        }
-        idxs[j] = id;
-    }
+        if (r < 0.000001f) r = 0.000001f;
 
-    // pivot
-    int pivot_j = 0;
-    float best = 1e9f;
-    for (int j = 0; j < count; ++j){
-        int id = idxs[j];
-        float r = m[id].ratio_now;
-        float d = fabsf(r - 1.f);
-        if (d < best){ best = d; pivot_j = j; }
-    }
+        float d = log2f(r);
+        float d_rel = d - d0;
 
-    int steps_neg = pivot_j;
-    int steps_pos = count - 1 - pivot_j;
-    if (steps_neg == 0 && steps_pos == 0) return;
+        float u = (count > 1) ? ((float)rank / (float)(count - 1)) : 0.f;
+        if (u < 0.f) u = 0.f;
+        if (u > 1.f) u = 1.f;
 
-    int pivot_id = idxs[pivot_j];
-    float r_pivot = m[pivot_id].ratio_now;
+        float b = (u <= 0.f) ? 0.f : powf(u, p);
+        // multiplier for spacing in log space
+        float mult = 1.f + s * b;
 
-    float r_min = m[idxs[0]].ratio_now;
-    float r_max = m[idxs[count - 1]].ratio_now;
-    if (r_max <= r_min + 1e-6f) return;
+        // Safety clamp: prevent negative spacing scale.
+        if (mult < 0.f) mult = 0.f;
+        if (mult > 4.f) mult = 4.f;
 
-    for (int j = 0; j < count; ++j){
-        int id = idxs[j];
-        if (j == pivot_j) continue;
-
-        float r_new = m[id].ratio_now;
-
-        if (j > pivot_j){
-            if (steps_pos > 0){
-                float d = (float)(j - pivot_j) / (float)steps_pos;
-                float t = jb_stretch_warp_coord(d, s, w);
-                r_new = r_pivot + t * (r_max - r_pivot);
-            }
-        } else {
-            if (steps_neg > 0){
-                float d = (float)(pivot_j - j) / (float)steps_neg;
-                float t = jb_stretch_warp_coord(d, s, w);
-                r_new = r_pivot - t * (r_pivot - r_min);
-            }
-        }
+        float d_new = d0 + d_rel * mult;
+        float r_new = exp2f(d_new);
 
         if (r_new < 0.01f) r_new = 0.01f;
         m[id].ratio_now = r_new;
@@ -1655,137 +1648,10 @@ static void juicy_bank_tilde_warp(t_juicy_bank_tilde *x, t_floatarg f){
     if (x->edit_bank) x->warp2 = v;
     else              x->warp  = v;
 }
-static float jb_stretch_warp_coord(float t_raw, float s, float w){
-    // Helper for symmetric stretch + warp shaping on a 0..1 coordinate.
-    //  • t_raw: linear 0..1 position from pivot to edge on one side
-    //  • s    : stretch amount (-1..1)
-    //  • w    : warp amount (-1..1)
-    float t = jb_clamp(t_raw, 0.f, 1.f);
-
-    // --- symmetric stretch ---
-    if (s != 0.f){
-        float s_abs = fabsf(s);
-        float gamma = 1.f + 2.f * s_abs; // 1..3
-        if (s > 0.f){
-            // positive stretch: make far edge sparser (more distance between high modes)
-            t = powf(t, gamma);
-        } else {
-            // negative stretch: pull modes toward pivot (denser upper region)
-            t = 1.f - powf(1.f - t, gamma);
-        }
-    }
-
-    // --- warp: bias where curvature is focused ---
-    if (w != 0.f){
-        float w_abs = fabsf(w);
-        float alpha = 2.5f; // curvature strength
-        float gamma_w = 1.f + alpha * w_abs;
-        if (w > 0.f){
-            // warp > 0: emphasise the edge (more action near outer harmonics)
-            t = powf(t, gamma_w);
-        } else {
-            // warp < 0: emphasise region closer to pivot
-            t = 1.f - powf(1.f - t, gamma_w);
-        }
-    }
-
-    if (t < 0.f) t = 0.f;
-    if (t > 1.f) t = 1.f;
-    return t;
-}
-
 static void jb_apply_stretch(const t_juicy_bank_tilde *x, jb_voice_t *v){
-    // Density defines the global low/high bounds of the harmonic spacing.
-    // Stretch + warp only reshape how modes are distributed *within* that range,
-    // without pushing any partials outside the density-defined envelope.
-    float s = jb_clamp(x->stretch, -1.f, 1.f);
-    float w = jb_clamp(x->warp,   -1.f, 1.f);
-    if (s == 0.f && w == 0.f)
-        return;
-
-    // Collect active, keytracked modes
-    int idxs[JB_MAX_MODES];
-    int count = 0;
-    for (int i = 0; i < x->n_modes; ++i){
-        if (x->base[i].active && x->base[i].keytrack){
-            idxs[count++] = i;
-        }
-    }
-    if (count <= 1)
-        return;
-
-    // Sort them by current ratio (post-density), so we work in harmonic order.
-    for (int k = 1; k < count; ++k){
-        int id = idxs[k];
-        float r = v->m[id].ratio_now;
-        int j = k;
-        while (j > 0 && v->m[idxs[j-1]].ratio_now > r){
-            idxs[j] = idxs[j-1];
-            --j;
-        }
-        idxs[j] = id;
-    }
-
-    // Find pivot (mode closest to 1x) in harmonic space.
-    int pivot_j = 0;
-    float best = 1e9f;
-    for (int j = 0; j < count; ++j){
-        int id = idxs[j];
-        float r = v->m[id].ratio_now;
-        float d = fabsf(r - 1.f);
-        if (d < best){
-            best = d;
-            pivot_j = j;
-        }
-    }
-
-    int steps_neg = pivot_j;              // modes below pivot
-    int steps_pos = count - 1 - pivot_j;  // modes above pivot
-    if (steps_neg == 0 && steps_pos == 0)
-        return;
-
-    int pivot_id = idxs[pivot_j];
-    float r_pivot = v->m[pivot_id].ratio_now;
-
-    // Global min/max from density (envelope).
-    float r_min = v->m[idxs[0]].ratio_now;
-    float r_max = v->m[idxs[count - 1]].ratio_now;
-    if (r_max <= r_min + 1e-6f)
-        return;
-
-    // Apply stretch+warp separately on each side of the pivot,
-    // remapping ratios but keeping r_min, r_pivot and r_max fixed.
-    for (int j = 0; j < count; ++j){
-        int id = idxs[j];
-        if (j == pivot_j)
-            continue; // keep pivot (closest-to-1x) exactly where density put it
-
-        float r_new = v->m[id].ratio_now;
-
-        if (j > pivot_j){
-            // Upper side: map from pivot -> r_max
-            if (steps_pos > 0){
-                float d = (float)(j - pivot_j) / (float)steps_pos; // 0..1
-                float t = jb_stretch_warp_coord(d, s, w);
-                float local_min = r_pivot;
-                float local_max = r_max;
-                r_new = local_min + t * (local_max - local_min);
-            }
-        } else {
-            // Lower side: map from r_min -> pivot
-            if (steps_neg > 0){
-                float d = (float)(pivot_j - j) / (float)steps_neg; // 0..1
-                float t = jb_stretch_warp_coord(d, s, w);
-                float local_min = r_min;
-                float local_max = r_pivot;
-                r_new = local_max - t * (local_max - local_min);
-            }
-        }
-
-        if (r_new < 0.01f)
-            r_new = 0.01f;
-        v->m[id].ratio_now = r_new;
-    }
+    // Legacy wrapper (bank1 only). The actual synthesis path uses jb_apply_stretch_generic()
+    // inside jb_project_voice_bank().
+    jb_apply_stretch_generic(x->n_modes, x->base, x->stretch, x->warp, v->m);
 }
 
 static void jb_apply_offset(const t_juicy_bank_tilde *x, jb_voice_t *v){
