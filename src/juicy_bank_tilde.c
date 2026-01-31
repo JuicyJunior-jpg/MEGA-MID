@@ -1354,8 +1354,6 @@ static inline float jb_bell_zeta_eval(const t_juicy_bank_tilde *x, int bank, flo
     return zsum;
 }
 
-}
-
 static inline float jb_bank_brightness(const t_juicy_bank_tilde *x, int bank){
     return bank ? x->brightness2 : x->brightness;
 }
@@ -3750,7 +3748,7 @@ static void juicy_bank_tilde_renderclear(t_juicy_bank_tilde *x){
 static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
     inlet_free(x->in_release);
 
-    inlet_free(x->in_bell_peak_hz); inlet_free(x->in_bell_peak_zeta); inlet_free(x->in_bell_npl); inlet_free(x->in_bell_npr); inlet_free(x->in_bell_npm); inlet_free(x->in_brightness); inlet_free(x->in_density);
+    inlet_free(x->in_bell_peak_hz); inlet_free(x->in_bell_peak_zeta); inlet_free(x->in_bell_npl); inlet_free(x->in_bell_npr); inlet_free(x->in_bell_npm); inlet_free(x->in_damper_sel); inlet_free(x->in_brightness); inlet_free(x->in_density);
     inlet_free(x->in_warp); inlet_free(x->in_dispersion);
     inlet_free(x->in_offset);
     inlet_free(x->in_collision);
