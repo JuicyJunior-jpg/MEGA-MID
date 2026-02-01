@@ -1136,19 +1136,43 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
 // ---------
 
 // ---------- helpers ----------
-static float jb_bright_gain(float ratio_rel, float b){
-    // Brightness slope (defines spectral slope):
-    //  - b in [-1,1]
-    //  - b = 0   : saw reference (gain ~ 1/ratio_rel)
-    //  - b = +1  : flat spectrum (all modes ~ equal gain)
-    //  - b = -1  : dark (gain ~ 1/ratio_rel^2)
-    //
-    // Implementation: gain = ratio_rel^(-alpha), alpha = 1 - b
-    //  -> b=-1 => alpha=2 ; b=0 => alpha=1 ; b=+1 => alpha=0
-    float bb = jb_clamp(b, -1.f, 1.f);
-    float rr = jb_clamp(ratio_rel, 1.f, 1e6f);
-    float alpha = 1.f - bb;
-    return powf(rr, -alpha);
+// Brightness as spectral centroid tilt.
+//
+// Spectral centroid (center of mass):
+//   C = sum(f_i * a_i) / sum(a_i)
+//
+// We implement the BRIGHTNESS parameter b in [-1, +1] as a frequency-dependent
+// gain mask applied to the per-mode amplitudes:
+//
+//   a'_i = a_i * (f_i / C_ref)^(k)
+//   k    = b * JB_BRIGHT_INTENSITY
+//
+// where C_ref is computed from the un-brightened spectrum (b = 0) for the
+// currently active modes. This matches the intuition:
+//   b = +1  -> boost highs (glassy / metallic)
+//   b =  0  -> natural material spectrum
+//   b = -1  -> damp highs (dark / muted)
+//
+// Loudness is kept stable later by normalizing the summed per-mode gains.
+#ifndef JB_BRIGHT_INTENSITY
+#define JB_BRIGHT_INTENSITY 2.0f
+#endif
+static inline float jb_bright_weight(float f_hz, float centroid_hz, float brightness){
+    float b = jb_clamp(brightness, -1.f, 1.f);
+    if (b == 0.f) return 1.f;
+
+    float c = (centroid_hz > 0.f && isfinite(centroid_hz)) ? centroid_hz : 1.f;
+    float f = (f_hz > 0.f && isfinite(f_hz)) ? f_hz : c;
+
+    float k = b * JB_BRIGHT_INTENSITY;
+    float w = powf(f / c, k);
+
+    if (!isfinite(w) || w < 0.f) w = 0.f;
+
+    // Prevent extreme weights (overall loudness is normalized later).
+    if (w > 32.f) w = 32.f;
+
+    return w;
 }
 // ---------- density mapping ----------
 // Only keytracked modes are spread by density; absolute-Hz modes keep base_ratio.
@@ -1987,8 +2011,8 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
 
     float brightness_v = bank ? v->brightness_v2 : v->brightness_v;
 
-    // Tela-style brightness normalization: keep loudness stable when brightness changes.
-    // We normalize the summed per-mode gains to match the reference spectrum at brightness=0 (saw slope).
+    // Brightness uses a spectral-centroid tilt; we normalize summed per-mode gains so
+    // brightness redistributes energy without changing overall level.
     float sum_gain = 0.f;
     float sum_ref  = 0.f;
 
@@ -2004,7 +2028,70 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
         }
     }
 
-    for(int i = 0; i < n_modes; ++i){
+
+// Reference spectral centroid (brightness = 0) for the currently active spectrum.
+// C_ref = sum(f_i * a_i) / sum(a_i), using base gains (material) and partial-count gating.
+float centroid_ref = (v->f0 > 0.f) ? v->f0 : 1.f;
+{
+    float sumA  = 0.f;
+    float sumFA = 0.f;
+
+    for (int i = 0; i < n_modes; ++i){
+        if (!base[i].active) continue;
+
+        float ratio = m[i].ratio_now + disp_offset[i];
+        float ratio_rel = base[i].keytrack ? ratio : ((v->f0 > 0.f) ? (ratio / v->f0) : ratio);
+        if (ratio_rel < 0.f) ratio_rel = 0.f;
+
+        // Convert to Hz for centroid.
+        float f_hz = base[i].keytrack ? (ratio_rel * ((v->f0 > 0.f) ? v->f0 : 1.f)) : ratio;
+
+        float a = base[i].base_gain;
+
+        // Apply nyquist kill (if set) as part of the active spectrum.
+        if (m[i].nyq_kill) a = 0.f;
+
+        // Apply partial-count gating (active_modes + smooth fade), same as main loop.
+        if (active_modes <= 0){
+            a = 0.f;
+        } else if (active_modes < n_modes){
+            int K = active_modes;
+            if (i >= K){
+                float fade_width = 3.f;
+                float uu = ((float)i - (float)K) / fade_width;
+                if (uu >= 1.f){
+                    a = 0.f;
+                } else if (uu > 0.f){
+                    float w_fade = 0.5f * (1.f + cosf((float)M_PI * uu));
+                    a *= w_fade;
+                }
+            }
+        }
+
+        // LFO1 partials gating (smooth float: 0..32) is in index-rank space.
+        if (lfo1_partials_enabled){
+            const int r = rank_of_id[i];
+            float w_p = 0.f;
+            if (r < lfo1_partials_k) w_p = 1.f;
+            else if (r == lfo1_partials_k) w_p = lfo1_partials_frac;
+            else w_p = 0.f;
+            a *= w_p;
+        }
+
+        float aw = fabsf(a);
+        if (aw <= 0.f) continue;
+
+        if (!(f_hz > 0.f) || !isfinite(f_hz)) continue;
+
+        sumA  += aw;
+        sumFA += aw * f_hz;
+    }
+
+    if (sumA > 1e-12f){
+        centroid_ref = sumFA / sumA;
+        if (!isfinite(centroid_ref) || centroid_ref <= 0.f) centroid_ref = (v->f0 > 0.f) ? v->f0 : 1.f;
+    }
+}    for(int i = 0; i < n_modes; ++i){
         jb_mode_rt_t *md = &m[i];
         if(!base[i].active){
             jb_svf_reset(&md->svfL);
@@ -2017,9 +2104,11 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
         float ratio = m[i].ratio_now + disp_offset[i];
         float ratio_rel = base[i].keytrack ? ratio : ((v->f0>0.f)? (ratio / v->f0) : ratio);
 
-        float g = base[i].base_gain * jb_bright_gain(ratio_rel, brightness_v);
+        float f_hz = base[i].keytrack ? (ratio_rel * ((v->f0 > 0.f) ? v->f0 : 1.f)) : ratio;
 
-        float g_ref = base[i].base_gain * jb_bright_gain(ratio_rel, 0.f);
+        float g = base[i].base_gain * jb_bright_weight(f_hz, centroid_ref, brightness_v);
+
+        float g_ref = base[i].base_gain;
         float w = 1.f;
         float gn = g * w;
         float gn_ref = g_ref * w;
