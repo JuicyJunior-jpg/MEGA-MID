@@ -2471,9 +2471,12 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     float exc_t = 0.5f * (exc_f + 1.f);
     float exc_w_imp   = sinf(0.5f * (float)M_PI * exc_t);
     float exc_w_noise = cosf(0.5f * (float)M_PI * exc_t);
-    // Pressure (reuses former density inlet): feedback-loop AGC target level (0..0.98)
+    // Pressure (reuses former density inlet): feedback amount + safety limiter target
+    // pressure controls the *maximum reinjection gain* (not a loudness target).
+    // AGC now acts as a one-sided limiter (attenuates only) to prevent runaway.
     const float pressure = jb_clamp(x->exc_density, 0.f, 1.f);
-    const float fb_target = 0.98f * pressure;
+    const float fb_gain_cmd   = 0.95f * pressure * pressure;   // 0..0.95 (fine control at low end)
+    const float fb_env_target = 0.65f * pressure;              // 0..0.65 (abs level target for limiter)
 
     // Feedback AGC smoothing coefficients (per block)
     // Attack:  0..1 -> 1ms..200ms  (fast clamp-down)
@@ -2572,15 +2575,24 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 inR = jb_softclip_thresh(inR, 0.75f);
                 float lvl = 0.5f * (fabsf(inL) + fabsf(inR));
                 v->fb_agc_env[0] = jb_kill_denorm(a_fb_env * v->fb_agc_env[0] + one_minus_a_fb_env * lvl);
-                float desired = (fb_target <= 1e-9f) ? 0.f : (fb_target / (v->fb_agc_env[0] + 1e-6f));
-                if (desired > 0.98f) desired = 0.98f;
+
+                // One-sided limiter: only attenuate when feedback gets too loud.
+                float desired = 1.f;
+                if (fb_env_target > 1e-9f) {
+                    const float env = v->fb_agc_env[0];
+                    if (env > fb_env_target) desired = fb_env_target / (env + 1e-6f);
+                }
+                if (desired > 1.f) desired = 1.f;
                 if (desired < 0.f) desired = 0.f;
+
                 float g = v->fb_agc_gain[0];
                 if (desired < g) g = a_fb_attack * g + one_minus_a_fb_attack * desired;
                 else             g = a_fb_release * g + one_minus_a_fb_release * desired;
                 v->fb_agc_gain[0] = g;
-                fb1L = inL * g;
-                fb1R = inR * g;
+
+                const float fb_gain = fb_gain_cmd * g;
+                fb1L = inL * fb_gain;
+                fb1R = inR * fb_gain;
                 // Final safety saturator (ceiling ~= 0.99)
                 if (fb1L > 0.99f) fb1L = 0.99f; else if (fb1L < -0.99f) fb1L = -0.99f;
                 if (fb1R > 0.99f) fb1R = 0.99f; else if (fb1R < -0.99f) fb1R = -0.99f;
@@ -2593,15 +2605,24 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 inR = jb_softclip_thresh(inR, 0.75f);
                 float lvl = 0.5f * (fabsf(inL) + fabsf(inR));
                 v->fb_agc_env[1] = jb_kill_denorm(a_fb_env * v->fb_agc_env[1] + one_minus_a_fb_env * lvl);
-                float desired = (fb_target <= 1e-9f) ? 0.f : (fb_target / (v->fb_agc_env[1] + 1e-6f));
-                if (desired > 0.98f) desired = 0.98f;
+
+                // One-sided limiter: only attenuate when feedback gets too loud.
+                float desired = 1.f;
+                if (fb_env_target > 1e-9f) {
+                    const float env = v->fb_agc_env[1];
+                    if (env > fb_env_target) desired = fb_env_target / (env + 1e-6f);
+                }
+                if (desired > 1.f) desired = 1.f;
                 if (desired < 0.f) desired = 0.f;
+
                 float g = v->fb_agc_gain[1];
                 if (desired < g) g = a_fb_attack * g + one_minus_a_fb_attack * desired;
                 else             g = a_fb_release * g + one_minus_a_fb_release * desired;
                 v->fb_agc_gain[1] = g;
-                fb2L = inL * g;
-                fb2R = inR * g;
+
+                const float fb_gain = fb_gain_cmd * g;
+                fb2L = inL * fb_gain;
+                fb2R = inR * fb_gain;
                 if (fb2L > 0.99f) fb2L = 0.99f; else if (fb2L < -0.99f) fb2L = -0.99f;
                 if (fb2R > 0.99f) fb2R = 0.99f; else if (fb2R < -0.99f) fb2R = -0.99f;
             }
