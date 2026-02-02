@@ -617,6 +617,8 @@ typedef struct {
     float fb_hp_x1R[2], fb_hp_y1R[2];       // 20Hz DC-blocker state (R)
     float fb_agc_gain[2];                   // AGC gain applied to feedback before reinjection
     float fb_agc_env[2];                    // AGC level follower (mono abs)
+    float fb_env[2];                        // musical feedback envelope (0..1)
+    int   fb_lim_hold[2];                   // limiter hold counter (samples) to prevent pumping
     // Feedback delay + dispersion (per voice, per bank)
     int   fb_delay_w[2];                                    // ring write index
     float fb_delay_bufL[2][JB_FB_DELAY_MAX];                // delay buffers (L)
@@ -2087,6 +2089,8 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
         v->fb_hp_x1R[b] = v->fb_hp_y1R[b] = 0.f;
         v->fb_agc_gain[b] = 1.f;
         v->fb_agc_env[b]  = 0.f;
+        v->fb_env[b] = 0.f;
+        v->fb_lim_hold[b] = 0;
         v->fb_delay_w[b] = 0;
         v->fb_ap_x1L[b] = v->fb_ap_y1L[b] = 0.f;
         v->fb_ap_x1R[b] = v->fb_ap_y1R[b] = 0.f;
@@ -2449,15 +2453,26 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     const float fb_gain_cmd   = 0.95f * pressure * pressure;   // 0..0.95 (fine control at low end)
     const float fb_env_target = 0.65f * pressure;              // 0..0.65 (abs level target for limiter)
 
-    // Feedback AGC smoothing coefficients (per block)
-    // Attack:  0..1 -> 1ms..200ms  (fast clamp-down)
-    // Release: 0..1 -> 10ms..2500ms (slow recovery)
-    const float fb_tauA = 0.001f + 0.199f * jb_clamp(x->fb_agc_attack,  0.f, 1.f);
-    const float fb_tauR = 0.010f + 2.490f * jb_clamp(x->fb_agc_release, 0.f, 1.f);
-    const float a_fb_attack  = expf(-1.0f / (x->sr * fb_tauA));
-    const float a_fb_release = expf(-1.0f / (x->sr * fb_tauR));
-    const float one_minus_a_fb_attack  = 1.f - a_fb_attack;
-    const float one_minus_a_fb_release = 1.f - a_fb_release;
+    // Feedback envelope smoothing (per block) — ATTACK/RELEASE now shape the *feedback gain envelope* (musical),
+// while the limiter below is fixed and only prevents runaway.
+// Attack:  0..1 -> 1ms..2000ms
+// Release: 0..1 -> 10ms..5000ms
+const float fb_env_tauA = 0.001f + 1.999f * jb_clamp(x->fb_agc_attack,  0.f, 1.f);
+const float fb_env_tauR = 0.010f + 4.990f * jb_clamp(x->fb_agc_release, 0.f, 1.f);
+const float a_fb_envA = expf(-1.0f / (x->sr * fb_env_tauA));
+const float a_fb_envR = expf(-1.0f / (x->sr * fb_env_tauR));
+const float one_minus_a_fb_envA = 1.f - a_fb_envA;
+const float one_minus_a_fb_envR = 1.f - a_fb_envR;
+
+// Feedback limiter (fixed; not user-controlled): fast attack + slow release + hold + deadband to prevent pumping.
+const float lim_tauA = 0.005f;   // 5 ms clamp-down
+const float lim_tauR = 0.800f;   // 800 ms recovery
+const float a_limA = expf(-1.0f / (x->sr * lim_tauA));
+const float a_limR = expf(-1.0f / (x->sr * lim_tauR));
+const float one_minus_a_limA = 1.f - a_limA;
+const float one_minus_a_limR = 1.f - a_limR;
+const int   lim_hold_samps = (int)(0.050f * x->sr); // 50 ms hold after gain reduction
+const float lim_deadband = 1.05f;                   // ignore tiny overshoots to avoid chatter
 
     // Level detector (abs follower) for AGC: fixed 10ms time constant
     const float a_fb_env = expf(-1.0f / (x->sr * 0.010f));
@@ -2578,23 +2593,106 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 dR = jb_allpass1_run(dR, fb_ap_a, &v->fb_ap_x1R[b], &v->fb_ap_y1R[b]);
 
                 float lvl = 0.5f * (fabsf(dL) + fabsf(dR));
-                v->fb_agc_env[b] = jb_kill_denorm(a_fb_env * v->fb_agc_env[b] + one_minus_a_fb_env * lvl);
 
-                // One-sided limiter: only attenuate when feedback gets too loud.
-                float desired = 1.f;
-                if (fb_env_target > 1e-9f) {
-                    const float env = v->fb_agc_env[b];
-                    if (env > fb_env_target) desired = fb_env_target / (env + 1e-6f);
-                }
-                if (desired > 1.f) desired = 1.f;
-                if (desired < 0.f) desired = 0.f;
 
-                float g = v->fb_agc_gain[b];
-                if (desired < g) g = a_fb_attack * g + one_minus_a_fb_attack * desired;
-                else             g = a_fb_release * g + one_minus_a_fb_release * desired;
-                v->fb_agc_gain[b] = g;
+                                v->fb_agc_env[b] = jb_kill_denorm(a_fb_env * v->fb_agc_env[b] + one_minus_a_fb_env * lvl);
 
-                const float fb_gain = fb_gain_cmd * g;
+
+
+                                // Limiter (one-sided): only attenuate when the feedback path gets too loud.
+
+
+                                // Pumping preventer: deadband + hold (no release for a short time after reduction).
+
+
+                                float desired = 1.f;
+
+
+                                if (fb_env_target > 1e-9f) {
+
+
+                                    const float env = v->fb_agc_env[b];
+
+
+                                    const float thresh = fb_env_target * lim_deadband;
+
+
+                                    if (env > thresh) desired = fb_env_target / (env + 1e-6f);
+
+
+                                }
+
+
+                                if (desired > 1.f) desired = 1.f;
+
+
+                                if (desired < 0.f) desired = 0.f;
+
+
+
+                                int hold = v->fb_lim_hold[b];
+
+
+                                float g = v->fb_agc_gain[b];
+
+
+                                if (desired < g) {
+
+
+                                    g = a_limA * g + one_minus_a_limA * desired;
+
+
+                                    hold = lim_hold_samps;
+
+
+                                } else {
+
+
+                                    if (hold > 0) {
+
+
+                                        hold--;
+
+
+                                    } else {
+
+
+                                        g = a_limR * g + one_minus_a_limR * desired;
+
+
+                                    }
+
+
+                                }
+
+
+                                v->fb_lim_hold[b] = hold;
+
+
+                                v->fb_agc_gain[b] = g;
+
+
+
+                                // Musical feedback envelope (note-gated): attack/release knobs shape how feedback fades in/out.
+
+
+                                const float tgt = (v->state == V_HELD) ? 1.f : 0.f;
+
+
+                                float fe = v->fb_env[b];
+
+
+                                if (tgt > fe) fe = a_fb_envA * fe + one_minus_a_fb_envA * tgt;
+
+
+                                else          fe = a_fb_envR * fe + one_minus_a_fb_envR * tgt;
+
+
+                                v->fb_env[b] = fe;
+
+
+
+                                const float fb_gain = fb_gain_cmd * fe * g;
                 fb1L = dL * fb_gain;
                 fb1R = dR * fb_gain;
 
@@ -2622,22 +2720,106 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 dR = jb_allpass1_run(dR, fb_ap_a, &v->fb_ap_x1R[b], &v->fb_ap_y1R[b]);
 
                 float lvl = 0.5f * (fabsf(dL) + fabsf(dR));
-                v->fb_agc_env[b] = jb_kill_denorm(a_fb_env * v->fb_agc_env[b] + one_minus_a_fb_env * lvl);
 
-                float desired = 1.f;
-                if (fb_env_target > 1e-9f) {
-                    const float env = v->fb_agc_env[b];
-                    if (env > fb_env_target) desired = fb_env_target / (env + 1e-6f);
-                }
-                if (desired > 1.f) desired = 1.f;
-                if (desired < 0.f) desired = 0.f;
 
-                float g = v->fb_agc_gain[b];
-                if (desired < g) g = a_fb_attack * g + one_minus_a_fb_attack * desired;
-                else             g = a_fb_release * g + one_minus_a_fb_release * desired;
-                v->fb_agc_gain[b] = g;
+                                v->fb_agc_env[b] = jb_kill_denorm(a_fb_env * v->fb_agc_env[b] + one_minus_a_fb_env * lvl);
 
-                const float fb_gain = fb_gain_cmd * g;
+
+
+                                // Limiter (one-sided): only attenuate when the feedback path gets too loud.
+
+
+                                // Pumping preventer: deadband + hold (no release for a short time after reduction).
+
+
+                                float desired = 1.f;
+
+
+                                if (fb_env_target > 1e-9f) {
+
+
+                                    const float env = v->fb_agc_env[b];
+
+
+                                    const float thresh = fb_env_target * lim_deadband;
+
+
+                                    if (env > thresh) desired = fb_env_target / (env + 1e-6f);
+
+
+                                }
+
+
+                                if (desired > 1.f) desired = 1.f;
+
+
+                                if (desired < 0.f) desired = 0.f;
+
+
+
+                                int hold = v->fb_lim_hold[b];
+
+
+                                float g = v->fb_agc_gain[b];
+
+
+                                if (desired < g) {
+
+
+                                    g = a_limA * g + one_minus_a_limA * desired;
+
+
+                                    hold = lim_hold_samps;
+
+
+                                } else {
+
+
+                                    if (hold > 0) {
+
+
+                                        hold--;
+
+
+                                    } else {
+
+
+                                        g = a_limR * g + one_minus_a_limR * desired;
+
+
+                                    }
+
+
+                                }
+
+
+                                v->fb_lim_hold[b] = hold;
+
+
+                                v->fb_agc_gain[b] = g;
+
+
+
+                                // Musical feedback envelope (note-gated): attack/release knobs shape how feedback fades in/out.
+
+
+                                const float tgt = (v->state == V_HELD) ? 1.f : 0.f;
+
+
+                                float fe = v->fb_env[b];
+
+
+                                if (tgt > fe) fe = a_fb_envA * fe + one_minus_a_fb_envA * tgt;
+
+
+                                else          fe = a_fb_envR * fe + one_minus_a_fb_envR * tgt;
+
+
+                                v->fb_env[b] = fe;
+
+
+
+                                const float fb_gain = fb_gain_cmd * fe * g;
                 fb2L = dL * fb_gain;
                 fb2R = dR * fb_gain;
 
