@@ -3816,12 +3816,10 @@ x->excite_pos2    = x->excite_pos;
     x->in_odd_skew   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("odd_skew"));
     x->in_even_skew  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("even_skew"));
     x->in_collision  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("collision"));
-    // Spatial coupling controls (node/antinode; gain-level only)    x->in_position      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("position"));    // position 0..1
-// excitation width 0..1
-// 0..5    x->in_pickup        = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("pickup"));      // pickup 0..1
+    // Spatial coupling controls (Mutable-style 1D position/pickup)
+    x->in_position   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("position"));    // excitation position 0..1
+    x->in_pickup     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("pickup"));      // pickup position 0..1
     x->in_odd_even      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("odd_even"));      // -1..+1 (odd vs even emphasis)
-// pickup width 0..1
-// -1..+1 (closed..open)
 
 // Individual
 
