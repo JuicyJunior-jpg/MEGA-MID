@@ -1874,27 +1874,42 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
         rank_of_id[i] = active_count_idx++;
     }
 
-// Elements-style position/pickup weighting (1D):
+// Elements-style position/pickup weighting (1D), with fixed stereo offsets:
+    // Base formula:
     //   w_i = sin(pi * fi * pos) * sin(pi * fi * pickup)
-    // where fi is the mode frequency ratio (mode_hz / f0). This is agnostic to harmonic/inharmonic layouts.
-    const float pos   = jb_clamp(jb_bank_excite_pos(x, bank), 0.f, 1.f);
-    const float pickup= jb_clamp(jb_bank_pickup_pos(x, bank), 0.f, 1.f);
+    // We apply a small fixed L/R offset to decorrelate channels ("more HD / wider"),
+    // then RMS-normalize per channel to keep level stable.
+    const float pos    = jb_clamp(jb_bank_excite_pos(x, bank), 0.f, 1.f);
+    const float pickup = jb_clamp(jb_bank_pickup_pos(x, bank), 0.f, 1.f);
+
+    // Small fixed offsets (0..1 domain). Keep subtle to avoid obvious detuning.
+    const float pos_off    = 0.004f;
+    const float pickup_off = 0.006f;
+
+    const float posL    = jb_clamp(pos    - pos_off,    0.f, 1.f);
+    const float posR    = jb_clamp(pos    + pos_off,    0.f, 1.f);
+    const float pickupL = jb_clamp(pickup - pickup_off, 0.f, 1.f);
+    const float pickupR = jb_clamp(pickup + pickup_off, 0.f, 1.f);
 
     const float PI = (float)M_PI;
-    float energy_pos = 0.f;
+    float energy_posL = 0.f;
+    float energy_posR = 0.f;
     for (int i = 0; i < n_modes; ++i){
         if (!base[i].active) continue;
         if (m[i].nyq_kill) continue;
         float ratio = m[i].ratio_now + disp_offset[i];
         float fi = base[i].keytrack ? ratio : ((v->f0 > 0.f) ? (ratio / v->f0) : ratio);
         if (fi < 0.f) fi = 0.f;
-        const float w = sinf(PI * fi * pos) * sinf(PI * fi * pickup);
-        energy_pos += w * w;
+        const float wL = sinf(PI * fi * posL) * sinf(PI * fi * pickupL);
+        const float wR = sinf(PI * fi * posR) * sinf(PI * fi * pickupR);
+        energy_posL += wL * wL;
+        energy_posR += wR * wR;
     }
-    const float pos_norm = 1.f / sqrtf(energy_pos + 1e-5f);
+    const float pos_normL = 1.f / sqrtf(energy_posL + 1e-5f);
+    const float pos_normR = 1.f / sqrtf(energy_posR + 1e-5f);
 
 
-    float brightness_v = bank ? v->brightness_v2 : v->brightness_v;
+float brightness_v = bank ? v->brightness_v2 : v->brightness_v;
 
     // Tela-style brightness normalization: keep loudness stable when brightness changes.
     // We normalize the summed per-mode gains to match the reference spectrum at brightness=0 (saw slope).
@@ -1977,11 +1992,12 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
             float ratio_p = m[i].ratio_now + disp_offset[i];
             float fi = base[i].keytrack ? ratio_p : ((v->f0 > 0.f) ? (ratio_p / v->f0) : ratio_p);
             if (fi < 0.f) fi = 0.f;
-            const float w = (sinf(PI * fi * pos) * sinf(PI * fi * pickup)) * pos_norm;
-            gnL     *= w;
-            gnR     *= w;
-            gn_refL *= w;
-            gn_refR *= w;
+            const float wL = (sinf(PI * fi * posL) * sinf(PI * fi * pickupL)) * pos_normL;
+            const float wR = (sinf(PI * fi * posR) * sinf(PI * fi * pickupR)) * pos_normR;
+            gnL     *= wL;
+            gnR     *= wR;
+            gn_refL *= wL;
+            gn_refR *= wR;
         }
 
         // Odd vs Even mask by mode index (1-based): odd => (1-bias), even => (1+bias)
@@ -1990,8 +2006,6 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
         oe = jb_clamp(oe, 0.f, 1.f);
         gnL     *= oe;
         gnR     *= oe;
-        gn_refL *= oe;
-        gn_refR *= oe;
 
         m[i].gain_nowL = gnL;
         m[i].gain_nowR = gnR;
