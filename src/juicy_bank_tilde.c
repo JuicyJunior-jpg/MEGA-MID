@@ -2392,6 +2392,14 @@ static void juicy_bank_tilde_note_poly_midi(t_juicy_bank_tilde *x, t_floatarg vi
 
 // ---------- perform ----------
 
+/* Compile-time relief: juicy_bank_tilde_perform() is huge; compiling it at -O3 can stall/timeout on some toolchains (especially universal builds). */
+#if defined(__clang__)
+#pragma clang optimize off
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC optimize ("O2")
+#endif
+
 static t_int *juicy_bank_tilde_perform(t_int *w){
     t_juicy_bank_tilde *x=(t_juicy_bank_tilde *)(w[1]);
     // outputs
@@ -3672,6 +3680,12 @@ static void juicy_bank_tilde_preset_recall(t_juicy_bank_tilde *x){
         }
     }
 }
+
+#if defined(__clang__)
+#pragma clang optimize on
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
 
 // ---------- dsp setup/free ----------
 static void juicy_bank_tilde_dsp(t_juicy_bank_tilde *x, t_signal **sp){
