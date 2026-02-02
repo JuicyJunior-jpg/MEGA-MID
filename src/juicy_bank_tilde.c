@@ -3253,6 +3253,21 @@ static void juicy_bank_tilde_collision(t_juicy_bank_tilde *x, t_floatarg f){
     else              x->collision_amt  = v;
 }
 
+// ---------- SPACE (global room) ----------
+static void juicy_bank_tilde_space_size(t_juicy_bank_tilde *x, t_floatarg f){
+    x->space_size = jb_clamp(f, 0.f, 1.f);
+}
+static void juicy_bank_tilde_space_decay(t_juicy_bank_tilde *x, t_floatarg f){
+    x->space_decay = jb_clamp(f, 0.f, 1.f);
+}
+static void juicy_bank_tilde_space_diffusion(t_juicy_bank_tilde *x, t_floatarg f){
+    x->space_diffusion = jb_clamp(f, 0.f, 1.f);
+}
+static void juicy_bank_tilde_space_damping(t_juicy_bank_tilde *x, t_floatarg f){
+    x->space_damping = jb_clamp(f, 0.f, 1.f);
+}
+
+
 // dispersion & seeds
 
 static void juicy_bank_tilde_dispersion(t_juicy_bank_tilde *x, t_floatarg f){
