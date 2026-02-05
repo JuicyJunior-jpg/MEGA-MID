@@ -3,30 +3,54 @@ name: build-juicy-bank-universal
 on:
   push:
     branches: [ main, master ]
+    tags:
+      - 'v*'
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-
+  build-linux:
+    name: Build (Linux)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install deps (Ubuntu)
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential puredata-dev
 
+      - name: Build
+        run: make all
+
+      - name: Show PDINC/Help
+        run: make help || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: juicy_bank-ubuntu-22.04
+          path: build/**/juicy_bank~.pd_*
+
+  build-macos:
+    name: Build (macOS)
+    # macOS runners are often queued; only build on manual runs or version tags.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Install Pd (macOS)
-        if: runner.os == 'macOS'
         run: |
-          brew update
+          export HOMEBREW_NO_AUTO_UPDATE=1
           brew install --cask pd
 
       - name: Build
@@ -36,12 +60,10 @@ jobs:
         run: make help || true
 
       - name: Print binary type (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          make fatcheck || true
+        run: make fatcheck || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: juicy_bank-${{ matrix.os }}
+          name: juicy_bank-macos-14
           path: build/**/juicy_bank~.pd_*
