@@ -1,67 +1,47 @@
-# Makefile — builds ONLY juicy_bank~ for Pd (Universal mac on macOS)
-SRC_DIR    := src
-BUILD_ROOT := build
+name: build-juicy-bank-universal
 
-BANK_SRC  := $(SRC_DIR)/juicy_bank_tilde.c
-BANK_BIN  := juicy_bank~
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
 
-UNAME_S := $(shell uname -s)
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
 
-# Detect Pd headers
-ifeq ($(UNAME_S),Darwin)
-  PD_APP := $(firstword \
-    $(wildcard /Applications/Pd*.app) \
-    $(wildcard $(HOME)/Applications/Pd*.app) \
-    $(wildcard /usr/local/Caskroom/pd/*/Pd*.app) \
-    $(wildcard /opt/homebrew/Caskroom/pd/*/Pd*.app))
-  PDINC ?= $(PD_APP)/Contents/Resources/src
-  ifeq ($(PD_APP),)
-    $(warning Could not find Pd*.app automatically. Set PDINC=/path/to/Pd.app/Contents/Resources/src)
-  endif
-  EXT      := pd_darwin
-  PLAT     := macos
-  # Build a UNIVERSAL (arm64 + x86_64) binary
-  MAC_MIN  ?= 10.13
-  ARCHS    ?= -arch arm64 -arch x86_64
-  CFLAGS  ?= -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type -I"$(PDINC)" $(ARCHS) -mmacosx-version-min=$(MAC_MIN)
-  LDFLAGS ?= -bundle -undefined dynamic_lookup $(ARCHS) -mmacosx-version-min=$(MAC_MIN)
-  LDLIBS  ?=
-else ifeq ($(UNAME_S),Linux)
-  PDINC ?= /usr/include/pd
-  EXT      := pd_linux
-  PLAT     := linux
-  CFLAGS  ?= -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type -I"$(PDINC)"
-  LDFLAGS ?= -shared -fPIC -Wl,-export-dynamic
-  LDLIBS  ?= -lm
-else
-  PDINC ?= C:/Pd/src
-  EXT      := pd_win
-  PLAT     := windows
-  CFLAGS  ?= -O3 -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type -I"$(PDINC)"
-  LDFLAGS ?= -shared
-  LDLIBS  ?=
-endif
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-BUILD_DIR := $(BUILD_ROOT)/$(PLAT)
-OUT := $(BUILD_DIR)/$(BANK_BIN).$(EXT)
+      - name: Install deps (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential puredata-dev
 
-.PHONY: all clean dirs help fatcheck
-all: dirs $(OUT)
+      - name: Install Pd (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install --cask pd
 
-dirs:
-	@mkdir -p "$(BUILD_DIR)"
+      - name: Build
+        run: make all
 
-$(OUT): $(BANK_SRC) | dirs
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) $(LDLIBS)
+      - name: Show PDINC/Help
+        run: make help || true
 
-fatcheck:
-	@if [ "$(UNAME_S)" = "Darwin" ]; then file $(OUT); fi
+      - name: Print binary type (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          make fatcheck || true
 
-clean:
-	@rm -rf "$(BUILD_ROOT)"
-
-help:
-	@echo "PDINC=$(PDINC)"
-	@echo "Platform=$(PLAT)  Ext=$(EXT)"
-	@echo "Build dir=$(BUILD_DIR)"
-	@echo "Universal (macOS only): ARCHS='$(ARCHS)'  MAC_MIN=$(MAC_MIN)"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: juicy_bank-${{ matrix.os }}
+          path: build/**/juicy_bank~.pd_*
