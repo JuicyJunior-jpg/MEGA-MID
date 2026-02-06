@@ -1,5 +1,3 @@
-@@ -1,60 +1,67 @@
-# Makefile — builds ONLY juicy_bank~ for Pd
 # Makefile — builds ONLY juicy_bank~ for Pd (Universal mac on macOS)
 SRC_DIR    := src
 BUILD_ROOT := build
@@ -22,8 +20,6 @@ ifeq ($(UNAME_S),Darwin)
   endif
   EXT      := pd_darwin
   PLAT     := macos
-  CFLAGS  ?= -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type -I"$(PDINC)"
-  LDFLAGS ?= -bundle -undefined dynamic_lookup
   # Build a UNIVERSAL (arm64 + x86_64) binary
   MAC_MIN  ?= 10.13
   ARCHS    ?= -arch arm64 -arch x86_64
@@ -49,7 +45,6 @@ endif
 BUILD_DIR := $(BUILD_ROOT)/$(PLAT)
 OUT := $(BUILD_DIR)/$(BANK_BIN).$(EXT)
 
-.PHONY: all clean dirs help
 .PHONY: all clean dirs help fatcheck
 all: dirs $(OUT)
 
