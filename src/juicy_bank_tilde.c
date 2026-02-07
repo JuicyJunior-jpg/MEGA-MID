@@ -2425,11 +2425,11 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     jb_update_lfos_block(x, n);
 
     // Cache commonly-used symbols once per perform call (avoid gensym() in hot paths)
-    const t_symbol *sym_master_1     = sym_master_1;
-    const t_symbol *sym_master_2     = sym_master_2;
-    const t_symbol *sym_lfo2_amount  = sym_lfo2_amount;
-    const t_symbol *sym_exc_shape    = sym_exc_shape;
-    const t_symbol *sym_exc_imp_shape= sym_exc_imp_shape;
+    const t_symbol *sym_master_1     = gensym("master_1");
+    const t_symbol *sym_master_2     = gensym("master_2");
+    const t_symbol *sym_lfo2_amount  = gensym("lfo2_amount");
+    const t_symbol *sym_exc_shape    = gensym("exc_shape");
+    const t_symbol *sym_exc_imp_shape= gensym("exc_imp_shape");
 
     // NEW MOD LANES: LFO1 output (scaled by its amount) + a few global mods that must happen pre-exciter-update
     const t_symbol *lfo1_tgt = x->lfo_target[0];
@@ -3355,19 +3355,24 @@ static inline int jb_target_taken(const t_juicy_bank_tilde *x, t_symbol *tgt, in
 }
 
 static inline int jb_lfo1_target_allowed(t_symbol *s){
+    // Note: This function is called on control-rate message paths (not per-sample DSP),
+    // so using gensym() here is totally fine and avoids global symbol plumbing.
     if (jb_target_is_none(s)) return 1;
     return (
-        s == sym_master_1 || s == sym_master_2 ||
+        s == gensym("master_1") || s == gensym("master_2") ||
         s == gensym("pitch_1")  || s == gensym("pitch_2")  ||
         s == gensym("brightness_1") || s == gensym("brightness_2") ||
         s == gensym("density_1")    || s == gensym("density_2")    ||
         s == gensym("partials_1")   || s == gensym("partials_2")   ||
-        s == sym_exc_shape    ||
-        s == sym_exc_imp_shape||
+        s == gensym("pan_1")        || s == gensym("pan_2")        ||
+        s == gensym("coupling_amt") ||
+        s == gensym("exc_shape")    ||
+        s == gensym("exc_imp_shape")||
         s == gensym("lfo2_rate")    ||
-        s == sym_lfo2_amount
+        s == gensym("lfo2_amount")
     );
 }
+
 
 static void juicy_bank_tilde_lfo1_target(t_juicy_bank_tilde *x, t_symbol *s){
     if (!s) return;
