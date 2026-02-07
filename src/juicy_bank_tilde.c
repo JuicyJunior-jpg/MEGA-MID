@@ -1654,15 +1654,30 @@ static void jb_project_behavior_into_voice_bank(t_juicy_bank_tilde *x, jb_voice_
     *decay_pitch_mul_p = 1.f;   // no pitch-shortening multiplier
     *decay_vel_mul_p   = 1.f;   // no velocity-based decay extension
 
-    // Brightness: user-controlled (+ optional LFO1 modulation)
+    // Brightness: user-controlled (+ optional LFO modulation)
     {
         const t_symbol *lfo1_tgt = x->lfo_target[0];
-        const float lfo1 = x->lfo_val[0] * x->lfo_amt_v[0];
+        const t_symbol *lfo2_tgt = x->lfo_target[1];
+        const float lfo1 = x->lfo_val[0] * jb_clamp(x->lfo_amt_v[0], -1.f, 1.f);
+        const float lfo2 = x->lfo_val[1] * jb_clamp(x->lfo_amt_eff[1], -1.f, 1.f);
         float b = jb_clamp(jb_bank_brightness(x, bank), -1.f, 1.f);
+
+        float add = 0.f;
         if (lfo1 != 0.f){
             if ((bank == 0 && lfo1_tgt == gensym("brightness_1")) || (bank != 0 && lfo1_tgt == gensym("brightness_2"))){
-                b = jb_clamp(b + lfo1, -1.f, 1.f);
+                add += lfo1;
             }
+        }
+        if (lfo2 != 0.f){
+            if ((bank == 0 && lfo2_tgt == gensym("brightness_1")) || (bank != 0 && lfo2_tgt == gensym("brightness_2"))){
+                add += lfo2;
+            }
+        }
+        if (add != 0.f){
+            b = jb_clamp(b + add, -1.f, 1.f);
+        }
+        *brightness_v_p = b;
+    }
         }
         *brightness_v_p = b;
     }
@@ -1763,14 +1778,6 @@ static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, in
     // ratio transforms
     {
         float density_amt_eff = jb_bank_density_amt(x, bank);
-        const t_symbol *lfo1_tgt = x->lfo_target[0];
-        const float lfo1 = x->lfo_val[0] * x->lfo_amt_v[0];
-        if (lfo1 != 0.f){
-            if ((bank == 0 && lfo1_tgt == gensym("density_1")) || (bank != 0 && lfo1_tgt == gensym("density_2"))){
-                density_amt_eff += lfo1;
-                if (density_amt_eff < -1.f) density_amt_eff = -1.f; // keep existing lower clamp behavior
-            }
-        }
         jb_apply_density_generic(n_modes, base, density_amt_eff, m);
     }
 jb_lock_fundamental_generic(n_modes, base, m);
@@ -1801,15 +1808,28 @@ jb_lock_fundamental_generic(n_modes, base, m);
         f0_eff *= powf(2.f, cents / 1200.f);
     }
 
-// NEW MOD LANES (LFO1): bank pitch modulation in Hz, ±1 octave max depth
+// NEW MOD LANES (LFO1/LFO2): bank pitch modulation in Hz, ±1 octave max depth
 {
     const t_symbol *lfo1_tgt = x->lfo_target[0];
+    const t_symbol *lfo2_tgt = x->lfo_target[1];
     const float lfo1 = x->lfo_val[0] * jb_clamp(x->lfo_amt_v[0], -1.f, 1.f);
+    const float lfo2 = x->lfo_val[1] * jb_clamp(x->lfo_amt_eff[1], -1.f, 1.f);
+    float add = 0.f;
     if (lfo1 != 0.f){
         if ((bank == 0 && lfo1_tgt == gensym("pitch_1")) || (bank != 0 && lfo1_tgt == gensym("pitch_2"))){
-            // lfo1 is in [-1..+1] → map to frequency ratio [0.5..2.0] (one octave down/up)
-            f0_eff *= powf(2.f, lfo1);
+            add += lfo1;
         }
+    }
+    if (lfo2 != 0.f){
+        if ((bank == 0 && lfo2_tgt == gensym("pitch_1")) || (bank != 0 && lfo2_tgt == gensym("pitch_2"))){
+            add += lfo2;
+        }
+    }
+    if (add != 0.f){
+        // add is in [-2..+2] worst case, but each lane amount is clamped and targets are unique by lane,
+        // so typical is [-1..+1]. Clamp anyway for safety.
+        add = jb_clamp(add, -1.f, 1.f);
+        f0_eff *= powf(2.f, add);
     }
 }
 
@@ -1921,9 +1941,11 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
     const jb_mode_base_t *base = jb_bank_base(x, bank);
     jb_mode_rt_t *m = bank ? v->m2 : v->m;
     float *disp_offset = bank ? v->disp_offset2 : v->disp_offset;
-    // NEW MOD LANES (partial): LFO1 direct-to-target modulation values
+    // NEW MOD LANES: LFO direct-to-target modulation values
     const t_symbol *lfo1_tgt = x->lfo_target[0];
-    const float lfo1 = x->lfo_val[0] * x->lfo_amt_v[0];
+    const t_symbol *lfo2_tgt = x->lfo_target[1];
+    const float lfo1 = x->lfo_val[0] * jb_clamp(x->lfo_amt_v[0], -1.f, 1.f);
+    const float lfo2 = x->lfo_val[1] * jb_clamp(x->lfo_amt_eff[1], -1.f, 1.f);
     // Odd vs Even emphasis bias (-1..+1): index-based mode gain mask
     const float odd_even = jb_clamp(bank ? x->odd_even_bias2 : x->odd_even_bias, -1.f, 1.f);
 
@@ -1984,10 +2006,22 @@ float brightness_v = bank ? v->brightness_v2 : v->brightness_v;
     float sum_gain = 0.f;
     float sum_ref  = 0.f;
 
-    // LFO1 -> partials_* : smooth float gating across active modes
-    if (lfo1 != 0.f){
-        if ((bank == 0 && lfo1_tgt == gensym("partials_1")) || (bank != 0 && lfo1_tgt == gensym("partials_2"))){
-            float pf = (float)active_modes + lfo1 * (float)((active_count_idx > 1) ? (active_count_idx - 1) : 1);
+    // LFO -> partials_* : smooth float gating across active modes (per-bank)
+    {
+        float mod = 0.f;
+        if (lfo1 != 0.f){
+            if ((bank == 0 && lfo1_tgt == gensym("partials_1")) || (bank != 0 && lfo1_tgt == gensym("partials_2"))){
+                mod += lfo1;
+            }
+        }
+        if (lfo2 != 0.f){
+            if ((bank == 0 && lfo2_tgt == gensym("partials_1")) || (bank != 0 && lfo2_tgt == gensym("partials_2"))){
+                mod += lfo2;
+            }
+        }
+        if (mod != 0.f){
+            mod = jb_clamp(mod, -1.f, 1.f);
+            float pf = (float)active_modes + mod * (float)((active_count_idx > 1) ? (active_count_idx - 1) : 1);
             if (pf < 0.f) pf = 0.f;
             if (pf > (float)active_count_idx) pf = (float)active_count_idx;
             lfo1_partials_k = (int)floorf(pf);
@@ -2430,8 +2464,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     const t_symbol *sym_master_1     = gensym("master_1");
     const t_symbol *sym_master_2     = gensym("master_2");
     const t_symbol *sym_lfo2_amount  = gensym("lfo2_amount");
-    const t_symbol *sym_exc_shape    = gensym("exc_shape");
-    const t_symbol *sym_exc_imp_shape= gensym("exc_imp_shape");
+    const t_symbol *sym_noise_timbre = gensym("noise_timbre");
+    const t_symbol *sym_imp_shape    = gensym("imp_shape");
 
     // NEW MOD LANES: LFO1 output (scaled by its amount) + a few global mods that must happen pre-exciter-update
     const t_symbol *lfo1_tgt = x->lfo_target[0];
@@ -2445,21 +2479,40 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         x->lfo_amt_eff[1] = jb_clamp(x->lfo_amt_eff[1] + lfo1_out, -1.f, 1.f);
     }
 
-    // LFO1 -> Exciter params (0..1, additive, clamped) must be applied before jb_exc_update_block()
-    const float exc_shape_saved = x->exc_shape;         // Noise Color
-    const float exc_imp_shape_saved = x->exc_imp_shape; // Impulse Shape
+    // LFO1/LFO2 -> Exciter params (0..1, additive, clamped) must be applied before jb_exc_update_block()
+    const float noise_timbre_saved = x->exc_shape;      // Noise timbre/color (0..1)
+    const float imp_shape_saved    = x->exc_imp_shape;  // Impulse-only shape (0..1)
+
+    const t_symbol *lfo2_tgt = x->lfo_target[1];
+    const float lfo2_out = x->lfo_val[1] * jb_clamp(x->lfo_amt_eff[1], -1.f, 1.f);
+
+    float noise_timbre = noise_timbre_saved;
+    float imp_shape    = imp_shape_saved;
+
     if (lfo1_out != 0.f){
-        if (lfo1_tgt == sym_exc_shape) {
-            x->exc_shape = jb_clamp(exc_shape_saved + lfo1_out, 0.f, 1.f);
-        } else if (lfo1_tgt == sym_exc_imp_shape) {
-            x->exc_imp_shape = jb_clamp(exc_imp_shape_saved + lfo1_out, 0.f, 1.f);
+        if (lfo1_tgt == sym_noise_timbre){
+            noise_timbre += lfo1_out;
+        } else if (lfo1_tgt == sym_imp_shape){
+            imp_shape += lfo1_out;
+        }
+    }
+    if (lfo2_out != 0.f){
+        if (lfo2_tgt == sym_noise_timbre){
+            noise_timbre += lfo2_out;
+        } else if (lfo2_tgt == sym_imp_shape){
+            imp_shape += lfo2_out;
         }
     }
 
+    x->exc_shape     = jb_clamp(noise_timbre, 0.f, 1.f);
+    x->exc_imp_shape = jb_clamp(imp_shape,    0.f, 1.f);
+
     // Internal exciter: update shared params -> per-voice filters + ADSR times/curves
     jb_exc_update_block(x);
-    x->exc_shape = exc_shape_saved;
-    x->exc_imp_shape = exc_imp_shape_saved;
+
+    // Restore (so parameters remain stable / inspectable on the Pd side)
+    x->exc_shape     = noise_timbre_saved;
+    x->exc_imp_shape = imp_shape_saved;
 
         // (Coupling removed) Both banks are always excited by the internal exciter and always summed to the output.
     // Internal exciter mix weights (computed once per block)
@@ -2565,13 +2618,25 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         if (master_mod2 >= 0.f) bank_gain2 = master_base2 + master_mod2 * (1.f - master_base2);
         else                    bank_gain2 = master_base2 + master_mod2 * master_base2;
 
-        // LFO1 -> master_* (bank output volume): additive + clamp (0..1)
-        if (lfo1_out != 0.f){
-            if (lfo1_tgt == sym_master_1){
-                bank_gain1 = jb_clamp(bank_gain1 + lfo1_out, 0.f, 1.f);
-            }else if (lfo1_tgt == sym_master_2){
-                bank_gain2 = jb_clamp(bank_gain2 + lfo1_out, 0.f, 1.f);
+        // LFO1/LFO2 -> master_* (bank output volume): additive + clamp (0..1)
+        {
+            const t_symbol *lfo2_tgt_local = x->lfo_target[1];
+            const float lfo2_out_local = x->lfo_val[1] * jb_clamp(x->lfo_amt_eff[1], -1.f, 1.f);
+
+            float add1 = 0.f;
+            float add2 = 0.f;
+
+            if (lfo1_out != 0.f){
+                if (lfo1_tgt == sym_master_1) add1 += lfo1_out;
+                else if (lfo1_tgt == sym_master_2) add2 += lfo1_out;
             }
+            if (lfo2_out_local != 0.f){
+                if (lfo2_tgt_local == sym_master_1) add1 += lfo2_out_local;
+                else if (lfo2_tgt_local == sym_master_2) add2 += lfo2_out_local;
+            }
+
+            if (add1 != 0.f) bank_gain1 = jb_clamp(bank_gain1 + add1, 0.f, 1.f);
+            if (add2 != 0.f) bank_gain2 = jb_clamp(bank_gain2 + add2, 0.f, 1.f);
         }
 
         // Pan is intentionally not used in this synth anymore.
@@ -3357,29 +3422,28 @@ static inline int jb_target_taken(const t_juicy_bank_tilde *x, t_symbol *tgt, in
     return 0;
 }
 
-static inline int jb_lfo1_target_allowed(t_symbol *s){
-    // Note: This function is called on control-rate message paths (not per-sample DSP),
-    // so using gensym() here is totally fine and avoids global symbol plumbing.
+
+static inline int jb_lfo_target_allowed(t_symbol *s){
+    // Note: Called on control-rate message paths (not per-sample DSP),
+    // so using gensym() here is fine.
     if (jb_target_is_none(s)) return 1;
     return (
         s == gensym("master_1") || s == gensym("master_2") ||
         s == gensym("pitch_1")  || s == gensym("pitch_2")  ||
         s == gensym("brightness_1") || s == gensym("brightness_2") ||
-        s == gensym("density_1")    || s == gensym("density_2")    ||
         s == gensym("partials_1")   || s == gensym("partials_2")   ||
-        s == gensym("pan_1")        || s == gensym("pan_2")        ||
-        s == gensym("coupling_amt") ||
-        s == gensym("exc_shape")    ||
-        s == gensym("exc_imp_shape")||
+        s == gensym("imp_shape")    ||  /* maps to x->exc_imp_shape (0..1) */
+        s == gensym("noise_timbre") ||  /* maps to x->exc_shape     (0..1) */
         s == gensym("lfo2_rate")    ||
         s == gensym("lfo2_amount")
     );
 }
 
 
+
 static void juicy_bank_tilde_lfo1_target(t_juicy_bank_tilde *x, t_symbol *s){
     if (!s) return;
-    if (!jb_lfo1_target_allowed(s)){
+    if (!jb_lfo_target_allowed(s)){
         s = gensym("none");
     }
     if (jb_target_is_none(s)){
@@ -3392,6 +3456,9 @@ static void juicy_bank_tilde_lfo1_target(t_juicy_bank_tilde *x, t_symbol *s){
 
 static void juicy_bank_tilde_lfo2_target(t_juicy_bank_tilde *x, t_symbol *s){
     if (!s) return;
+    if (!jb_lfo_target_allowed(s)){
+        s = gensym("none");
+    }
     if (jb_target_is_none(s)){
         x->lfo_target[1] = gensym("none");
         return;
