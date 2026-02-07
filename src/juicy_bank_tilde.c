@@ -687,6 +687,7 @@ typedef struct _juicy_bank_tilde {
     t_inlet *in_space_decay;
     t_inlet *in_space_diffusion;
     t_inlet *in_space_damping;
+    t_inlet *in_space_wetdry;
     t_outlet *out_index;           // float outlet reporting current selected partial (1-based)
     jb_mode_base_t base[JB_MAX_MODES];
     jb_mode_base_t base2[JB_MAX_MODES];
@@ -757,6 +758,7 @@ float density_amt; jb_density_mode density_mode;
     float space_decay;
     float space_diffusion;
     float space_damping;
+    float space_wetdry;
 
     // SPACE state (global)
     float space_comb_buf[JB_SPACE_NCOMB][JB_SPACE_MAX_DELAY];
@@ -2893,9 +2895,10 @@ if (fb2L > 0.99f) fb2L = 0.99f; else if (fb2L < -0.99f) fb2L = -0.99f;
 
     // ---------- SPACE (global stereo room) ----------
     // Schroeder-style: 4 combs per channel -> 2 allpasses per channel.
-    // Bypass: when decay is exactly 0, the SPACE block is considered "off" and
-    // we skip all reverb processing (pure dry), saving CPU.
-    if (x->space_decay != 0.f){
+    // Bypass: only when SPACE wetdry is *totally dry* (-1).
+    // NOTE: decay=0 is allowed and simply yields a very short/zero-feedback room.
+    const float wetdry = jb_clamp(x->space_wetdry, -1.f, 1.f);
+    if (wetdry > -1.f){
         const float size01 = jb_clamp(x->space_size, 0.f, 1.f);
         const float decay01 = jb_clamp(x->space_decay, 0.f, 1.f);
         const float diff01 = jb_clamp(x->space_diffusion, 0.f, 1.f);
@@ -2920,8 +2923,8 @@ if (fb2L > 0.99f) fb2L = 0.99f; else if (fb2L < -0.99f) fb2L = -0.99f;
             comb_delay[k] = d;
         }
 
-        // Fixed wet/dry mix (no inlet in this revision)
-        const float mix = 0.35f;
+        // Wet/dry mapping: -1=dry, +1=wet
+        const float mix = 0.5f * (wetdry + 1.f);
         const float dry_w = 1.f - mix;
 
         for (int i = 0; i < n; ++i){
@@ -3458,6 +3461,9 @@ static void juicy_bank_tilde_space_diffusion(t_juicy_bank_tilde *x, t_floatarg f
 }
 static void juicy_bank_tilde_space_damping(t_juicy_bank_tilde *x, t_floatarg f){
     x->space_damping = jb_clamp(f, 0.f, 1.f);
+}
+static void juicy_bank_tilde_space_wetdry(t_juicy_bank_tilde *x, t_floatarg f){
+    x->space_wetdry = jb_clamp(f, -1.f, 1.f);
 }
 
 
@@ -4025,6 +4031,7 @@ x->excite_pos2    = x->excite_pos;
     x->space_decay = 0.35f;
     x->space_diffusion = 0.6f;
     x->space_damping = 0.25f;
+    x->space_wetdry = -0.3f; // -1..+1 : -1=dry, +1=wet (default matches old mix≈0.35)
 
     for (int k = 0; k < JB_SPACE_NCOMB; ++k){
         x->space_comb_w[k] = 0;
@@ -4050,6 +4057,7 @@ x->excite_pos2    = x->excite_pos;
     x->in_space_decay     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("space_decay"));
     x->in_space_diffusion = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("space_diffusion"));
     x->in_space_damping   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("space_damping"));
+    x->in_space_wetdry   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("space_wetdry"));
     x->in_index      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("index"));
     x->in_ratio      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("ratio"));
     x->in_gain       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("gain"));
@@ -4382,6 +4390,7 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_octave,   gen
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_space_decay,     gensym("space_decay"),     A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_space_diffusion, gensym("space_diffusion"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_space_damping,   gensym("space_damping"),   A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_space_wetdry,    gensym("space_wetdry"),    A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index_forward, gensym("forward"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index_backward, gensym("backward"), 0);
 
