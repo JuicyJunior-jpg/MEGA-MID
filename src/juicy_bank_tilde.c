@@ -1678,9 +1678,6 @@ static void jb_project_behavior_into_voice_bank(t_juicy_bank_tilde *x, jb_voice_
         }
         *brightness_v_p = b;
     }
-        }
-        *brightness_v_p = b;
-    }
 
     // Dispersion targets: keep current quantize-only approach (targets remain 0 => no ratio offsets)
     (void)n_modes;
