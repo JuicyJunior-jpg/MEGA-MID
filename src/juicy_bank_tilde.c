@@ -94,6 +94,20 @@ static inline float jb_delay_read_lagrange(const float *buf, int w, float delay_
     return y0*c0 + y1*c1 + y2*c2 + y3*c3;
 }
 
+// 3rd-order (4-point) Lagrange interpolation read with PRECOMPUTED coefficients.
+// This avoids floorf() + coefficient recompute in the hot per-sample loop.
+// intDelay = floor(delay_samps), frac = delay_samps - intDelay (0..1).
+// If frac==0, set frac_is_zero=1 and pass i0_offset=intDelay, else i0_offset=intDelay+1.
+static inline float jb_delay_read_lagrange_pre(const float *buf, int w, int i0_offset,
+                                              float c0, float c1, float c2, float c3){
+    const int i0 = (w - i0_offset);
+    const float y0 = buf[(i0 - 1) & JB_FB_DELAY_MASK];
+    const float y1 = buf[(i0 + 0) & JB_FB_DELAY_MASK];
+    const float y2 = buf[(i0 + 1) & JB_FB_DELAY_MASK];
+    const float y3 = buf[(i0 + 2) & JB_FB_DELAY_MASK];
+    return y0*c0 + y1*c1 + y2*c2 + y3*c3;
+}
+
 // 1st-order allpass (phase dispersion)
 static inline float jb_allpass1_run(float x, float a, float *x1, float *y1){
     const float y = (a * x) + (*x1) - (a * (*y1));
@@ -2410,6 +2424,13 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     // update LFOs once per block (for modulation matrix sources)
     jb_update_lfos_block(x, n);
 
+    // Cache commonly-used symbols once per perform call (avoid gensym() in hot paths)
+    const t_symbol *sym_master_1     = sym_master_1;
+    const t_symbol *sym_master_2     = sym_master_2;
+    const t_symbol *sym_lfo2_amount  = sym_lfo2_amount;
+    const t_symbol *sym_exc_shape    = sym_exc_shape;
+    const t_symbol *sym_exc_imp_shape= sym_exc_imp_shape;
+
     // NEW MOD LANES: LFO1 output (scaled by its amount) + a few global mods that must happen pre-exciter-update
     const t_symbol *lfo1_tgt = x->lfo_target[0];
     const float lfo1_amt = jb_clamp(x->lfo_amt_v[0], -1.f, 1.f);
@@ -2418,7 +2439,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     // store effective LFO amounts for downstream use
     x->lfo_amt_eff[0] = lfo1_amt;
     x->lfo_amt_eff[1] = jb_clamp(x->lfo_amt_v[1], -1.f, 1.f);
-    if (lfo1_out != 0.f && lfo1_tgt == gensym("lfo2_amount")) {
+    if (lfo1_out != 0.f && lfo1_tgt == sym_lfo2_amount) {
         x->lfo_amt_eff[1] = jb_clamp(x->lfo_amt_eff[1] + lfo1_out, -1.f, 1.f);
     }
 
@@ -2426,9 +2447,9 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     const float exc_shape_saved = x->exc_shape;         // Noise Color
     const float exc_imp_shape_saved = x->exc_imp_shape; // Impulse Shape
     if (lfo1_out != 0.f){
-        if (lfo1_tgt == gensym("exc_shape")) {
+        if (lfo1_tgt == sym_exc_shape) {
             x->exc_shape = jb_clamp(exc_shape_saved + lfo1_out, 0.f, 1.f);
-        } else if (lfo1_tgt == gensym("exc_imp_shape")) {
+        } else if (lfo1_tgt == sym_exc_imp_shape) {
             x->exc_imp_shape = jb_clamp(exc_imp_shape_saved + lfo1_out, 0.f, 1.f);
         }
     }
@@ -2450,6 +2471,17 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     const float pressure = jb_clamp(x->exc_density, 0.f, 1.f);
     const float fb_gain_cmd   = 0.95f * pressure * pressure;   // 0..0.95 (fine control at low end)
     const float fb_env_target = 0.65f * pressure;              // 0..0.65 (abs level target for limiter)
+
+    // Feedback Time/Phase controls (clamped once per block)
+    const float fb_time_v  = jb_clamp(x->fb_time,  0.f, 1.f);
+    const float fb_phase_v = jb_clamp(x->fb_phase, 0.f, 1.f);
+
+    // Time scaling (0..1 -> 0.5..2.0) computed once per block
+    const float fb_time_scale = powf(2.f, (fb_time_v - 0.5f) * 2.f);
+
+    // Phase base mapping (log map 0..1 -> 15000..200 Hz) computed once per block.
+    // Per-voice keytracking is applied later.
+    const float fb_fc_base = 15000.f * powf((200.f / 15000.f), fb_phase_v);
 
     // Feedback amplitude envelope (per block) — uses the existing fb_agc_attack/release UI knobs
     // Attack:  0..1 -> 1ms..500ms  (fade-in on note-on)
@@ -2478,6 +2510,12 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     const float a_energy = expf(-1.0f / (x->sr * 0.050f));
     const float one_minus_a_energy = 1.f - a_energy;
     const float tail_energy_thresh = 1e-6f;
+
+    // Release envelope coefficients (per block): avoids expf() in the per-sample loop.
+    const float rel_tau1 = 0.02f + 4.98f * jb_clamp(x->release_amt,  0.f, 1.f);
+    const float rel_tau2 = 0.02f + 4.98f * jb_clamp(x->release_amt2, 0.f, 1.f);
+    const float a_rel1_block = expf(-1.0f / (x->sr * rel_tau1));
+    const float a_rel2_block = expf(-1.0f / (x->sr * rel_tau2));
 
     // Per-block updates that don't change sample-phase
     for(int vix=0; vix<x->total_voices; ++vix){
@@ -2527,9 +2565,9 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
         // LFO1 -> master_* (bank output volume): additive + clamp (0..1)
         if (lfo1_out != 0.f){
-            if (lfo1_tgt == gensym("master_1")){
+            if (lfo1_tgt == sym_master_1){
                 bank_gain1 = jb_clamp(bank_gain1 + lfo1_out, 0.f, 1.f);
-            }else if (lfo1_tgt == gensym("master_2")){
+            }else if (lfo1_tgt == sym_master_2){
                 bank_gain2 = jb_clamp(bank_gain2 + lfo1_out, 0.f, 1.f);
             }
         }
@@ -2539,6 +2577,30 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         const jb_mode_base_t *base1 = x->base;
         const jb_mode_base_t *base2 = x->base2;
 
+        // ---------- FEEDBACK precompute (per voice, per block) ----------
+        // These depend only on global fb_time/fb_phase and this voice pitch, so we keep them out of the hot per-sample loop.
+        float fb_delay_samps = (v->f0 > 1.f ? (x->sr / v->f0) : (x->sr / 110.f)) * fb_time_scale;
+        if (fb_delay_samps < 4.f) fb_delay_samps = 4.f;
+        if (fb_delay_samps > (float)(JB_FB_DELAY_MAX - 4)) fb_delay_samps = (float)(JB_FB_DELAY_MAX - 4);
+
+        // Lagrange delay read coefficients (constant across the block)
+        int intDelay = (int)fb_delay_samps;
+        float frac = fb_delay_samps - (float)intDelay; // 0..1
+        if (frac < 1e-9f) frac = 0.f;
+        const int i0_offset = intDelay + (frac > 0.f ? 1 : 0);
+
+        const float c0 = -0.16666667f * frac * (frac - 1.f) * (frac - 2.f);
+        const float c1 =  0.5f        * (frac + 1.f) * (frac - 1.f) * (frac - 2.f);
+        const float c2 = -0.5f        * (frac + 1.f) * frac * (frac - 2.f);
+        const float c3 =  0.16666667f * (frac + 1.f) * frac * (frac - 1.f);
+
+        // Allpass dispersion coefficient (constant across the block)
+        float fc = fb_fc_base;
+        fc *= (v->f0 > 1.f ? (v->f0 / 440.f) : 1.f);
+        fc = jb_clamp(fc, 50.f, 15000.f);
+        const float tanv = tanf((float)M_PI * fc / x->sr);
+        const float fb_ap_a = (tanv - 1.f) / (tanv + 1.f);
+
         for(int i=0;i<n;i++){
             // Per-bank voice outputs (pre-space)
             float b1OutL = 0.f, b1OutR = 0.f;
@@ -2547,24 +2609,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             // Each bank ONLY feeds back its own output. Feedback is injected at the
             // same junction as the exciter input, but it does NOT pass through the
             // exciter ADSR/noise path.
-                        // Prism-style feedback shaping: keytracked fractional delay (Time) + 1st-order allpass dispersion (Phase)
-            const float fb_time_v  = jb_clamp(x->fb_time,  0.f, 1.f);
-            const float fb_phase_v = jb_clamp(x->fb_phase, 0.f, 1.f);
-
-            // Time: delay length in samples, keytracked to the played note period, with exponential scaling.
-            // time_scale maps 0..1 -> 0.5..2.0
-            const float time_scale = powf(2.f, (fb_time_v - 0.5f) * 2.f);
-            float fb_delay_samps = (v->f0 > 1.f ? (x->sr / v->f0) : (x->sr / 110.f)) * time_scale;
-            if (fb_delay_samps < 4.f) fb_delay_samps = 4.f;
-            if (fb_delay_samps > (float)(JB_FB_DELAY_MAX - 4)) fb_delay_samps = (float)(JB_FB_DELAY_MAX - 4);
-
-            // Phase: allpass coefficient from a target center frequency that shifts downward as phase increases.
-            // log map 0..1 -> 15000..200 Hz, then keytrack with pitch.
-            float fc = 15000.f * powf((200.f / 15000.f), fb_phase_v);
-            fc *= (v->f0 > 1.f ? (v->f0 / 440.f) : 1.f);
-            fc = jb_clamp(fc, 50.f, 15000.f);
-            const float tanv = tanf((float)M_PI * fc / x->sr);
-            const float fb_ap_a = (tanv - 1.f) / (tanv + 1.f);
+            // Prism-style feedback shaping: keytracked fractional delay (Time) + 1st-order allpass dispersion (Phase)
 
             float fb1L = 0.f, fb1R = 0.f;
             float fb2L = 0.f, fb2R = 0.f;
@@ -2583,8 +2628,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 w = (w + 1) & JB_FB_DELAY_MASK;
                 v->fb_delay_w[b] = w;
 
-                float dL = jb_delay_read_lagrange(v->fb_delay_bufL[b], w, fb_delay_samps);
-                float dR = jb_delay_read_lagrange(v->fb_delay_bufR[b], w, fb_delay_samps);
+                float dL = jb_delay_read_lagrange_pre(v->fb_delay_bufL[b], w, i0_offset, c0, c1, c2, c3);
+                float dR = jb_delay_read_lagrange_pre(v->fb_delay_bufR[b], w, i0_offset, c0, c1, c2, c3);
                 dL = jb_allpass1_run(dL, fb_ap_a, &v->fb_ap_x1L[b], &v->fb_ap_y1L[b]);
                 dR = jb_allpass1_run(dR, fb_ap_a, &v->fb_ap_x1R[b], &v->fb_ap_y1R[b]);
 
@@ -2634,8 +2679,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 w = (w + 1) & JB_FB_DELAY_MASK;
                 v->fb_delay_w[b] = w;
 
-                float dL = jb_delay_read_lagrange(v->fb_delay_bufL[b], w, fb_delay_samps);
-                float dR = jb_delay_read_lagrange(v->fb_delay_bufR[b], w, fb_delay_samps);
+                float dL = jb_delay_read_lagrange_pre(v->fb_delay_bufL[b], w, i0_offset, c0, c1, c2, c3);
+                float dR = jb_delay_read_lagrange_pre(v->fb_delay_bufR[b], w, i0_offset, c0, c1, c2, c3);
                 dL = jb_allpass1_run(dL, fb_ap_a, &v->fb_ap_x1L[b], &v->fb_ap_y1L[b]);
                 dR = jb_allpass1_run(dR, fb_ap_a, &v->fb_ap_x1R[b], &v->fb_ap_y1R[b]);
 
@@ -2791,10 +2836,8 @@ if (fb2L > 0.99f) fb2L = 0.99f; else if (fb2L < -0.99f) fb2L = -0.99f;
 
                 // Apply release envelope to ALL voices (including tails), so the RELEASE control
                 // behaves consistently even during fast re-triggers that migrate voices into the tail pool.
-                float tau1 = 0.02f + 4.98f * jb_clamp(x->release_amt,  0.f, 1.f);
-                float tau2 = 0.02f + 4.98f * jb_clamp(x->release_amt2, 0.f, 1.f);
-                float a_rel1 = expf(-1.0f / (x->sr * tau1));
-                float a_rel2 = expf(-1.0f / (x->sr * tau2));
+                float a_rel1 = a_rel1_block;
+                float a_rel2 = a_rel2_block;
 
                 v->rel_env  *= a_rel1;
                 v->rel_env2 *= a_rel2;
@@ -2850,8 +2893,9 @@ if (fb2L > 0.99f) fb2L = 0.99f; else if (fb2L < -0.99f) fb2L = -0.99f;
 
     // ---------- SPACE (global stereo room) ----------
     // Schroeder-style: 4 combs per channel -> 2 allpasses per channel.
-    // Parameters are 0..1 floats mapped exactly as specified.
-    {
+    // Bypass: when decay is exactly 0, the SPACE block is considered "off" and
+    // we skip all reverb processing (pure dry), saving CPU.
+    if (x->space_decay != 0.f){
         const float size01 = jb_clamp(x->space_size, 0.f, 1.f);
         const float decay01 = jb_clamp(x->space_decay, 0.f, 1.f);
         const float diff01 = jb_clamp(x->space_diffusion, 0.f, 1.f);
@@ -3313,15 +3357,15 @@ static inline int jb_target_taken(const t_juicy_bank_tilde *x, t_symbol *tgt, in
 static inline int jb_lfo1_target_allowed(t_symbol *s){
     if (jb_target_is_none(s)) return 1;
     return (
-        s == gensym("master_1") || s == gensym("master_2") ||
+        s == sym_master_1 || s == sym_master_2 ||
         s == gensym("pitch_1")  || s == gensym("pitch_2")  ||
         s == gensym("brightness_1") || s == gensym("brightness_2") ||
         s == gensym("density_1")    || s == gensym("density_2")    ||
         s == gensym("partials_1")   || s == gensym("partials_2")   ||
-        s == gensym("exc_shape")    ||
-        s == gensym("exc_imp_shape")||
+        s == sym_exc_shape    ||
+        s == sym_exc_imp_shape||
         s == gensym("lfo2_rate")    ||
-        s == gensym("lfo2_amount")
+        s == sym_lfo2_amount
     );
 }
 
