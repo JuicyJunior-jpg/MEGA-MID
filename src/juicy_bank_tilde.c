@@ -983,7 +983,8 @@ t_inlet  *in_preset_cmd;      // symbol inlet: INIT/SAVE/FORWARD/BACKWARD
 t_inlet  *in_preset_char;     // float inlet: 1..64 character selector (space + A..Z + a..z + 0..9 + extra)
 t_outlet *out_preset;         // symbol outlet for preset UI feedback
 
-jb_preset_t presets[JB_PRESET_SLOTS];
+
+    t_outlet *out_preset_f;       // float outlet: simple state (mode/slot) for easy [print]jb_preset_t presets[JB_PRESET_SLOTS];
 int preset_mode;              // jb_preset_mode_t
 int preset_cursor;            // 0..JB_PRESET_NAME_MAX-1 (naming mode)
 int preset_slot_sel;          // 0..JB_PRESET_SLOTS-1 (slot mode)
@@ -4755,7 +4756,7 @@ x->excite_pos2    = x->excite_pos;
     x->in_velmap_amount = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("velmap_amount"));
     x->in_velmap_target = inlet_new(&x->x_obj, x->tgtproxy_velmap ? &x->tgtproxy_velmap->p_pd : &x->x_obj.ob_pd, 0, 0);
 // Preset system inlets (placed after velocity mapping)
-x->in_preset_cmd  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_symbol, gensym("preset_cmd"));
+x->in_preset_cmd  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_anything, gensym("preset_cmd_any"));
 x->in_preset_char = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("preset_char"));
 
 
@@ -4770,6 +4771,7 @@ x->in_preset_char = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("pre
 
     
 x->out_preset  = outlet_new(&x->x_obj, &s_symbol); // preset feedback outlet (symbols/lists)
+x->out_preset_f = outlet_new(&x->x_obj, &s_float);  // simple numeric state outlet (mode/slot)
 x->out_index   = outlet_new(&x->x_obj, &s_float); // 1-based index reporter
     return (void *)x;
 }
@@ -5029,6 +5031,16 @@ static void juicy_bank_tilde_preset_char(t_juicy_bank_tilde *x, t_floatarg f){
         SETSYMBOL(&a[0], gensym(x->preset_edit_name));
         outlet_anything(x->out_preset, gensym("preset_name"), 1, a);
     }
+}
+
+static void juicy_bank_tilde_preset_cmd(t_juicy_bank_tilde *x, t_symbol *s); // forward decl
+static void juicy_bank_tilde_preset_cmd_any(t_juicy_bank_tilde *x, t_symbol *sel, int argc, t_atom *argv){
+    // Allow bare messages like [FORWARD( as well as [symbol FORWARD(
+    t_symbol *cmd = sel;
+    if (sel == gensym("symbol") && argc > 0 && argv && argv[0].a_type == A_SYMBOL){
+        cmd = atom_getsymbol(argv);
+    }
+    juicy_bank_tilde_preset_cmd(x, cmd);
 }
 
 static void juicy_bank_tilde_preset_cmd(t_juicy_bank_tilde *x, t_symbol *s){
@@ -5372,6 +5384,7 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_brightness, g
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_velmap_amount, gensym("velmap_amount"), A_DEFFLOAT, 0);
 
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_preset_cmd,  gensym("preset_cmd"),  A_SYMBOL, 0);
+class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_preset_cmd_any, gensym("preset_cmd_any"), A_GIMME, 0);
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_preset_char, gensym("preset_char"), A_DEFFLOAT, 0);
 
 // INDIVIDUAL (per-mode)
