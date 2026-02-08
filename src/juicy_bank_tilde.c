@@ -594,6 +594,11 @@ typedef struct {
     float f0, vel, energy;
     // Internal exciter runtime state (per voice, stereo)
     jb_exc_voice_t exc;
+    // Per-voice LFO one-shot runtime (used when lfo_mode == 2)
+    float   lfo_phase_state[JB_N_LFO];
+    float   lfo_val[JB_N_LFO];
+    float   lfo_snh[JB_N_LFO];
+    uint8_t lfo_oneshot_done[JB_N_LFO];
     // Dedicated modulation ADSR (independent from exciter ADSR)
 
     // projected behavior (per voice) — BANK 1
@@ -811,12 +816,14 @@ float density_amt; jb_density_mode density_mode;
     float lfo_shape;   // 1..4 (1=saw,2=square,3=sine,4=SH)
     float lfo_rate;    // 1..20 Hz
     float lfo_phase;   // 0..1
+    float lfo_mode;    // 1..2 (1=free, 2=one-shot)
     float lfo_index;   // 1 or 2 (selects which LFO)
 
     // per-LFO parameter storage
     float lfo_shape_v[JB_N_LFO];
     float lfo_rate_v[JB_N_LFO];
     float lfo_phase_v[JB_N_LFO];
+    float lfo_mode_v[JB_N_LFO];
 
     // per-LFO runtime state (phase in cycles, current output, and S&H memory)
     float lfo_phase_state[JB_N_LFO];
@@ -892,6 +899,7 @@ float density_amt; jb_density_mode density_mode;
     t_inlet *in_lfo_shape;
     t_inlet *in_lfo_rate;
     t_inlet *in_lfo_phase;
+    t_inlet *in_lfo_mode;
     t_inlet *in_lfo_amount;
     t_inlet *in_lfo1_target;
     t_inlet *in_lfo2_target;
@@ -912,6 +920,12 @@ float density_amt; jb_density_mode density_mode;
 static void jb_update_lfos_block(t_juicy_bank_tilde *x, int n){
     if (x->sr <= 0.f || n <= 0){
         for (int li = 0; li < JB_N_LFO; ++li){
+        int mode = (int)floorf(x->lfo_mode_v[li] + 0.5f);
+        if (mode == 2){
+            // one-shot LFO is computed per-voice (see jb_update_lfos_oneshot_voice_block)
+            x->lfo_val[li] = 0.f;
+            continue;
+        }
             x->lfo_val[li] = 0.f;
         }
         return;
@@ -979,7 +993,75 @@ static void jb_update_lfos_block(t_juicy_bank_tilde *x, int n){
     }
 
 }
-// ---------- modulation-source normalisation helper ----------
+
+static inline float jb_lfo_value_for_voice(const t_juicy_bank_tilde *x, const jb_voice_t *v, int li){
+    // li: 0=LFO1, 1=LFO2
+    int m = (int)floorf((li >= 0 && li < JB_N_LFO ? x->lfo_mode_v[li] : 1.f) + 0.5f);
+    if (m == 2){
+        return jb_clamp(v->lfo_val[li], -1.f, 1.f);
+    }
+    return jb_clamp(x->lfo_val[li], -1.f, 1.f);
+}
+
+// Update per-voice one-shot LFO state for this block (only when lfo_mode == 2).
+// Behavior:
+//   • One-shot shapes (saw/square/sine) run exactly one cycle, then hold the final value.
+//   • One-shot S&H outputs a single random value per note-on and holds it.
+static inline void jb_update_lfos_oneshot_voice_block(t_juicy_bank_tilde *x, jb_voice_t *v, int n){
+    if (x->sr <= 0.f || n <= 0) return;
+    const float inv_sr = 1.f / x->sr;
+
+    for (int li = 0; li < JB_N_LFO; ++li){
+        int mode = (int)floorf(x->lfo_mode_v[li] + 0.5f);
+        if (mode != 2) continue;
+
+        // S&H one-shot is handled at note-on (one random value, held).
+        int shape = (int)floorf(x->lfo_shape_v[li] + 0.5f);
+        if (shape < 1) shape = 1;
+        if (shape > 5) shape = 5;
+        if (shape == 4){
+            continue;
+        }
+
+        if (v->lfo_oneshot_done[li]) continue;
+
+        float rate = jb_clamp(x->lfo_rate_v[li], 0.f, 20.f);
+        if (rate <= 0.f){
+            v->lfo_val[li] = 0.f;
+            v->lfo_oneshot_done[li] = 1;
+            continue;
+        }
+
+        float phase = v->lfo_phase_state[li];
+        phase += rate * ((float)n * inv_sr);
+
+        if (phase >= 1.f){
+            phase = 1.f;
+            v->lfo_oneshot_done[li] = 1;
+        }
+
+        float ph = phase + x->lfo_phase_v[li];
+        // In one-shot mode we clamp (no wrap) so the "one cycle" stays one cycle.
+        ph = jb_clamp(ph, 0.f, 1.f);
+
+        float val = 0.f;
+        if (shape == 1){
+            val = 2.f * ph - 1.f;
+        } else if (shape == 5){
+            val = 1.f - 2.f * ph;
+        } else if (shape == 2){
+            val = (ph < 0.5f) ? 1.f : -1.f;
+        } else { // shape == 3 (sine)
+            val = sinf(2.f * M_PI * ph);
+        }
+
+        v->lfo_phase_state[li] = phase;
+        v->lfo_val[li] = val;
+    }
+}
+
+ // ---------- modulation-source normalisation helper ----------
+
 // Returns a normalised value for each modulation source:
 //   0: velocity  -> 0..1
 //   1: pitch     -> -1..+1 (approx. +/- two octaves around basef0_ref)
@@ -1005,10 +1087,10 @@ static float jb_mod_source_value(const t_juicy_bank_tilde *x,
     }
 
     case 2: // lfo1 (-1..+1)
-        return jb_clamp(x->lfo_val[0], -1.f, 1.f);
+        return jb_lfo_value_for_voice(x, v, 0);
 
     case 3: // lfo2 (-1..+1)
-        return jb_clamp(x->lfo_val[1], -1.f, 1.f);
+        return jb_lfo_value_for_voice(x, v, 1);
 
     default:
         return 0.f;
@@ -1658,8 +1740,8 @@ static void jb_project_behavior_into_voice_bank(t_juicy_bank_tilde *x, jb_voice_
     {
         const t_symbol *lfo1_tgt = x->lfo_target[0];
         const t_symbol *lfo2_tgt = x->lfo_target[1];
-        const float lfo1 = x->lfo_val[0] * jb_clamp(x->lfo_amt_v[0], -1.f, 1.f);
-        const float lfo2 = x->lfo_val[1] * jb_clamp(x->lfo_amt_eff[1], -1.f, 1.f);
+        const float lfo1 = jb_lfo_value_for_voice(x, v, 0) * jb_clamp(x->lfo_amt_v[0], -1.f, 1.f);
+        const float lfo2 = jb_lfo_value_for_voice(x, v, 1) * jb_clamp(x->lfo_amt_eff[1], -1.f, 1.f);
         float b = jb_clamp(jb_bank_brightness(x, bank), -1.f, 1.f);
 
         float add = 0.f;
@@ -1809,8 +1891,8 @@ jb_lock_fundamental_generic(n_modes, base, m);
 {
     const t_symbol *lfo1_tgt = x->lfo_target[0];
     const t_symbol *lfo2_tgt = x->lfo_target[1];
-    const float lfo1 = x->lfo_val[0] * jb_clamp(x->lfo_amt_v[0], -1.f, 1.f);
-    const float lfo2 = x->lfo_val[1] * jb_clamp(x->lfo_amt_eff[1], -1.f, 1.f);
+    const float lfo1 = jb_lfo_value_for_voice(x, v, 0) * jb_clamp(x->lfo_amt_v[0], -1.f, 1.f);
+    const float lfo2 = jb_lfo_value_for_voice(x, v, 1) * jb_clamp(x->lfo_amt_eff[1], -1.f, 1.f);
     float add = 0.f;
     if (lfo1 != 0.f){
         if ((bank == 0 && lfo1_tgt == gensym("pitch_1")) || (bank != 0 && lfo1_tgt == gensym("pitch_2"))){
@@ -1966,8 +2048,25 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
     //   w_i = sin(pi * fi * pos) * sin(pi * fi * pickup)
     // We apply a small fixed L/R offset to decorrelate channels ("more HD / wider"),
     // then RMS-normalize per channel to keep level stable.
-    const float pos    = jb_clamp(jb_bank_excite_pos(x, bank), 0.f, 1.f);
-    const float pickup = jb_clamp(jb_bank_pickup_pos(x, bank), 0.f, 1.f);
+    float pos    = jb_clamp(jb_bank_excite_pos(x, bank), 0.f, 1.f);
+    float pickup = jb_clamp(jb_bank_pickup_pos(x, bank), 0.f, 1.f);
+
+    // LFO1/LFO2 -> position / pickup (0..1): additive + clamp.
+    {
+        float add_pos = 0.f;
+        float add_pick = 0.f;
+        if (lfo1 != 0.f){
+            if (lfo1_tgt == gensym("position")) add_pos += lfo1;
+            else if (lfo1_tgt == gensym("pickup")) add_pick += lfo1;
+        }
+        if (lfo2 != 0.f){
+            if (lfo2_tgt == gensym("position")) add_pos += lfo2;
+            else if (lfo2_tgt == gensym("pickup")) add_pick += lfo2;
+        }
+        if (add_pos != 0.f) pos = jb_clamp(pos + add_pos, 0.f, 1.f);
+        if (add_pick != 0.f) pickup = jb_clamp(pickup + add_pick, 0.f, 1.f);
+    }
+
 
     // Small fixed offsets (0..1 domain). Keep subtle to avoid obvious detuning.
     const float pos_off    = 0.004f;
@@ -2147,6 +2246,14 @@ v->fb_delay_w[b] = 0;
     v->rel_env  = 1.f;
     v->rel_env2 = 1.f;
     v->energy = 0.f;
+
+    // Per-voice one-shot LFO runtime
+    for (int li = 0; li < JB_N_LFO; ++li){
+        v->lfo_phase_state[li] = 0.f;
+        v->lfo_val[li] = 0.f;
+        v->lfo_snh[li] = 0.f;
+        v->lfo_oneshot_done[li] = 0;
+    }
 
     // Internal exciter reset (note-on reset + voice-steal reset)
     jb_exc_voice_reset_runtime(&v->exc);
@@ -2331,6 +2438,35 @@ static void jb_note_on(t_juicy_bank_tilde *x, float f0, float vel){
     v->vel = jb_exc_midi_to_vel01(vel);
 
     jb_voice_reset_states(x, v, &x->rng);
+
+    // One-shot LFO init (per-note): reset phase and (for S&H) pick a fresh random value once.
+    for (int li = 0; li < JB_N_LFO; ++li){
+        int mode = (int)floorf(x->lfo_mode_v[li] + 0.5f);
+        if (mode != 2) continue;
+
+        int shape = (int)floorf(x->lfo_shape_v[li] + 0.5f);
+        if (shape < 1) shape = 1;
+        if (shape > 5) shape = 5;
+
+        v->lfo_phase_state[li] = 0.f;
+        v->lfo_oneshot_done[li] = 0;
+
+        if (shape == 4){
+            // S&H one-shot: one random value per note-on, held forever.
+            v->lfo_val[li] = jb_rng_bi(&x->rng);
+            v->lfo_snh[li] = v->lfo_val[li];
+            v->lfo_oneshot_done[li] = 1;
+        } else {
+            float ph = jb_clamp(x->lfo_phase_v[li], 0.f, 1.f);
+            float val = 0.f;
+            if (shape == 1)      val = 2.f * ph - 1.f;
+            else if (shape == 5) val = 1.f - 2.f * ph;
+            else if (shape == 2) val = (ph < 0.5f) ? 1.f : -1.f;
+            else                 val = sinf(2.f * M_PI * ph);
+            v->lfo_val[li] = val;
+        }
+    }
+
     jb_project_behavior_into_voice(x, v);
     jb_project_behavior_into_voice2(x, v);
     jb_exc_note_on(x, v, v->vel);
@@ -2573,6 +2709,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     for(int vix=0; vix<x->total_voices; ++vix){
         jb_voice_t *v = &x->v[vix];
         if (v->state==V_IDLE) continue;
+        jb_update_lfos_oneshot_voice_block(x, v, n);
         jb_project_behavior_into_voice(x, v); // keep behavior up-to-date
         jb_update_voice_coeffs(x, v);
         jb_update_voice_gains(x, v);
@@ -2588,6 +2725,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     for(int vix=0; vix<x->total_voices; ++vix){
         jb_voice_t *v = &x->v[vix];
         if (v->state==V_IDLE) continue;
+        jb_update_lfos_oneshot_voice_block(x, v, n);
 
         // Per-bank master gain (0..1) with modulation-matrix target "master" (index 11).
         float (*mm1)[JB_N_MODTGT] = x->mod_matrix;
@@ -2618,14 +2756,15 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         // LFO1/LFO2 -> master_* (bank output volume): additive + clamp (0..1)
         {
             const t_symbol *lfo2_tgt_local = x->lfo_target[1];
-            const float lfo2_out_local = x->lfo_val[1] * jb_clamp(x->lfo_amt_eff[1], -1.f, 1.f);
+            const float lfo1_out_v = jb_lfo_value_for_voice(x, v, 0) * lfo1_amt;
+            const float lfo2_out_local = jb_lfo_value_for_voice(x, v, 1) * jb_clamp(x->lfo_amt_eff[1], -1.f, 1.f);
 
             float add1 = 0.f;
             float add2 = 0.f;
 
-            if (lfo1_out != 0.f){
-                if (lfo1_tgt == sym_master_1) add1 += lfo1_out;
-                else if (lfo1_tgt == sym_master_2) add2 += lfo1_out;
+            if (lfo1_out_v != 0.f){
+                if (lfo1_tgt == sym_master_1) add1 += lfo1_out_v;
+                else if (lfo1_tgt == sym_master_2) add2 += lfo1_out_v;
             }
             if (lfo2_out_local != 0.f){
                 if (lfo2_tgt_local == sym_master_1) add1 += lfo2_out_local;
@@ -3381,6 +3520,19 @@ static void juicy_bank_tilde_lfo_phase(t_juicy_bank_tilde *x, t_floatarg f){
     if (idx >= JB_N_LFO) idx = JB_N_LFO - 1;
     x->lfo_phase_v[idx] = p;
 }
+static void juicy_bank_tilde_lfo_mode(t_juicy_bank_tilde *x, t_floatarg f){
+    int m = (int)floorf(f + 0.5f);
+    if (m < 1) m = 1;
+    if (m > 2) m = 2;
+    x->lfo_mode = (float)m;
+
+    // write into the currently selected LFO slot
+    int idx = (int)floorf(x->lfo_index + 0.5f) - 1;
+    if (idx < 0) idx = 0;
+    if (idx >= JB_N_LFO) idx = JB_N_LFO - 1;
+    x->lfo_mode_v[idx] = (float)m;
+}
+
 static void juicy_bank_tilde_lfo_index(t_juicy_bank_tilde *x, t_floatarg f){
     int idx = (int)floorf(f + 0.5f);
     if (idx < 1) idx = 1;
@@ -3395,6 +3547,7 @@ static void juicy_bank_tilde_lfo_index(t_juicy_bank_tilde *x, t_floatarg f){
     x->lfo_rate  = x->lfo_rate_v[li];
     x->lfo_phase = x->lfo_phase_v[li];
     x->lfo_amount = x->lfo_amt_v[li];
+    x->lfo_mode  = x->lfo_mode_v[li];
 }
 
 static void juicy_bank_tilde_lfo_amount(t_juicy_bank_tilde *x, t_floatarg f){
@@ -3429,6 +3582,7 @@ static inline int jb_lfo_target_allowed(t_symbol *s){
         s == gensym("pitch_1")  || s == gensym("pitch_2")  ||
         s == gensym("brightness_1") || s == gensym("brightness_2") ||
         s == gensym("partials_1")   || s == gensym("partials_2")   ||
+        s == gensym("position")     || s == gensym("pickup")       ||
         s == gensym("imp_shape")    ||  /* maps to x->exc_imp_shape (0..1) */
         s == gensym("noise_timbre") ||  /* maps to x->exc_shape     (0..1) */
         s == gensym("lfo2_rate")    ||
@@ -3832,6 +3986,7 @@ inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     if (x->in_lfo_shape) inlet_free(x->in_lfo_shape);
     if (x->in_lfo_rate) inlet_free(x->in_lfo_rate);
     if (x->in_lfo_phase) inlet_free(x->in_lfo_phase);
+    if (x->in_lfo_mode)  inlet_free(x->in_lfo_mode);
     if (x->in_lfo_amount) inlet_free(x->in_lfo_amount);
     if (x->in_lfo1_target) inlet_free(x->in_lfo1_target);
     if (x->in_lfo2_target) inlet_free(x->in_lfo2_target);
@@ -3975,6 +4130,7 @@ x->excite_pos2    = x->excite_pos;
     x->lfo_shape = 1.f;   // default: shape 1 (for currently selected LFO)
     x->lfo_rate  = 1.f;   // 1 Hz
     x->lfo_phase = 0.f;   // start at phase 0
+    x->lfo_mode  = 1.f;   // free by default
     x->lfo_index = 1.f;   // LFO 1 selected by default
 
     // Internal exciter defaults (shared across BOTH banks)
@@ -4008,6 +4164,7 @@ x->excite_pos2    = x->excite_pos;
         x->lfo_shape_v[li]      = 1.f;
         x->lfo_rate_v[li]       = 1.f;
         x->lfo_phase_v[li]      = 0.f;
+        x->lfo_mode_v[li]       = 1.f;
         x->lfo_phase_state[li]  = 0.f;
         x->lfo_val[li]          = 0.f;
         x->lfo_snh[li]          = 0.f;
@@ -4157,6 +4314,7 @@ x->excite_pos2    = x->excite_pos;
     x->in_lfo_shape  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_shape"));
     x->in_lfo_rate   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_rate"));
     x->in_lfo_phase  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_phase"));
+    x->in_lfo_mode   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_mode"));
     x->in_lfo_amount = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_amount"));
 
     // Target selector inlets must accept bare selectors (e.g. a message box containing "damper_1"),
@@ -4403,6 +4561,7 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_brightness, g
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo_shape, gensym("lfo_shape"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo_rate,  gensym("lfo_rate"),  A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo_phase, gensym("lfo_phase"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo_mode,  gensym("lfo_mode"),  A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo_index, gensym("lfo_index"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo_amount, gensym("lfo_amount"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo1_target, gensym("lfo1_target"), A_SYMBOL, 0);
