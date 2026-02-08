@@ -1222,7 +1222,7 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
 
 // Update per-sample increments for the dedicated modulation ADSR.
 // Called once per DSP block.
- for the dedicated modulation ADSR.
+// (removed stray text line that broke compilation)
 // Called once per DSP block.
 
 
@@ -2473,6 +2473,12 @@ static int jb_find_quietest_tail_voice(const t_juicy_bank_tilde *x){
     }
     return best;
 }
+
+
+// ---- forward declarations (avoid C99 implicit declarations) ----
+static void jb_apply_velocity_mapping(t_juicy_bank_tilde *x, jb_voice_t *v);
+static inline int jb_target_is_none(t_symbol *s);
+static inline float jb_bell_map_norm_to_zeta(float u);
 
 static void jb_note_on(t_juicy_bank_tilde *x, float f0, float vel){
     // Pick an ATTACK voice (0..max_voices-1). Tail voices are never selected for new attacks.
@@ -4874,4 +4880,3 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_octave,   gen
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_renderclear, gensym("renderclear"), 0);
 
 }
-
