@@ -872,6 +872,8 @@ float density_amt; jb_density_mode density_mode;
     // Velocity mapping lane (velocity -> selected target per note)
     float     velmap_amount;         // -1..+1
     t_symbol *velmap_target;         // symbol selector
+
+        uint8_t   velmap_on[JB_VELMAP_N_TARGETS];         // toggle map of enabled velocity-mapping targets (see enum jb_velmap_idx)
     jb_tgtproxy *tgtproxy_velmap;
     t_inlet  *in_velmap_amount;
     t_inlet  *in_velmap_target;
@@ -2107,12 +2109,12 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
         float add_pos = 0.f;
         float add_pick = 0.f;
         if (lfo1 != 0.f){
-            if (lfo1_tgt == gensym("position")) add_pos += lfo1;
-            else if (lfo1_tgt == gensym("pickup")) add_pick += lfo1;
+            if (lfo1_tgt == gensym("position") || (bank==0 && lfo1_tgt == gensym("position_1")) || (bank!=0 && lfo1_tgt == gensym("position_2"))) add_pos += lfo1;
+            else if (lfo1_tgt == gensym("pickup") || (bank==0 && lfo1_tgt == gensym("pickup_1")) || (bank!=0 && lfo1_tgt == gensym("pickup_2"))) add_pick += lfo1;
         }
         if (lfo2 != 0.f){
-            if (lfo2_tgt == gensym("position")) add_pos += lfo2;
-            else if (lfo2_tgt == gensym("pickup")) add_pick += lfo2;
+            if (lfo2_tgt == gensym("position") || (bank==0 && lfo2_tgt == gensym("position_1")) || (bank!=0 && lfo2_tgt == gensym("position_2"))) add_pos += lfo2;
+            else if (lfo2_tgt == gensym("pickup") || (bank==0 && lfo2_tgt == gensym("pickup_1")) || (bank!=0 && lfo2_tgt == gensym("pickup_2"))) add_pick += lfo2;
         }
         if (add_pos != 0.f) pos = jb_clamp(pos + add_pos, 0.f, 1.f);
         if (add_pick != 0.f) pickup = jb_clamp(pickup + add_pick, 0.f, 1.f);
@@ -2570,14 +2572,11 @@ static inline void jb_migrate_to_tail_if_needed(t_juicy_bank_tilde *x, const jb_
 static void jb_apply_velocity_mapping(t_juicy_bank_tilde *x, jb_voice_t *v){
     if (!x || !v) return;
 
-    const t_symbol *tgt = x->velmap_target;
-    if (!tgt || jb_target_is_none(tgt)) return;
-
     float amt = jb_clamp(x->velmap_amount, -1.f, 1.f);
     if (amt == 0.f) return;
 
     float vel = jb_clamp(v->vel, 0.f, 1.f);
-    float delta = amt * vel; // bipolar scaling
+    float delta = amt * vel; // bipolar scaling shared by all enabled targets
 
     // Clear any previous per-note overrides (voice might be reused)
     for (int b = 0; b < 2; ++b){
@@ -2597,89 +2596,92 @@ static void jb_apply_velocity_mapping(t_juicy_bank_tilde *x, jb_voice_t *v){
     v->exc.d_ms_v = -1.f;
     v->exc.r_ms_v = -1.f;
 
-    // ---- Bell damper zeta peaks ----
-    if (!strncmp(tgt->s_name, "bell_z_damper", 13)){
-        int damper = 0, bank1 = 0;
-        if (sscanf(tgt->s_name, "bell_z_damper%d_%d", &damper, &bank1) == 2){
-            int d = damper - 1;
-            int b = bank1 - 1;
-            if (d >= 0 && d < JB_N_DAMPERS && (b == 0 || b == 1)){
-                float u = x->bell_peak_zeta_param[b][d];
-                if (u < 0.f) u = 0.5915f; // sensible on-default (matches old 0.00035 baseline)
-                u = jb_clamp(u + delta, 0.f, 1.f);
-                v->velmap_bell_zeta_on[b][d] = 1;
-                v->velmap_bell_zeta[b][d] = jb_bell_map_norm_to_zeta(u);
-            }
+    // Apply every enabled velocity-mapping target (toggles).
+    for (int ti = 0; ti < JB_VELMAP_N_TARGETS; ++ti){
+        if (!x->velmap_on[ti]) continue;
+
+        switch((jb_velmap_idx)ti){
+
+            // ---- Bell damper zeta peaks ----
+            case JB_VEL_BELL_Z_D1_B1:
+            case JB_VEL_BELL_Z_D1_B2:
+            case JB_VEL_BELL_Z_D2_B1:
+            case JB_VEL_BELL_Z_D2_B2:
+            case JB_VEL_BELL_Z_D3_B1:
+            case JB_VEL_BELL_Z_D3_B2: {
+                int damper = ((ti - JB_VEL_BELL_Z_D1_B1) / 2); // 0..2
+                int bank   = ((ti - JB_VEL_BELL_Z_D1_B1) % 2); // 0..1
+                if (damper >= 0 && damper < JB_N_DAMPERS){
+                    float u = x->bell_peak_zeta_param[bank][damper];
+                    if (u < 0.f) u = 0.5915f; // sensible on-default
+                    u = jb_clamp(u + delta, 0.f, 1.f);
+                    v->velmap_bell_zeta_on[bank][damper] = 1;
+                    v->velmap_bell_zeta[bank][damper] = jb_bell_map_norm_to_zeta(u);
+                }
+            } break;
+
+            case JB_VEL_BRIGHTNESS_1: v->velmap_brightness_add[0] = delta; break;
+            case JB_VEL_BRIGHTNESS_2: v->velmap_brightness_add[1] = delta; break;
+
+            case JB_VEL_POSITION_1: {
+                float base = jb_clamp(jb_bank_excite_pos(x, 0), 0.f, 1.f);
+                v->velmap_pos[0] = jb_clamp(base + delta, 0.f, 1.f);
+            } break;
+            case JB_VEL_POSITION_2: {
+                float base = jb_clamp(jb_bank_excite_pos(x, 1), 0.f, 1.f);
+                v->velmap_pos[1] = jb_clamp(base + delta, 0.f, 1.f);
+            } break;
+
+            case JB_VEL_PICKUP_1: {
+                float base = jb_clamp(jb_bank_pickup_pos(x, 0), 0.f, 1.f);
+                v->velmap_pickup[0] = jb_clamp(base + delta, 0.f, 1.f);
+            } break;
+            case JB_VEL_PICKUP_2: {
+                float base = jb_clamp(jb_bank_pickup_pos(x, 1), 0.f, 1.f);
+                v->velmap_pickup[1] = jb_clamp(base + delta, 0.f, 1.f);
+            } break;
+
+            case JB_VEL_MASTER_1: v->velmap_master_add[0] = delta; break;
+            case JB_VEL_MASTER_2: v->velmap_master_add[1] = delta; break;
+
+            // ---- Exciter ADSR (noise source) ----
+            case JB_VEL_ADSR_ATTACK: {
+                float base = (x->exc_attack_ms > 0.f) ? x->exc_attack_ms : 1.f;
+                float ms = base * (1.f + delta);
+                if (ms < 0.f) ms = 0.f;
+                if (ms > 10000.f) ms = 10000.f;
+                v->exc.a_ms_v = ms;
+            } break;
+            case JB_VEL_ADSR_DECAY: {
+                float base = (x->exc_decay_ms > 0.f) ? x->exc_decay_ms : 1.f;
+                float ms = base * (1.f + delta);
+                if (ms < 0.f) ms = 0.f;
+                if (ms > 10000.f) ms = 10000.f;
+                v->exc.d_ms_v = ms;
+            } break;
+            case JB_VEL_ADSR_RELEASE: {
+                float base = (x->exc_release_ms > 0.f) ? x->exc_release_ms : 1.f;
+                float ms = base * (1.f + delta);
+                if (ms < 0.f) ms = 0.f;
+                if (ms > 10000.f) ms = 10000.f;
+                v->exc.r_ms_v = ms;
+            } break;
+
+            case JB_VEL_IMP_SHAPE: {
+                float base = jb_clamp(x->exc_imp_shape, 0.f, 1.f);
+                v->exc.imp_shape_v = jb_clamp(base + delta, 0.f, 1.f);
+            } break;
+
+            case JB_VEL_NOISE_TIMBRE: {
+                float base = jb_clamp(x->exc_shape, 0.f, 1.f);
+                v->exc.noise_timbre_v = jb_clamp(base + delta, 0.f, 1.f);
+            } break;
+
+            default: break;
         }
-        return;
-    }
-
-    // ---- Bank-suffixed parameters ----
-    if (!strcmp(tgt->s_name, "brightness_1")) { v->velmap_brightness_add[0] = delta; return; }
-    if (!strcmp(tgt->s_name, "brightness_2")) { v->velmap_brightness_add[1] = delta; return; }
-
-    if (!strcmp(tgt->s_name, "position_1")){
-        float base = jb_clamp(jb_bank_excite_pos(x, 0), 0.f, 1.f);
-        v->velmap_pos[0] = jb_clamp(base + delta, 0.f, 1.f);
-        return;
-    }
-    if (!strcmp(tgt->s_name, "position_2")){
-        float base = jb_clamp(jb_bank_excite_pos(x, 1), 0.f, 1.f);
-        v->velmap_pos[1] = jb_clamp(base + delta, 0.f, 1.f);
-        return;
-    }
-
-    if (!strcmp(tgt->s_name, "pickup_1")){
-        float base = jb_clamp(jb_bank_pickup_pos(x, 0), 0.f, 1.f);
-        v->velmap_pickup[0] = jb_clamp(base + delta, 0.f, 1.f);
-        return;
-    }
-    if (!strcmp(tgt->s_name, "pickup_2")){
-        float base = jb_clamp(jb_bank_pickup_pos(x, 1), 0.f, 1.f);
-        v->velmap_pickup[1] = jb_clamp(base + delta, 0.f, 1.f);
-        return;
-    }
-
-    if (!strcmp(tgt->s_name, "master_1")) { v->velmap_master_add[0] = delta; return; }
-    if (!strcmp(tgt->s_name, "master_2")) { v->velmap_master_add[1] = delta; return; }
-
-    // ---- Exciter ADSR + timbre ----
-    if (!strcmp(tgt->s_name, "adsr_attack")){
-        float base = (x->exc_attack_ms > 0.f) ? x->exc_attack_ms : 1.f;
-        float ms = base * (1.f + delta);
-        if (ms < 0.f) ms = 0.f;
-        if (ms > 10000.f) ms = 10000.f;
-        v->exc.a_ms_v = ms;
-        return;
-    }
-    if (!strcmp(tgt->s_name, "adsr_decay")){
-        float base = (x->exc_decay_ms > 0.f) ? x->exc_decay_ms : 1.f;
-        float ms = base * (1.f + delta);
-        if (ms < 0.f) ms = 0.f;
-        if (ms > 10000.f) ms = 10000.f;
-        v->exc.d_ms_v = ms;
-        return;
-    }
-    if (!strcmp(tgt->s_name, "adsr_release")){
-        float base = (x->exc_release_ms > 0.f) ? x->exc_release_ms : 1.f;
-        float ms = base * (1.f + delta);
-        if (ms < 0.f) ms = 0.f;
-        if (ms > 10000.f) ms = 10000.f;
-        v->exc.r_ms_v = ms;
-        return;
-    }
-
-    if (!strcmp(tgt->s_name, "imp_shape")){
-        float base = jb_clamp(x->exc_imp_shape, 0.f, 1.f);
-        v->exc.imp_shape_v = jb_clamp(base + delta, 0.f, 1.f);
-        return;
-    }
-    if (!strcmp(tgt->s_name, "noise_timbre")){
-        float base = jb_clamp(x->exc_shape, 0.f, 1.f);
-        v->exc.noise_timbre_v = jb_clamp(base + delta, 0.f, 1.f);
-        return;
     }
 }
+
 static void jb_note_on_voice(t_juicy_bank_tilde *x, int vix1, float f0, float vel){
     // This path is used by [note_poly]/[poly]-style voice addressing.
     // We still want tail behavior here: stealing a busy attack voice migrates it into the tail pool.
@@ -3775,6 +3777,8 @@ static inline int jb_lfo_target_allowed(t_symbol *s){
         s == gensym("brightness_1") || s == gensym("brightness_2") ||
         s == gensym("partials_1")   || s == gensym("partials_2")   ||
         s == gensym("position")     || s == gensym("pickup")       ||
+        s == gensym("position_1")   || s == gensym("position_2")   ||
+        s == gensym("pickup_1")     || s == gensym("pickup_2")     ||
         s == gensym("imp_shape")    ||  /* maps to x->exc_imp_shape (0..1) */
         s == gensym("noise_timbre") ||  /* maps to x->exc_shape     (0..1) */
         s == gensym("lfo2_rate")    ||
@@ -3813,6 +3817,72 @@ static inline int jb_velmap_target_allowed(t_symbol *s){
 }
 
 
+// Velocity mapping: finite toggle set (unlimited simultaneous targets via toggles).
+// All enabled targets share the same velmap_amount scaling.
+// Toggle behavior: sending the same target symbol again flips it off.
+typedef enum {
+    JB_VEL_BELL_Z_D1_B1 = 0,
+    JB_VEL_BELL_Z_D1_B2,
+    JB_VEL_BELL_Z_D2_B1,
+    JB_VEL_BELL_Z_D2_B2,
+    JB_VEL_BELL_Z_D3_B1,
+    JB_VEL_BELL_Z_D3_B2,
+
+    JB_VEL_BRIGHTNESS_1,
+    JB_VEL_BRIGHTNESS_2,
+    JB_VEL_POSITION_1,
+    JB_VEL_POSITION_2,
+    JB_VEL_PICKUP_1,
+    JB_VEL_PICKUP_2,
+    JB_VEL_MASTER_1,
+    JB_VEL_MASTER_2,
+
+    JB_VEL_ADSR_ATTACK,
+    JB_VEL_ADSR_DECAY,
+    JB_VEL_ADSR_RELEASE,
+
+    JB_VEL_IMP_SHAPE,
+    JB_VEL_NOISE_TIMBRE,
+
+    JB_VELMAP_N_TARGETS
+} jb_velmap_idx;
+
+static inline int jb_velmap_symbol_to_idx(const t_symbol *s){
+    if (!s) return -1;
+
+    // bell_z_damper{1..3}_{1..2}
+    if (!strncmp(s->s_name, "bell_z_damper", 13)){
+        int damper=0, bank=0;
+        if (sscanf(s->s_name, "bell_z_damper%d_%d", &damper, &bank) == 2){
+            if (damper >= 1 && damper <= 3 && (bank == 1 || bank == 2)){
+                return (damper - 1) * 2 + (bank - 1); // 0..5
+            }
+        }
+        return -1;
+    }
+
+    if (!strcmp(s->s_name, "brightness_1")) return JB_VEL_BRIGHTNESS_1;
+    if (!strcmp(s->s_name, "brightness_2")) return JB_VEL_BRIGHTNESS_2;
+    if (!strcmp(s->s_name, "position_1"))   return JB_VEL_POSITION_1;
+    if (!strcmp(s->s_name, "position_2"))   return JB_VEL_POSITION_2;
+    if (!strcmp(s->s_name, "pickup_1"))     return JB_VEL_PICKUP_1;
+    if (!strcmp(s->s_name, "pickup_2"))     return JB_VEL_PICKUP_2;
+    if (!strcmp(s->s_name, "master_1"))     return JB_VEL_MASTER_1;
+    if (!strcmp(s->s_name, "master_2"))     return JB_VEL_MASTER_2;
+
+    if (!strcmp(s->s_name, "adsr_attack"))  return JB_VEL_ADSR_ATTACK;
+    if (!strcmp(s->s_name, "adsr_decay"))   return JB_VEL_ADSR_DECAY;
+    if (!strcmp(s->s_name, "adsr_release")) return JB_VEL_ADSR_RELEASE;
+
+    if (!strcmp(s->s_name, "imp_shape"))    return JB_VEL_IMP_SHAPE;
+    if (!strcmp(s->s_name, "noise_timbre")) return JB_VEL_NOISE_TIMBRE;
+
+    return -1;
+}
+
+
+
+
 
 
 static void juicy_bank_tilde_lfo1_target(t_juicy_bank_tilde *x, t_symbol *s){
@@ -3846,16 +3916,25 @@ static void juicy_bank_tilde_velmap_amount(t_juicy_bank_tilde *x, t_floatarg f){
 }
 
 static void juicy_bank_tilde_velmap_target(t_juicy_bank_tilde *x, t_symbol *s){
-    if (!s) return;
+    if (!x || !s) return;
     if (!jb_velmap_target_allowed(s)){
         s = gensym("none");
     }
     if (jb_target_is_none(s)){
+        // "none" clears all velocity-mapping toggles
+        for (int i = 0; i < JB_VELMAP_N_TARGETS; ++i) x->velmap_on[i] = 0;
         x->velmap_target = gensym("none");
         return;
     }
-    x->velmap_target = s;
+
+    int idx = jb_velmap_symbol_to_idx(s);
+    if (idx < 0 || idx >= JB_VELMAP_N_TARGETS) return;
+
+    // Toggle behavior: sending the same target again flips it off.
+    x->velmap_on[idx] = (uint8_t)(!x->velmap_on[idx]);
+    x->velmap_target = s; // keep last-selected symbol for UI feedback/debug
 }
+
 
 
 
@@ -4427,7 +4506,7 @@ x->excite_pos2    = x->excite_pos;
     // velocity mapping lane defaults
     x->velmap_amount = 0.f;
     x->velmap_target = gensym("none");
-
+    for (int i = 0; i < JB_VELMAP_N_TARGETS; ++i) x->velmap_on[i] = 0;
 
 
     // clear modulation matrix (bank 1 + bank 2)
