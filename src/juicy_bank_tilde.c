@@ -4959,7 +4959,7 @@ static void jb_preset_apply(t_juicy_bank_tilde *x, const jb_preset_t *p){
             // restore derived zeta if param is active
             if (x->bell_peak_zeta_param[b][d] >= 0.f){
                 float u = x->bell_peak_zeta_param[b][d];
-                u = jb_clampf(u, 0.f, 1.f);
+                u = jb_clamp(u, 0.f, 1.f);
                 x->bell_peak_zeta[b][d] = jb_bell_map_norm_to_zeta(u);
             } else {
                 x->bell_peak_zeta[b][d] = 0.f;
@@ -5015,7 +5015,7 @@ static void juicy_bank_tilde_preset_char(t_juicy_bank_tilde *x, t_floatarg f){
     if (cur >= JB_PRESET_NAME_MAX) cur = JB_PRESET_NAME_MAX - 1;
 
     x->preset_edit_name[cur] = c;
-    x->preset_edit_name[JB_PRESET_NAME_MAX] = ' ';
+    x->preset_edit_name[JB_PRESET_NAME_MAX-1] = '\0';
     jb_preset_trim_name(x->preset_edit_name);
 
     if (x->out_preset){
@@ -5055,7 +5055,7 @@ static void juicy_bank_tilde_preset_cmd(t_juicy_bank_tilde *x, t_symbol *s){
             x->preset_cursor = 0;
             x->preset_slot_sel = 0;
             memset(x->preset_edit_name, ' ', JB_PRESET_NAME_MAX);
-            x->preset_edit_name[JB_PRESET_NAME_MAX] = '\0';
+            x->preset_edit_name[JB_PRESET_NAME_MAX-1] = '\0';
             jb_preset_emit_ui(x);
             return;
         }
