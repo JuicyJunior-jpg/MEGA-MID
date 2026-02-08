@@ -170,6 +170,76 @@ typedef enum {
     JB_VELMAP_N_TARGETS
 } jb_velmap_idx;
 
+
+
+// -------------------- PRESET SYSTEM (memory-only, 64 slots) --------------------
+#define JB_PRESET_SLOTS        64
+#define JB_PRESET_NAME_MAX     16
+
+typedef enum {
+    JB_PRESET_MODE_NORMAL = 0,
+    JB_PRESET_MODE_NAMING = 1,
+    JB_PRESET_MODE_SLOT   = 2
+} jb_preset_mode_t;
+
+// single-preset snapshot (add fields as synth grows; kept as plain floats for speed)
+typedef struct _jb_preset {
+    int   used;                         // 0=empty
+    char  name[JB_PRESET_NAME_MAX + 1]; // null-terminated
+
+    // bank globals
+    float bank_master[2];
+    int   bank_semitone[2];
+    int   bank_octave[2];
+    float bank_tune_cents[2];
+
+    float release_amt[2];
+    float stretch[2];
+    float warp[2];
+    float brightness[2];
+    float density_amt[2];
+    int   density_mode[2];
+    float dispersion[2];
+    float odd_skew[2];
+    float even_skew[2];
+    float collision_amt[2];
+    float micro_detune[2];
+
+    // spatial positions
+    float excite_pos[2];
+    float pickup_pos[2];
+
+    // bell dampers (zeta basis params)
+    float bell_peak_hz[2][JB_N_DAMPERS];
+    float bell_peak_zeta_param[2][JB_N_DAMPERS];
+    float bell_npl[2][JB_N_DAMPERS];
+    float bell_npr[2][JB_N_DAMPERS];
+    float bell_npm[2][JB_N_DAMPERS];
+
+    // SPACE
+    float space_size, space_decay, space_diffusion, space_damping, space_wetdry;
+
+    // exciter
+    float exc_fader;
+    float exc_attack_ms, exc_decay_ms, exc_sustain, exc_release_ms;
+    float exc_density;
+    float exc_imp_shape;
+    float exc_shape;
+
+    // LFOs
+    float lfo_index; // 1..2
+    float lfo_shape_v[JB_N_LFO];
+    float lfo_rate_v[JB_N_LFO];
+    float lfo_phase_v[JB_N_LFO];
+    float lfo_mode_v[JB_N_LFO];
+    float lfo_amt_v[JB_N_LFO];
+    t_symbol *lfo_target[JB_N_LFO];
+
+    // velocity mapping
+    float   velmap_amount;
+    uint8_t velmap_on[JB_VELMAP_N_TARGETS];
+} jb_preset_t;
+
 typedef struct { unsigned int s; } jb_rng_t;
 static inline void jb_rng_seed(jb_rng_t *r, unsigned int s){ if(!s) s=1; r->s = s; }
 static inline unsigned int jb_rng_u32(jb_rng_t *r){ unsigned int x = r->s; x ^= x << 13; x ^= x >> 17; x ^= x << 5; r->s = x; return x; }
@@ -907,6 +977,17 @@ float density_amt; jb_density_mode density_mode;
     jb_tgtproxy *tgtproxy_velmap;
     t_inlet  *in_velmap_amount;
     t_inlet  *in_velmap_target;
+
+// --- PRESET SYSTEM (memory-only) ---
+t_inlet  *in_preset_cmd;      // symbol inlet: INIT/SAVE/FORWARD/BACKWARD
+t_inlet  *in_preset_char;     // float inlet: 1..64 character selector (space + A..Z + a..z + 0..9 + extra)
+t_outlet *out_preset;         // symbol outlet for preset UI feedback
+
+jb_preset_t presets[JB_PRESET_SLOTS];
+int preset_mode;              // jb_preset_mode_t
+int preset_cursor;            // 0..JB_PRESET_NAME_MAX-1 (naming mode)
+int preset_slot_sel;          // 0..JB_PRESET_SLOTS-1 (slot mode)
+char preset_edit_name[JB_PRESET_NAME_MAX + 1];
    // LFO1/LFO2 targets
     jb_tgtproxy *tgtproxy_lfo1;
     jb_tgtproxy *tgtproxy_lfo2;
@@ -4391,6 +4472,17 @@ static void *juicy_bank_tilde_new(void){
     // --- Startup spec (32 modes, real saw amplitude 1/n) ---
     jb_apply_default_saw(x);
 
+
+// preset system init (memory-only)
+x->preset_mode = JB_PRESET_MODE_NORMAL;
+x->preset_cursor = 0;
+x->preset_slot_sel = 0;
+memset(x->preset_edit_name, 0, sizeof(x->preset_edit_name));
+for (int pi = 0; pi < JB_PRESET_SLOTS; ++pi){
+    x->presets[pi].used = 0;
+    memset(x->presets[pi].name, 0, sizeof(x->presets[pi].name));
+}
+
     // body defaults
     x->brightness=0.f; x->density_amt=0.f; x->density_mode=DENSITY_PIVOT;
     x->dispersion=0.f; x->dispersion_last=-1.f;
@@ -4662,6 +4754,11 @@ x->excite_pos2    = x->excite_pos;
     // Velocity mapping inlets (placed after LFO2 target)
     x->in_velmap_amount = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("velmap_amount"));
     x->in_velmap_target = inlet_new(&x->x_obj, x->tgtproxy_velmap ? &x->tgtproxy_velmap->p_pd : &x->x_obj.ob_pd, 0, 0);
+// Preset system inlets (placed after velocity mapping)
+x->in_preset_cmd  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_symbol, gensym("preset_cmd"));
+x->in_preset_char = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("preset_char"));
+
+
 
 
 
@@ -4671,8 +4768,379 @@ x->excite_pos2    = x->excite_pos;
     x->outR = outlet_new(&x->x_obj, &s_signal);
 // checkpoint revert init
 
-    x->out_index   = outlet_new(&x->x_obj, &s_float); // 1-based index reporter
+    
+x->out_preset  = outlet_new(&x->x_obj, &s_symbol); // preset feedback outlet (symbols/lists)
+x->out_index   = outlet_new(&x->x_obj, &s_float); // 1-based index reporter
     return (void *)x;
+}
+
+
+
+static void juicy_bank_tilde_INIT(t_juicy_bank_tilde *x);
+// -------------------- PRESET HELPERS --------------------
+static inline char jb_preset_char_from_index(int idx){
+    // idx: 1..64
+    // 1 = space
+    // 2..27 = A..Z
+    // 28..53 = a..z
+    // 54..63 = 0..9
+    // 64 = '_' (extra)
+    if (idx <= 1) return ' ';
+    if (idx >= 2 && idx <= 27) return (char)('A' + (idx - 2));
+    if (idx >= 28 && idx <= 53) return (char)('a' + (idx - 28));
+    if (idx >= 54 && idx <= 63) return (char)('0' + (idx - 54));
+    return '_';
+}
+
+static inline void jb_preset_trim_name(char *s){
+    int n = (int)strlen(s);
+    while (n > 0 && s[n-1] == ' '){ s[n-1] = '\0'; --n; }
+}
+
+static void jb_preset_emit_ui(t_juicy_bank_tilde *x){
+    if (!x || !x->out_preset) return;
+
+    t_atom a[2];
+
+    // mode
+    SETFLOAT(&a[0], (t_float)x->preset_mode);
+    outlet_anything(x->out_preset, gensym("preset_mode"), 1, a);
+
+    // slot (1-based)
+    SETFLOAT(&a[0], (t_float)(x->preset_slot_sel + 1));
+    outlet_anything(x->out_preset, gensym("preset_slot"), 1, a);
+
+    // name (full string)
+    SETSYMBOL(&a[0], gensym(x->preset_edit_name));
+    outlet_anything(x->out_preset, gensym("preset_name"), 1, a);
+
+    // cursor (useful in naming mode)
+    SETFLOAT(&a[0], (t_float)x->preset_cursor);
+    outlet_anything(x->out_preset, gensym("edit_cursor"), 1, a);
+}
+
+static int jb_preset_find_next_used(const t_juicy_bank_tilde *x, int start, int dir){
+    // start: 0..JB_PRESET_SLOTS-1, dir: +1 or -1
+    int i = start;
+    for (int k = 0; k < JB_PRESET_SLOTS; ++k){
+        i += dir;
+        if (i < 0) i = JB_PRESET_SLOTS - 1;
+        if (i >= JB_PRESET_SLOTS) i = 0;
+        if (x->presets[i].used) return i;
+    }
+    return -1;
+}
+
+static void jb_preset_snapshot(const t_juicy_bank_tilde *x, jb_preset_t *p){
+    if (!p) return;
+    // NOTE: keep snapshot fields aligned with synth params (memory-only bank)
+    p->bank_master[0] = x->bank_master[0];
+    p->bank_master[1] = x->bank_master[1];
+    p->bank_semitone[0] = x->bank_semitone[0];
+    p->bank_semitone[1] = x->bank_semitone[1];
+    p->bank_octave[0] = x->bank_octave[0];
+    p->bank_octave[1] = x->bank_octave[1];
+    p->bank_tune_cents[0] = x->bank_tune_cents[0];
+    p->bank_tune_cents[1] = x->bank_tune_cents[1];
+
+    p->release_amt[0] = x->release_amt;
+    p->release_amt[1] = x->release_amt2;
+    p->stretch[0] = x->stretch;
+    p->stretch[1] = x->stretch2;
+    p->warp[0] = x->warp;
+    p->warp[1] = x->warp2;
+    p->brightness[0] = x->brightness;
+    p->brightness[1] = x->brightness2;
+    p->density_amt[0] = x->density_amt;
+    p->density_amt[1] = x->density_amt2;
+    p->density_mode[0] = (int)x->density_mode;
+    p->density_mode[1] = (int)x->density_mode2;
+    p->dispersion[0] = x->dispersion;
+    p->dispersion[1] = x->dispersion2;
+    p->odd_skew[0] = x->odd_skew;
+    p->odd_skew[1] = x->odd_skew2;
+    p->even_skew[0] = x->even_skew;
+    p->even_skew[1] = x->even_skew2;
+    p->collision_amt[0] = x->collision_amt;
+    p->collision_amt[1] = x->collision_amt2;
+    p->micro_detune[0] = x->micro_detune;
+    p->micro_detune[1] = x->micro_detune2;
+
+    p->excite_pos[0] = x->excite_pos;
+    p->pickup_pos[0] = x->pickup_pos;
+    p->excite_pos[1] = x->excite_pos2;
+    p->pickup_pos[1] = x->pickup_pos2;
+
+    for (int b = 0; b < 2; ++b){
+        for (int d = 0; d < JB_N_DAMPERS; ++d){
+            p->bell_peak_hz[b][d] = x->bell_peak_hz[b][d];
+            p->bell_peak_zeta_param[b][d] = x->bell_peak_zeta_param[b][d];
+            p->bell_npl[b][d] = x->bell_npl[b][d];
+            p->bell_npr[b][d] = x->bell_npr[b][d];
+            p->bell_npm[b][d] = x->bell_npm[b][d];
+        }
+    }
+
+    p->space_size = x->space_size;
+    p->space_decay = x->space_decay;
+    p->space_diffusion = x->space_diffusion;
+    p->space_damping = x->space_damping;
+    p->space_wetdry = x->space_wetdry;
+
+    p->exc_fader = x->exc_fader;
+    p->exc_attack_ms = x->exc_attack_ms;
+    p->exc_decay_ms = x->exc_decay_ms;
+    p->exc_sustain = x->exc_sustain;
+    p->exc_release_ms = x->exc_release_ms;
+    p->exc_density = x->exc_density;
+    p->exc_imp_shape = x->exc_imp_shape;
+    p->exc_shape = x->exc_shape;
+
+    p->lfo_index = x->lfo_index;
+    for (int li = 0; li < JB_N_LFO; ++li){
+        p->lfo_shape_v[li] = x->lfo_shape_v[li];
+        p->lfo_rate_v[li]  = x->lfo_rate_v[li];
+        p->lfo_phase_v[li] = x->lfo_phase_v[li];
+        p->lfo_mode_v[li]  = x->lfo_mode_v[li];
+        p->lfo_amt_v[li]   = x->lfo_amt_v[li];
+        p->lfo_target[li]  = x->lfo_target[li];
+    }
+
+    p->velmap_amount = x->velmap_amount;
+    for (int ti = 0; ti < JB_VELMAP_N_TARGETS; ++ti){
+        p->velmap_on[ti] = x->velmap_on[ti];
+    }
+}
+
+static void jb_preset_apply(t_juicy_bank_tilde *x, const jb_preset_t *p){
+    if (!p || !p->used) return;
+
+    x->bank_master[0] = p->bank_master[0];
+    x->bank_master[1] = p->bank_master[1];
+    x->bank_semitone[0] = p->bank_semitone[0];
+    x->bank_semitone[1] = p->bank_semitone[1];
+    x->bank_octave[0] = p->bank_octave[0];
+    x->bank_octave[1] = p->bank_octave[1];
+    x->bank_tune_cents[0] = p->bank_tune_cents[0];
+    x->bank_tune_cents[1] = p->bank_tune_cents[1];
+
+    x->release_amt  = p->release_amt[0];
+    x->release_amt2 = p->release_amt[1];
+    x->stretch  = p->stretch[0];
+    x->stretch2 = p->stretch[1];
+    x->warp  = p->warp[0];
+    x->warp2 = p->warp[1];
+    x->brightness  = p->brightness[0];
+    x->brightness2 = p->brightness[1];
+    x->density_amt  = p->density_amt[0];
+    x->density_amt2 = p->density_amt[1];
+    x->density_mode  = (jb_density_mode)p->density_mode[0];
+    x->density_mode2 = (jb_density_mode)p->density_mode[1];
+    x->dispersion  = p->dispersion[0];
+    x->dispersion2 = p->dispersion[1];
+    x->odd_skew  = p->odd_skew[0];
+    x->odd_skew2 = p->odd_skew[1];
+    x->even_skew  = p->even_skew[0];
+    x->even_skew2 = p->even_skew[1];
+    x->collision_amt  = p->collision_amt[0];
+    x->collision_amt2 = p->collision_amt[1];
+    x->micro_detune  = p->micro_detune[0];
+    x->micro_detune2 = p->micro_detune[1];
+
+    x->excite_pos  = p->excite_pos[0];
+    x->pickup_pos  = p->pickup_pos[0];
+    x->excite_pos2 = p->excite_pos[1];
+    x->pickup_pos2 = p->pickup_pos[1];
+
+    for (int b = 0; b < 2; ++b){
+        for (int d = 0; d < JB_N_DAMPERS; ++d){
+            x->bell_peak_hz[b][d] = p->bell_peak_hz[b][d];
+            x->bell_peak_zeta_param[b][d] = p->bell_peak_zeta_param[b][d];
+            // restore derived zeta if param is active
+            if (x->bell_peak_zeta_param[b][d] >= 0.f){
+                float u = x->bell_peak_zeta_param[b][d];
+                u = jb_clampf(u, 0.f, 1.f);
+                x->bell_peak_zeta[b][d] = jb_bell_map_norm_to_zeta(u);
+            } else {
+                x->bell_peak_zeta[b][d] = 0.f;
+            }
+            x->bell_npl[b][d] = p->bell_npl[b][d];
+            x->bell_npr[b][d] = p->bell_npr[b][d];
+            x->bell_npm[b][d] = p->bell_npm[b][d];
+        }
+    }
+
+    x->space_size = p->space_size;
+    x->space_decay = p->space_decay;
+    x->space_diffusion = p->space_diffusion;
+    x->space_damping = p->space_damping;
+    x->space_wetdry = p->space_wetdry;
+
+    x->exc_fader = p->exc_fader;
+    x->exc_attack_ms = p->exc_attack_ms;
+    x->exc_decay_ms = p->exc_decay_ms;
+    x->exc_sustain = p->exc_sustain;
+    x->exc_release_ms = p->exc_release_ms;
+    x->exc_density = p->exc_density;
+    x->exc_imp_shape = p->exc_imp_shape;
+    x->exc_shape = p->exc_shape;
+
+    for (int li = 0; li < JB_N_LFO; ++li){
+        x->lfo_shape_v[li] = p->lfo_shape_v[li];
+        x->lfo_rate_v[li]  = p->lfo_rate_v[li];
+        x->lfo_phase_v[li] = p->lfo_phase_v[li];
+        x->lfo_mode_v[li]  = p->lfo_mode_v[li];
+        x->lfo_amt_v[li]   = p->lfo_amt_v[li];
+        x->lfo_target[li]  = p->lfo_target[li] ? p->lfo_target[li] : gensym("none");
+    }
+    x->lfo_index = p->lfo_index;
+    juicy_bank_tilde_lfo_index(x, x->lfo_index);
+
+    x->velmap_amount = p->velmap_amount;
+    for (int ti = 0; ti < JB_VELMAP_N_TARGETS; ++ti){
+        x->velmap_on[ti] = p->velmap_on[ti];
+    }
+}
+
+static void juicy_bank_tilde_preset_char(t_juicy_bank_tilde *x, t_floatarg f){
+    if (!x || x->preset_mode != JB_PRESET_MODE_NAMING) return;
+    int idx = (int)floorf(f + 0.5f);
+    if (idx < 1) idx = 1;
+    if (idx > 64) idx = 64;
+
+    char c = jb_preset_char_from_index(idx);
+
+    int cur = x->preset_cursor;
+    if (cur < 0) cur = 0;
+    if (cur >= JB_PRESET_NAME_MAX) cur = JB_PRESET_NAME_MAX - 1;
+
+    x->preset_edit_name[cur] = c;
+    x->preset_edit_name[JB_PRESET_NAME_MAX] = ' ';
+    jb_preset_trim_name(x->preset_edit_name);
+
+    if (x->out_preset){
+        t_atom a[3];
+        char chs[2]; chs[0] = c; chs[1] = 0;
+
+        SETFLOAT(&a[0], (t_float)cur);
+        SETSYMBOL(&a[1], gensym(chs));
+        outlet_anything(x->out_preset, gensym("edit_char"), 2, a);
+
+        SETSYMBOL(&a[0], gensym(x->preset_edit_name));
+        outlet_anything(x->out_preset, gensym("preset_name"), 1, a);
+    }
+}
+
+static void juicy_bank_tilde_preset_cmd(t_juicy_bank_tilde *x, t_symbol *s){
+    if (!s) return;
+
+    if (s == gensym("INIT")){
+        if (x->preset_mode != JB_PRESET_MODE_NORMAL){
+            // cancel/back-out
+            x->preset_mode = JB_PRESET_MODE_NORMAL;
+            x->preset_cursor = 0;
+            x->preset_slot_sel = 0;
+            memset(x->preset_edit_name, 0, sizeof(x->preset_edit_name));
+            jb_preset_emit_ui(x);
+            return;
+        }
+        // normal INIT: factory reset patch (existing init)
+        juicy_bank_tilde_INIT(x);
+        return;
+    }
+
+    if (s == gensym("SAVE")){
+        if (x->preset_mode == JB_PRESET_MODE_NORMAL){
+            x->preset_mode = JB_PRESET_MODE_NAMING;
+            x->preset_cursor = 0;
+            x->preset_slot_sel = 0;
+            memset(x->preset_edit_name, ' ', JB_PRESET_NAME_MAX);
+            x->preset_edit_name[JB_PRESET_NAME_MAX] = '\0';
+            jb_preset_emit_ui(x);
+            return;
+        }
+        if (x->preset_mode == JB_PRESET_MODE_NAMING){
+            x->preset_mode = JB_PRESET_MODE_SLOT;
+            x->preset_slot_sel = 0;
+            jb_preset_emit_ui(x);
+            return;
+        }
+        if (x->preset_mode == JB_PRESET_MODE_SLOT){
+            int slot = x->preset_slot_sel;
+            if (slot < 0) slot = 0;
+            if (slot >= JB_PRESET_SLOTS) slot = JB_PRESET_SLOTS - 1;
+
+            int overw = x->presets[slot].used;
+            jb_preset_t *p = &x->presets[slot];
+            jb_preset_snapshot(x, p);
+            p->used = 1;
+            strncpy(p->name, x->preset_edit_name, JB_PRESET_NAME_MAX);
+            p->name[JB_PRESET_NAME_MAX] = '\0';
+            jb_preset_trim_name(p->name);
+
+            // exit
+            x->preset_mode = JB_PRESET_MODE_NORMAL;
+
+            if (x->out_preset){
+                t_atom a[3];
+                SETFLOAT(&a[0], (t_float)(slot + 1));
+                SETSYMBOL(&a[1], gensym(p->name));
+                outlet_anything(x->out_preset, gensym("preset_saved"), 2, a);
+                if (overw){
+                    outlet_anything(x->out_preset, gensym("overwrite"), 1, a);
+                }
+            }
+            return;
+        }
+    }
+
+    if (s == gensym("FORWARD") || s == gensym("BACKWARD")){
+        int dir = (s == gensym("FORWARD")) ? +1 : -1;
+
+        if (x->preset_mode == JB_PRESET_MODE_NAMING){
+            x->preset_cursor += dir;
+            if (x->preset_cursor < 0) x->preset_cursor = 0;
+            if (x->preset_cursor >= JB_PRESET_NAME_MAX) x->preset_cursor = JB_PRESET_NAME_MAX - 1;
+            if (x->out_preset){
+                t_atom a;
+                SETFLOAT(&a, (t_float)x->preset_cursor);
+                outlet_anything(x->out_preset, gensym("edit_cursor"), 1, &a);
+            }
+            return;
+        }
+
+        if (x->preset_mode == JB_PRESET_MODE_SLOT){
+            x->preset_slot_sel += dir;
+            if (x->preset_slot_sel < 0) x->preset_slot_sel = JB_PRESET_SLOTS - 1;
+            if (x->preset_slot_sel >= JB_PRESET_SLOTS) x->preset_slot_sel = 0;
+
+            if (x->out_preset){
+                t_atom a[2];
+                SETFLOAT(&a[0], (t_float)(x->preset_slot_sel + 1));
+                outlet_anything(x->out_preset, gensym("preset_slot"), 1, a);
+                if (x->presets[x->preset_slot_sel].used){
+                    outlet_anything(x->out_preset, gensym("overwrite"), 1, a);
+                }
+            }
+            return;
+        }
+
+        // NORMAL: navigate through used presets and load them
+        int cur = x->preset_slot_sel;
+        if (cur < 0 || cur >= JB_PRESET_SLOTS) cur = 0;
+        int nxt = jb_preset_find_next_used(x, cur, dir);
+        if (nxt >= 0){
+            x->preset_slot_sel = nxt;
+            jb_preset_apply(x, &x->presets[nxt]);
+            if (x->out_preset){
+                t_atom a[2];
+                SETFLOAT(&a[0], (t_float)(nxt + 1));
+                SETSYMBOL(&a[1], gensym(x->presets[nxt].name));
+                outlet_anything(x->out_preset, gensym("preset_loaded"), 2, a);
+            }
+        }
+        return;
+    }
 }
 
 // ---------- INIT (factory re-init) ----------
@@ -4902,6 +5370,10 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_brightness, g
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo1_target, gensym("lfo1_target"), A_SYMBOL, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo2_target, gensym("lfo2_target"), A_SYMBOL, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_velmap_amount, gensym("velmap_amount"), A_DEFFLOAT, 0);
+
+class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_preset_cmd,  gensym("preset_cmd"),  A_SYMBOL, 0);
+class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_preset_char, gensym("preset_char"), A_DEFFLOAT, 0);
+
 // INDIVIDUAL (per-mode)
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index, gensym("index"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_ratio_i, gensym("ratio"), A_DEFFLOAT, 0);
