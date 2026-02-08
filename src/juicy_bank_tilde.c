@@ -140,6 +140,36 @@ static inline float jb_slope_to_powerlaw(float slope01){
         return 2.f + ((s - 0.5f) / 0.5f) * (8.f - 2.f);
     }
 }
+// Velocity mapping: finite toggle set (unlimited simultaneous targets via toggles).
+// All enabled targets share the same velmap_amount scaling.
+// Toggle behavior: sending the same target symbol again flips it off.
+typedef enum {
+    JB_VEL_BELL_Z_D1_B1 = 0,
+    JB_VEL_BELL_Z_D1_B2,
+    JB_VEL_BELL_Z_D2_B1,
+    JB_VEL_BELL_Z_D2_B2,
+    JB_VEL_BELL_Z_D3_B1,
+    JB_VEL_BELL_Z_D3_B2,
+
+    JB_VEL_BRIGHTNESS_1,
+    JB_VEL_BRIGHTNESS_2,
+    JB_VEL_POSITION_1,
+    JB_VEL_POSITION_2,
+    JB_VEL_PICKUP_1,
+    JB_VEL_PICKUP_2,
+    JB_VEL_MASTER_1,
+    JB_VEL_MASTER_2,
+
+    JB_VEL_ADSR_ATTACK,
+    JB_VEL_ADSR_DECAY,
+    JB_VEL_ADSR_RELEASE,
+
+    JB_VEL_IMP_SHAPE,
+    JB_VEL_NOISE_TIMBRE,
+
+    JB_VELMAP_N_TARGETS
+} jb_velmap_idx;
+
 typedef struct { unsigned int s; } jb_rng_t;
 static inline void jb_rng_seed(jb_rng_t *r, unsigned int s){ if(!s) s=1; r->s = s; }
 static inline unsigned int jb_rng_u32(jb_rng_t *r){ unsigned int x = r->s; x ^= x << 13; x ^= x >> 17; x ^= x << 5; r->s = x; return x; }
@@ -3817,35 +3847,6 @@ static inline int jb_velmap_target_allowed(t_symbol *s){
 }
 
 
-// Velocity mapping: finite toggle set (unlimited simultaneous targets via toggles).
-// All enabled targets share the same velmap_amount scaling.
-// Toggle behavior: sending the same target symbol again flips it off.
-typedef enum {
-    JB_VEL_BELL_Z_D1_B1 = 0,
-    JB_VEL_BELL_Z_D1_B2,
-    JB_VEL_BELL_Z_D2_B1,
-    JB_VEL_BELL_Z_D2_B2,
-    JB_VEL_BELL_Z_D3_B1,
-    JB_VEL_BELL_Z_D3_B2,
-
-    JB_VEL_BRIGHTNESS_1,
-    JB_VEL_BRIGHTNESS_2,
-    JB_VEL_POSITION_1,
-    JB_VEL_POSITION_2,
-    JB_VEL_PICKUP_1,
-    JB_VEL_PICKUP_2,
-    JB_VEL_MASTER_1,
-    JB_VEL_MASTER_2,
-
-    JB_VEL_ADSR_ATTACK,
-    JB_VEL_ADSR_DECAY,
-    JB_VEL_ADSR_RELEASE,
-
-    JB_VEL_IMP_SHAPE,
-    JB_VEL_NOISE_TIMBRE,
-
-    JB_VELMAP_N_TARGETS
-} jb_velmap_idx;
 
 static inline int jb_velmap_symbol_to_idx(const t_symbol *s){
     if (!s) return -1;
