@@ -478,6 +478,13 @@ typedef struct {
     jb_exc_pulse_t pulseL, pulseR;
 
     float gainL, gainR;
+
+    // Per-voice overrides for velocity mapping (optional)
+    float color_gL, color_gH, color_comp;   // noise timbre/color gains
+    float imp_shape_v;                      // 0..1, <0 => use global
+    float noise_timbre_v;                   // 0..1, <0 => use global
+    float a_ms_v, d_ms_v, r_ms_v;           // ADSR time overrides (ms), <0 => use global
+
 } jb_exc_voice_t;
 
 static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long seed_base){
@@ -508,6 +515,15 @@ static void jb_exc_voice_init(jb_exc_voice_t *v, float sr, unsigned long long se
     v->gainL = 1.f;
     v->gainR = 1.f;
 
+    // velocity-mapping overrides disabled by default
+    v->color_gL = v->color_gH = 1.f;
+    v->color_comp = 1.f;
+    v->imp_shape_v = -1.f;
+    v->noise_timbre_v = -1.f;
+    v->a_ms_v = -1.f;
+    v->d_ms_v = -1.f;
+    v->r_ms_v = -1.f;
+
     // branch matching state
     // NOTE: old exciter noise diffusion (all-pass cascade) removed.
 }
@@ -518,6 +534,13 @@ static inline void jb_exc_voice_reset_runtime(jb_exc_voice_t *e){
     e->vel_cur = 0.f;
     e->vel_on  = 0.f;
     e->pitch   = 0.f;
+
+    // clear per-note overrides
+    e->imp_shape_v = -1.f;
+    e->noise_timbre_v = -1.f;
+    e->a_ms_v = -1.f;
+    e->d_ms_v = -1.f;
+    e->r_ms_v = -1.f;
 
     // envelope
     e->env.stage = JB_EXC_ENV_IDLE;
@@ -628,6 +651,13 @@ typedef struct {
     float rel_env;
     float rel_env2;
 
+    // Velocity-mapping per-note overrides (sentinels: <0 => use global/default)
+    float velmap_pos[2];           // 0..1
+    float velmap_pickup[2];        // 0..1
+    float velmap_master_add[2];    // additive to per-voice bank gain (0..1 clamp later)
+    float velmap_brightness_add[2];// additive to brightness (-1..+1 clamp later)
+    float velmap_bell_zeta[2][JB_N_DAMPERS];   // override zeta_p (absolute)
+    uint8_t velmap_bell_zeta_on[2][JB_N_DAMPERS];
 
     // Feedback loop state (per voice, per bank, 1-sample delayed)
     // Each bank ONLY feeds back its own output.
@@ -717,6 +747,7 @@ float brightness;
     // Stacking (faithful): zeta_total(omega) = sum_k zeta_k(omega)
     float bell_peak_hz[2][JB_N_DAMPERS];     // per-bank, per-damper peak frequency (Hz)
     float bell_peak_zeta[2][JB_N_DAMPERS];   // per-bank, per-damper peak damping ratio at the peak (zeta_p)
+    float bell_peak_zeta_param[2][JB_N_DAMPERS]; // normalized 0..1 when set via bell_zeta inlet; <0 means 'off'
     float bell_npl[2][JB_N_DAMPERS];         // per-bank, per-damper left power  (n_pl > 0)
     float bell_npr[2][JB_N_DAMPERS];         // per-bank, per-damper right power (n_pr > 0)
     float bell_npm[2][JB_N_DAMPERS];         // per-bank, per-damper model parameter (n_pm > -2)
@@ -837,7 +868,14 @@ float density_amt; jb_density_mode density_mode;
     // --- NEW MOD LANES (matrix replacement scaffolding; target wiring comes next) ---
     // Targets are stored as symbols; the special symbol "none" disables that lane.
     // Uniqueness rule: if a target is already owned by another lane, new assignment is ignored.
-    t_symbol *lfo_target[JB_N_LFO];   // LFO1/LFO2 targets
+    t_symbol *lfo_target[JB_N_LFO];
+    // Velocity mapping lane (velocity -> selected target per note)
+    float     velmap_amount;         // -1..+1
+    t_symbol *velmap_target;         // symbol selector
+    jb_tgtproxy *tgtproxy_velmap;
+    t_inlet  *in_velmap_amount;
+    t_inlet  *in_velmap_target;
+   // LFO1/LFO2 targets
     jb_tgtproxy *tgtproxy_lfo1;
     jb_tgtproxy *tgtproxy_lfo2;
     float     lfo_amt_v[JB_N_LFO];    // LFO1/LFO2 amounts (-1..+1)
@@ -1105,67 +1143,75 @@ static float jb_mod_source_value(const t_juicy_bank_tilde *x,
 static void jb_exc_update_block(t_juicy_bank_tilde *x){
     float sr = (x->sr > 0.f) ? x->sr : 48000.f;
 
-    // Impulse Shape -> HP/LP cutoffs (impulse only)
-    float s = jb_clamp(x->exc_imp_shape, 0.f, 1.f);
-    float lp_norm, hp_norm;
-    if (s <= 0.5f){
-        float t = s / 0.5f;
-        lp_norm = t;
-        hp_norm = 0.f;
-    }else{
-        float t = (s - 0.5f) / 0.5f;
-        lp_norm = 1.f;
-        hp_norm = t;
-    }
-    float lp_min = 200.f, lp_max = 0.48f * sr;
-    float hp_min = 5.f,   hp_max = 8000.f;
-
-    float lp_hz = jb_exc_expmap01(jb_clamp(lp_norm,0.f,1.f), lp_min, lp_max);
-    float hp_hz = jb_exc_expmap01(jb_clamp(hp_norm,0.f,1.f), hp_min, hp_max);
-    if (lp_hz < hp_hz + 50.f) lp_hz = hp_hz + 50.f;
-
-    // Noise Color (slope EQ) -> per-block gains (shared)
-    float color = jb_clamp(x->exc_shape, 0.f, 1.f); // 0=red .. 0.5=white .. 1=violet
-    float slope_db_per_oct = -6.f + 12.f * color;
-    float slope_db = slope_db_per_oct * JB_EXC_COLOR_OCT_SPAN;
-    float gH = powf(10.f,  slope_db / 20.f);
-    float gL = powf(10.f, -slope_db / 20.f);
-    float comp = 1.f / sqrtf(0.5f * (gL*gL + gH*gH) + 1e-12f);
-    x->exc_noise_color_gL = gL;
-    x->exc_noise_color_gH = gH;
-    x->exc_noise_color_comp = comp;
-    // NOTE: old exciter noise diffusion (all-pass cascade) removed.
-
-    // ADSR curves + times (applied to all voices)
+    // Shared ADSR curves (times may be overridden per voice by velocity mapping)
     float aC = jb_clamp(x->exc_attack_curve,  -1.f, 1.f);
     float dC = jb_clamp(x->exc_decay_curve,   -1.f, 1.f);
     float rC = jb_clamp(x->exc_release_curve, -1.f, 1.f);
 
-    float a_ms = x->exc_attack_ms;
-    float d_ms = x->exc_decay_ms;
-    float sus  = x->exc_sustain;
-    float r_ms = x->exc_release_ms;
+    // Shared base ADSR times
+    float a_ms_base = x->exc_attack_ms;
+    float d_ms_base = x->exc_decay_ms;
+    float sus       = x->exc_sustain;
+    float r_ms_base = x->exc_release_ms;
+
+    // Shared noise pivot filters (slope-EQ split) — same for all voices
+    float pivot_hz = JB_EXC_SLOPE_PIVOT_HZ;
+    if (pivot_hz < 50.f) pivot_hz = 50.f;
+    if (pivot_hz > 0.45f * sr) pivot_hz = 0.45f * sr;
+
     for(int i=0; i<x->total_voices; ++i){
         jb_exc_voice_t *e = &x->v[i].exc;
 
-        // Noise filters:
-        //  - lpL/lpR: pivot low-pass for slope EQ (used to split low/high bands)
-        //  - hpL/hpR: gentle DC high-pass (post diffusion)
-        float pivot_hz = JB_EXC_SLOPE_PIVOT_HZ;
-        if (pivot_hz < 50.f) pivot_hz = 50.f;
-        if (pivot_hz > 0.45f * sr) pivot_hz = 0.45f * sr;
+        // ----- Noise timbre/color (0..1) -----
+        float color = (e->noise_timbre_v >= 0.f) ? jb_clamp(e->noise_timbre_v, 0.f, 1.f)
+                                                 : jb_clamp(x->exc_shape, 0.f, 1.f);
+        float slope_db_per_oct = -6.f + 12.f * color;
+        float slope_db = slope_db_per_oct * JB_EXC_COLOR_OCT_SPAN;
+        float gH = powf(10.f,  slope_db / 20.f);
+        float gL = powf(10.f, -slope_db / 20.f);
+        float comp = 1.f / sqrtf(0.5f * (gL*gL + gH*gH) + 1e-12f);
+
+        e->color_gL = gL;
+        e->color_gH = gH;
+        e->color_comp = comp;
+
+        // Noise filters (pivot LP + DC HP)
         jb_exc_lp1_set(&e->lpL, sr, pivot_hz);
         jb_exc_lp1_set(&e->lpR, sr, pivot_hz);
         jb_exc_hp1_set(&e->hpL, sr, 5.f);
         jb_exc_hp1_set(&e->hpR, sr, 5.f);
 
-        // Impulse filters: shaped by the (new) impulse-only Shape inlet
+        // ----- Impulse shape (0..1) -----
+        float s = (e->imp_shape_v >= 0.f) ? jb_clamp(e->imp_shape_v, 0.f, 1.f)
+                                          : jb_clamp(x->exc_imp_shape, 0.f, 1.f);
+
+        float lp_norm, hp_norm;
+        if (s <= 0.5f){
+            float t = s / 0.5f;
+            lp_norm = t;
+            hp_norm = 0.f;
+        }else{
+            float t = (s - 0.5f) / 0.5f;
+            lp_norm = 1.f;
+            hp_norm = t;
+        }
+        float lp_min = 200.f, lp_max = 0.48f * sr;
+        float hp_min = 5.f,   hp_max = 8000.f;
+
+        float lp_hz = jb_exc_expmap01(jb_clamp(lp_norm,0.f,1.f), lp_min, lp_max);
+        float hp_hz = jb_exc_expmap01(jb_clamp(hp_norm,0.f,1.f), hp_min, hp_max);
+        if (lp_hz < hp_hz + 50.f) lp_hz = hp_hz + 50.f;
+
         jb_exc_hp1_set(&e->hpImpL, sr, hp_hz);
         jb_exc_hp1_set(&e->hpImpR, sr, hp_hz);
         jb_exc_lp1_set(&e->lpImpL, sr, lp_hz);
         jb_exc_lp1_set(&e->lpImpR, sr, lp_hz);
 
-        // env
+        // ----- ADSR (times optionally overridden per voice) -----
+        float a_ms = (e->a_ms_v >= 0.f) ? e->a_ms_v : a_ms_base;
+        float d_ms = (e->d_ms_v >= 0.f) ? e->d_ms_v : d_ms_base;
+        float r_ms = (e->r_ms_v >= 0.f) ? e->r_ms_v : r_ms_base;
+
         e->env.curveA = aC;
         e->env.curveD = dC;
         e->env.curveR = rC;
@@ -1175,6 +1221,8 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
 
 
 // Update per-sample increments for the dedicated modulation ADSR.
+// Called once per DSP block.
+ for the dedicated modulation ADSR.
 // Called once per DSP block.
 
 
@@ -1257,8 +1305,8 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
     float hpL = nL - lpL;
     float hpR = nR - lpR;
 
-    float colL = x->exc_noise_color_comp * (x->exc_noise_color_gL * lpL + x->exc_noise_color_gH * hpL);
-    float colR = x->exc_noise_color_comp * (x->exc_noise_color_gL * lpR + x->exc_noise_color_gH * hpR);
+    float colL = e->color_comp * (e->color_gL * lpL + e->color_gH * hpL);
+    float colR = e->color_comp * (e->color_gL * lpR + e->color_gH * hpR);
     // DC protection
     colL = jb_exc_hp1_run(&e->hpL, colL);
     colR = jb_exc_hp1_run(&e->hpR, colR);
@@ -1474,7 +1522,7 @@ static inline float jb_type4_basis(float omega, float omega_p, float npl, float 
     return B;
 }
 
-static inline float jb_bell_zeta_eval(const t_juicy_bank_tilde *x, int bank, float omega){
+static inline float jb_bell_zeta_eval(const t_juicy_bank_tilde *x, const jb_voice_t *v, int bank, float omega){
     // Parameters (already mapped/clamped by inlet handlers)
     // Stacked Type-4 bell damping: zeta_total(omega) = sum_k zeta_k(omega)
     float zsum = 0.f;
@@ -1484,7 +1532,8 @@ static inline float jb_bell_zeta_eval(const t_juicy_bank_tilde *x, int bank, flo
     float nyq = (sr > 1.f) ? (0.5f * sr) : 0.f;
 
     for (int k = 0; k < JB_N_DAMPERS; ++k){
-        float zeta_p = jb_bank_bell_peak_zeta(x, bank, k);
+        float zeta_p = (v && v->velmap_bell_zeta_on[bank][k]) ? v->velmap_bell_zeta[bank][k]
+                     : jb_bank_bell_peak_zeta(x, bank, k);
         if (!isfinite(zeta_p) || zeta_p <= 0.f) continue; // treat <=0 as "off"
 
         float peak_hz = jb_bank_bell_peak_hz(x, bank, k);
@@ -1979,7 +2028,7 @@ float md_amt = jb_clamp(jb_bank_micro_detune(x, bank),0.f,1.f);
         const float LN1000 = 6.907755278982137f; // ln(1000)
         float Hz = 0.5f * (HzL + HzR);
         float omega = 2.f * (float)M_PI * Hz;
-        float zeta = jb_bell_zeta_eval(x, bank, omega);
+        float zeta = jb_bell_zeta_eval(x, v, bank, omega);
         // Convert damping ratio to T60: exp(-zeta*omega*T60) = 1/1000
         float T60 = (zeta <= 1e-9f || omega <= 1e-9f) ? 1e9f : (LN1000 / (zeta * omega));
 
@@ -2048,8 +2097,10 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
     //   w_i = sin(pi * fi * pos) * sin(pi * fi * pickup)
     // We apply a small fixed L/R offset to decorrelate channels ("more HD / wider"),
     // then RMS-normalize per channel to keep level stable.
-    float pos    = jb_clamp(jb_bank_excite_pos(x, bank), 0.f, 1.f);
-    float pickup = jb_clamp(jb_bank_pickup_pos(x, bank), 0.f, 1.f);
+    float pos_base = (v->velmap_pos[bank] >= 0.f) ? v->velmap_pos[bank] : jb_bank_excite_pos(x, bank);
+    float pickup_base = (v->velmap_pickup[bank] >= 0.f) ? v->velmap_pickup[bank] : jb_bank_pickup_pos(x, bank);
+    float pos    = jb_clamp(pos_base, 0.f, 1.f);
+    float pickup = jb_clamp(pickup_base, 0.f, 1.f);
 
     // LFO1/LFO2 -> position / pickup (0..1): additive + clamp.
     {
@@ -2258,6 +2309,18 @@ v->fb_delay_w[b] = 0;
     // Internal exciter reset (note-on reset + voice-steal reset)
     jb_exc_voice_reset_runtime(&v->exc);
 
+    // Velocity mapping overrides reset
+    for (int b = 0; b < 2; ++b){
+        v->velmap_pos[b] = -1.f;
+        v->velmap_pickup[b] = -1.f;
+        v->velmap_master_add[b] = 0.f;
+        v->velmap_brightness_add[b] = 0.f;
+        for (int d = 0; d < JB_N_DAMPERS; ++d){
+            v->velmap_bell_zeta_on[b][d] = 0;
+            v->velmap_bell_zeta[b][d] = 0.f;
+        }
+    }
+
     // BANK 1
     for(int i=0;i<x->n_modes;i++){
         jb_mode_rt_t *md=&v->m[i];
@@ -2438,6 +2501,7 @@ static void jb_note_on(t_juicy_bank_tilde *x, float f0, float vel){
     v->vel = jb_exc_midi_to_vel01(vel);
 
     jb_voice_reset_states(x, v, &x->rng);
+    jb_apply_velocity_mapping(x, v);
 
     // One-shot LFO init (per-note): reset phase and (for S&H) pick a fresh random value once.
     for (int li = 0; li < JB_N_LFO; ++li){
@@ -2495,6 +2559,121 @@ static inline void jb_migrate_to_tail_if_needed(t_juicy_bank_tilde *x, const jb_
     t->rel_env2 = 1.f;
 }
 
+
+// ---------- Velocity mapping lane (per-note) ----------
+static void jb_apply_velocity_mapping(t_juicy_bank_tilde *x, jb_voice_t *v){
+    if (!x || !v) return;
+
+    const t_symbol *tgt = x->velmap_target;
+    if (!tgt || jb_target_is_none(tgt)) return;
+
+    float amt = jb_clamp(x->velmap_amount, -1.f, 1.f);
+    if (amt == 0.f) return;
+
+    float vel = jb_clamp(v->vel, 0.f, 1.f);
+    float delta = amt * vel; // bipolar scaling
+
+    // Clear any previous per-note overrides (voice might be reused)
+    for (int b = 0; b < 2; ++b){
+        v->velmap_pos[b] = -1.f;
+        v->velmap_pickup[b] = -1.f;
+        v->velmap_master_add[b] = 0.f;
+        v->velmap_brightness_add[b] = 0.f;
+        for (int d = 0; d < JB_N_DAMPERS; ++d){
+            v->velmap_bell_zeta_on[b][d] = 0;
+            v->velmap_bell_zeta[b][d] = 0.f;
+        }
+    }
+    // Exciter per-note overrides
+    v->exc.imp_shape_v = -1.f;
+    v->exc.noise_timbre_v = -1.f;
+    v->exc.a_ms_v = -1.f;
+    v->exc.d_ms_v = -1.f;
+    v->exc.r_ms_v = -1.f;
+
+    // ---- Bell damper zeta peaks ----
+    if (!strncmp(tgt->s_name, "bell_z_damper", 13)){
+        int damper = 0, bank1 = 0;
+        if (sscanf(tgt->s_name, "bell_z_damper%d_%d", &damper, &bank1) == 2){
+            int d = damper - 1;
+            int b = bank1 - 1;
+            if (d >= 0 && d < JB_N_DAMPERS && (b == 0 || b == 1)){
+                float u = x->bell_peak_zeta_param[b][d];
+                if (u < 0.f) u = 0.5915f; // sensible on-default (matches old 0.00035 baseline)
+                u = jb_clamp(u + delta, 0.f, 1.f);
+                v->velmap_bell_zeta_on[b][d] = 1;
+                v->velmap_bell_zeta[b][d] = jb_bell_map_norm_to_zeta(u);
+            }
+        }
+        return;
+    }
+
+    // ---- Bank-suffixed parameters ----
+    if (!strcmp(tgt->s_name, "brightness_1")) { v->velmap_brightness_add[0] = delta; return; }
+    if (!strcmp(tgt->s_name, "brightness_2")) { v->velmap_brightness_add[1] = delta; return; }
+
+    if (!strcmp(tgt->s_name, "position_1")){
+        float base = jb_clamp(jb_bank_excite_pos(x, 0), 0.f, 1.f);
+        v->velmap_pos[0] = jb_clamp(base + delta, 0.f, 1.f);
+        return;
+    }
+    if (!strcmp(tgt->s_name, "position_2")){
+        float base = jb_clamp(jb_bank_excite_pos(x, 1), 0.f, 1.f);
+        v->velmap_pos[1] = jb_clamp(base + delta, 0.f, 1.f);
+        return;
+    }
+
+    if (!strcmp(tgt->s_name, "pickup_1")){
+        float base = jb_clamp(jb_bank_pickup_pos(x, 0), 0.f, 1.f);
+        v->velmap_pickup[0] = jb_clamp(base + delta, 0.f, 1.f);
+        return;
+    }
+    if (!strcmp(tgt->s_name, "pickup_2")){
+        float base = jb_clamp(jb_bank_pickup_pos(x, 1), 0.f, 1.f);
+        v->velmap_pickup[1] = jb_clamp(base + delta, 0.f, 1.f);
+        return;
+    }
+
+    if (!strcmp(tgt->s_name, "master_1")) { v->velmap_master_add[0] = delta; return; }
+    if (!strcmp(tgt->s_name, "master_2")) { v->velmap_master_add[1] = delta; return; }
+
+    // ---- Exciter ADSR + timbre ----
+    if (!strcmp(tgt->s_name, "adsr_attack")){
+        float base = (x->exc_attack_ms > 0.f) ? x->exc_attack_ms : 1.f;
+        float ms = base * (1.f + delta);
+        if (ms < 0.f) ms = 0.f;
+        if (ms > 10000.f) ms = 10000.f;
+        v->exc.a_ms_v = ms;
+        return;
+    }
+    if (!strcmp(tgt->s_name, "adsr_decay")){
+        float base = (x->exc_decay_ms > 0.f) ? x->exc_decay_ms : 1.f;
+        float ms = base * (1.f + delta);
+        if (ms < 0.f) ms = 0.f;
+        if (ms > 10000.f) ms = 10000.f;
+        v->exc.d_ms_v = ms;
+        return;
+    }
+    if (!strcmp(tgt->s_name, "adsr_release")){
+        float base = (x->exc_release_ms > 0.f) ? x->exc_release_ms : 1.f;
+        float ms = base * (1.f + delta);
+        if (ms < 0.f) ms = 0.f;
+        if (ms > 10000.f) ms = 10000.f;
+        v->exc.r_ms_v = ms;
+        return;
+    }
+
+    if (!strcmp(tgt->s_name, "imp_shape")){
+        float base = jb_clamp(x->exc_imp_shape, 0.f, 1.f);
+        v->exc.imp_shape_v = jb_clamp(base + delta, 0.f, 1.f);
+        return;
+    }
+    if (!strcmp(tgt->s_name, "noise_timbre")){
+        float base = jb_clamp(x->exc_shape, 0.f, 1.f);
+        v->exc.noise_timbre_v = jb_clamp(base + delta, 0.f, 1.f);
+        return;
+    }
+}
 static void jb_note_on_voice(t_juicy_bank_tilde *x, int vix1, float f0, float vel){
     // This path is used by [note_poly]/[poly]-style voice addressing.
     // We still want tail behavior here: stealing a busy attack voice migrates it into the tail pool.
@@ -2517,6 +2696,7 @@ static void jb_note_on_voice(t_juicy_bank_tilde *x, int vix1, float f0, float ve
     v->vel = vel;
 
     jb_voice_reset_states(x, v, &x->rng);
+    jb_apply_velocity_mapping(x, v);
     jb_project_behavior_into_voice(x, v);
     jb_project_behavior_into_voice2(x, v);
     jb_exc_note_on(x, v, v->vel);
@@ -2774,6 +2954,10 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             if (add1 != 0.f) bank_gain1 = jb_clamp(bank_gain1 + add1, 0.f, 1.f);
             if (add2 != 0.f) bank_gain2 = jb_clamp(bank_gain2 + add2, 0.f, 1.f);
         }
+
+        // Velocity mapping -> per-voice bank gain (additive, clamped)
+        if (v->velmap_master_add[0] != 0.f) bank_gain1 = jb_clamp(bank_gain1 + v->velmap_master_add[0], 0.f, 1.f);
+        if (v->velmap_master_add[1] != 0.f) bank_gain2 = jb_clamp(bank_gain2 + v->velmap_master_add[1], 0.f, 1.f);
 
         // Pan is intentionally not used in this synth anymore.
 
@@ -3397,10 +3581,12 @@ static void juicy_bank_tilde_bell_freq(t_juicy_bank_tilde *x, t_floatarg f){
 static void juicy_bank_tilde_bell_zeta(t_juicy_bank_tilde *x, t_floatarg f){
 
     float v = jb_bell_param_to_zeta((float)f);
+    float u = (isfinite(f) && f <= 1.f) ? jb_clamp((float)f, 0.f, 1.f) : -1.f;
     int b = x->edit_bank ? 1 : 0;
     int d = x->edit_damper;
     if (d < 0) d = 0; else if (d >= JB_N_DAMPERS) d = JB_N_DAMPERS - 1;
     x->bell_peak_zeta[b][d] = v;
+    x->bell_peak_zeta_param[b][d] = (v <= 0.f) ? -1.f : u;
 }
 static void juicy_bank_tilde_bell_npl(t_juicy_bank_tilde *x, t_floatarg f){
 
@@ -3590,6 +3776,37 @@ static inline int jb_lfo_target_allowed(t_symbol *s){
     );
 }
 
+// Velocity-mapping target whitelist (separate lane from the existing mod-matrix velocity source).
+static inline int jb_velmap_target_allowed(t_symbol *s){
+    if (!s) return 0;
+    if (jb_target_is_none(s)) return 1;
+
+    // bell_z_damper{1..3}_{1..2}
+    if (!strncmp(s->s_name, "bell_z_damper", 13)){
+        int damper=0, bank=0;
+        if (sscanf(s->s_name, "bell_z_damper%d_%d", &damper, &bank) == 2){
+            return (damper>=1 && damper<=JB_N_DAMPERS && bank>=1 && bank<=2);
+        }
+        return 0;
+    }
+
+    // bank-suffixed targets
+    if (!strcmp(s->s_name, "brightness_1") || !strcmp(s->s_name, "brightness_2")) return 1;
+    if (!strcmp(s->s_name, "position_1")   || !strcmp(s->s_name, "position_2"))   return 1;
+    if (!strcmp(s->s_name, "pickup_1")     || !strcmp(s->s_name, "pickup_2"))     return 1;
+    if (!strcmp(s->s_name, "master_1")     || !strcmp(s->s_name, "master_2"))     return 1;
+
+    // noise/exciter ADSR + timbre (no bank suffix)
+    if (!strcmp(s->s_name, "adsr_attack"))  return 1;
+    if (!strcmp(s->s_name, "adsr_decay"))   return 1;
+    if (!strcmp(s->s_name, "adsr_release")) return 1;
+    if (!strcmp(s->s_name, "imp_shape"))    return 1;
+    if (!strcmp(s->s_name, "noise_timbre")) return 1;
+
+    return 0;
+}
+
+
 
 
 static void juicy_bank_tilde_lfo1_target(t_juicy_bank_tilde *x, t_symbol *s){
@@ -3618,6 +3835,23 @@ static void juicy_bank_tilde_lfo2_target(t_juicy_bank_tilde *x, t_symbol *s){
     x->lfo_target[1] = s;
 }
 
+static void juicy_bank_tilde_velmap_amount(t_juicy_bank_tilde *x, t_floatarg f){
+    x->velmap_amount = jb_clamp((float)f, -1.f, 1.f);
+}
+
+static void juicy_bank_tilde_velmap_target(t_juicy_bank_tilde *x, t_symbol *s){
+    if (!s) return;
+    if (!jb_velmap_target_allowed(s)){
+        s = gensym("none");
+    }
+    if (jb_target_is_none(s)){
+        x->velmap_target = gensym("none");
+        return;
+    }
+    x->velmap_target = s;
+}
+
+
 
 
 
@@ -3628,6 +3862,7 @@ static void jb_tgtproxy_set(jb_tgtproxy *p, t_symbol *tgt){
     switch(p->lane){
         case 0: juicy_bank_tilde_lfo1_target(p->owner, tgt); break;
         case 1: juicy_bank_tilde_lfo2_target(p->owner, tgt); break;
+        case 2: juicy_bank_tilde_velmap_target(p->owner, tgt); break;
         default: break;
     }
 }
@@ -3994,6 +4229,7 @@ inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     // Target proxies
     if (x->tgtproxy_lfo1) { pd_free((t_pd *)x->tgtproxy_lfo1); x->tgtproxy_lfo1 = 0; }
     if (x->tgtproxy_lfo2) { pd_free((t_pd *)x->tgtproxy_lfo2); x->tgtproxy_lfo2 = 0; }
+    if (x->tgtproxy_velmap) { pd_free((t_pd *)x->tgtproxy_velmap); x->tgtproxy_velmap = 0; }
 
 
     // Offline render buffer
@@ -4031,7 +4267,9 @@ static void jb_apply_default_saw_bank(t_juicy_bank_tilde *x, int bank){
         x->brightness = 0.f;
         for (int d = 0; d < JB_N_DAMPERS; ++d){
             x->bell_peak_hz[0][d]   = 3000.f;
-            x->bell_peak_zeta[0][d] = (d == 0) ? 0.00035f : 0.f; // damper 1 active, others off by default
+            x->bell_peak_zeta[0][d] = (d == 0) ? 0.00035f : 0.f;
+        x->bell_peak_zeta_param[0][d] = (d == 0) ? 0.5915f : -1.f; // damper 1 active, others off by default
+            x->bell_peak_zeta_param[0][d] = (d == 0) ? 0.5915f : -1.f;
             x->bell_npl[0][d]       = 0.7f;
             x->bell_npr[0][d]       = 2.5f;
             x->bell_npm[0][d]       = 0.f;
@@ -4044,6 +4282,7 @@ x->release_amt = 1.f;
         for (int d = 0; d < JB_N_DAMPERS; ++d){
             x->bell_peak_hz[1][d]   = 3000.f;
             x->bell_peak_zeta[1][d] = (d == 0) ? 0.00035f : 0.f; // damper 1 active, others off by default
+            x->bell_peak_zeta_param[1][d] = (d == 0) ? 0.5915f : -1.f;
             x->bell_npl[1][d]       = 0.7f;
             x->bell_npr[1][d]       = 2.5f;
             x->bell_npm[1][d]       = 0.f;
@@ -4074,6 +4313,7 @@ static void *juicy_bank_tilde_new(void){
     for (int d = 0; d < JB_N_DAMPERS; ++d){
         x->bell_peak_hz[0][d]   = 3000.f;
         x->bell_peak_zeta[0][d] = (d == 0) ? 0.00035f : 0.f;
+        x->bell_peak_zeta_param[0][d] = (d == 0) ? 0.5915f : -1.f;
         x->bell_npl[0][d]       = 0.7f;
         x->bell_npr[0][d]       = 2.5f;
         x->bell_npm[0][d]       = 0.f;
@@ -4178,6 +4418,9 @@ x->excite_pos2    = x->excite_pos;
     }
     x->lfo_amount = 0.f;
 
+    // velocity mapping lane defaults
+    x->velmap_amount = 0.f;
+    x->velmap_target = gensym("none");
 
 
 
@@ -4321,12 +4564,18 @@ x->excite_pos2    = x->excite_pos;
     // so we route them through proxies that implement an 'anything' handler.
     x->tgtproxy_lfo1 = (jb_tgtproxy *)pd_new(jb_tgtproxy_class);
     x->tgtproxy_lfo2 = (jb_tgtproxy *)pd_new(jb_tgtproxy_class);
+    x->tgtproxy_velmap = (jb_tgtproxy *)pd_new(jb_tgtproxy_class);
 
     if (x->tgtproxy_lfo1){ x->tgtproxy_lfo1->owner = x; x->tgtproxy_lfo1->lane = 0; }
     if (x->tgtproxy_lfo2){ x->tgtproxy_lfo2->owner = x; x->tgtproxy_lfo2->lane = 1; }
+    if (x->tgtproxy_velmap){ x->tgtproxy_velmap->owner = x; x->tgtproxy_velmap->lane = 2; }
 
     x->in_lfo1_target = inlet_new(&x->x_obj, x->tgtproxy_lfo1 ? &x->tgtproxy_lfo1->p_pd : &x->x_obj.ob_pd, 0, 0);
     x->in_lfo2_target = inlet_new(&x->x_obj, x->tgtproxy_lfo2 ? &x->tgtproxy_lfo2->p_pd : &x->x_obj.ob_pd, 0, 0);
+
+    // Velocity mapping inlets (placed after LFO2 target)
+    x->in_velmap_amount = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("velmap_amount"));
+    x->in_velmap_target = inlet_new(&x->x_obj, x->tgtproxy_velmap ? &x->tgtproxy_velmap->p_pd : &x->x_obj.ob_pd, 0, 0);
 
 
 
@@ -4566,6 +4815,7 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_brightness, g
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo_amount, gensym("lfo_amount"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo1_target, gensym("lfo1_target"), A_SYMBOL, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_lfo2_target, gensym("lfo2_target"), A_SYMBOL, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_velmap_amount, gensym("velmap_amount"), A_DEFFLOAT, 0);
 // INDIVIDUAL (per-mode)
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index, gensym("index"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_ratio_i, gensym("ratio"), A_DEFFLOAT, 0);
