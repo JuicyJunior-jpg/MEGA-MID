@@ -21,7 +21,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential puredata-dev
+          sudo apt-get install -y build-essential puredata-dev gcc-arm-linux-gnueabihf binutils-arm-linux-gnueabihf
 
       - name: Install Pd (macOS)
         if: runner.os == 'macOS'
@@ -39,6 +39,13 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           make fatcheck || true
+
+
+      - name: Print binary type (ARMv7 hard-float)
+        if: runner.os == 'Linux'
+        run: |
+          file build/**/juicy_bank~.pd_linux || true
+          arm-linux-gnueabihf-readelf -h build/**/juicy_bank~.pd_linux | head -n 25 || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
