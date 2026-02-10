@@ -64,18 +64,24 @@ jobs:
           path: build/**/juicy_bank~.pd_linux
 
       # ------------------------------ macOS universal build ------------------------------
-      - name: Install Pd headers (macOS)
+      - name: Fetch Pd headers (macOS)
         if: runner.os == 'macOS'
+        shell: bash
         run: |
           set -euxo pipefail
-          brew update
-          brew install --cask pure-data
+          # Use Pure Data source headers (m_pd.h) matching Bela's Pd version.
+          mkdir -p /tmp/pdsrc
+          cd /tmp/pdsrc
+          curl -L -o pd.tar.gz https://github.com/pure-data/pure-data/archive/refs/tags/0.51-4.tar.gz
+          tar -xzf pd.tar.gz
+          echo "PDINC=/tmp/pdsrc/pure-data-0.51-4/src" >> "$GITHUB_ENV"
 
       - name: Build (macOS)
         if: runner.os == 'macOS'
+        shell: bash
         run: |
           set -euxo pipefail
-          make all
+          make all PDINC="$PDINC"
 
       - name: Upload macOS artifact
         if: runner.os == 'macOS'
