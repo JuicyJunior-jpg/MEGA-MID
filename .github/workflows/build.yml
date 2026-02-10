@@ -29,8 +29,17 @@ jobs:
           brew update
           brew install --cask pd
 
-      - name: Build
-        run: make all
+      - name: Build (ARMv7 hard-float + NEON)
+        if: runner.os == 'Linux'
+        run: |
+          make help || true
+          make all CC=arm-linux-gnueabihf-gcc
+
+      - name: Build (macOS universal)
+        if: runner.os == 'macOS'
+        run: |
+          make help || true
+          make all
 
       - name: Show PDINC/Help
         run: make help || true
