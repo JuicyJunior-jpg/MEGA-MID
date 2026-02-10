@@ -26,6 +26,20 @@
 #include <stdio.h>
 #include <stdint.h>
 
+// ---------- Optional ARM NEON SIMD (ARMv7) ----------
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+  #include <arm_neon.h>
+  #define JB_HAVE_NEON 1
+#else
+  #define JB_HAVE_NEON 0
+#endif
+
+#ifndef JB_ENABLE_NEON
+  // Default: enable on NEON-capable builds, can be disabled via -DJB_ENABLE_NEON=0
+  #define JB_ENABLE_NEON 1
+#endif
+
+
 
 // Denormal/subnormal protection (prevents CPU spikes on Intel when signals decay to tiny values)
 #if defined(__SSE__) || defined(__SSE2__)
@@ -304,6 +318,33 @@ static inline float jb_svf_bp_tick(jb_svf_t *f, float x){
     f->s2 = jb_kill_denorm(2.f * v2 - f->s2);
     return v1; // bandpass
 }
+
+#if JB_HAVE_NEON && JB_ENABLE_NEON
+// 4-lane ZDF SVF bandpass tick (NEON). Updates s1/s2 in-place.
+// Equations match jb_svf_bp_tick() lane-wise.
+static inline float32x4_t jb_svf_bp_tick4(float32x4_t g, float32x4_t d, float32x4_t *s1, float32x4_t *s2, float32x4_t x){
+    // v1 = (s1 + g*(x - s2)) * d
+    float32x4_t v1 = vmlaq_f32(*s1, g, vsubq_f32(x, *s2));
+    v1 = vmulq_f32(v1, d);
+    // v2 = s2 + g*v1
+    float32x4_t v2 = vmlaq_f32(*s2, g, v1);
+    // s1 = 2*v1 - s1
+    *s1 = vsubq_f32(vaddq_f32(v1, v1), *s1);
+    // s2 = 2*v2 - s2
+    *s2 = vsubq_f32(vaddq_f32(v2, v2), *s2);
+    return v1; // bandpass output
+}
+
+// Horizontal add helper compatible with ARMv7 (no vaddvq on older toolchains)
+static inline float jb_hadd_f32x4(float32x4_t v){
+    float32x2_t lo = vget_low_f32(v);
+    float32x2_t hi = vget_high_f32(v);
+    float32x2_t sum = vadd_f32(lo, hi);
+    sum = vpadd_f32(sum, sum);
+    return vget_lane_f32(sum, 0);
+}
+#endif
+
 
 // ---------- INTERNAL EXCITER (Fusion STEP 1) ----------
 // This is the former juicy_exciter~ DSP engine embedded into juicy_bank~.
@@ -3250,7 +3291,79 @@ if (fb2L > 0.99f) fb2L = 0.99f; else if (fb2L < -0.99f) fb2L = -0.99f;
             float exR = ex0R + fb2R;
             // -------- BANK 2 --------
             if (bank_gain2 > 0.f && v->rel_env2 > 0.f){
-                for(int m=0;m<x->n_modes2;m++){
+                #if JB_HAVE_NEON && JB_ENABLE_NEON
+                int m=0;
+                for(; m+3 < x->n_modes2; m+=4){
+                    // Early skip if all 4 inactive
+                    jb_mode_rt_t *md0=&v->m2[m+0];
+                    jb_mode_rt_t *md1=&v->m2[m+1];
+                    jb_mode_rt_t *md2=&v->m2[m+2];
+                    jb_mode_rt_t *md3=&v->m2[m+3];
+                    uint32_t am0 = (base2[m+0].active && !md0->nyq_kill && (fabsf(md0->gain_nowL)+fabsf(md0->gain_nowR))>0.f) ? 0xFFFFFFFFu : 0u;
+                    uint32_t am1 = (base2[m+1].active && !md1->nyq_kill && (fabsf(md1->gain_nowL)+fabsf(md1->gain_nowR))>0.f) ? 0xFFFFFFFFu : 0u;
+                    uint32_t am2 = (base2[m+2].active && !md2->nyq_kill && (fabsf(md2->gain_nowL)+fabsf(md2->gain_nowR))>0.f) ? 0xFFFFFFFFu : 0u;
+                    uint32_t am3 = (base2[m+3].active && !md3->nyq_kill && (fabsf(md3->gain_nowL)+fabsf(md3->gain_nowR))>0.f) ? 0xFFFFFFFFu : 0u;
+                    if(!(am0|am1|am2|am3)) continue;
+                    uint32x4_t activeMask = (uint32x4_t){am0, am1, am2, am3};
+                
+                    // Gather SVF params/states (L)
+                    float gL_[4]  = {md0->svfL.g,  md1->svfL.g,  md2->svfL.g,  md3->svfL.g};
+                    float dL_[4]  = {md0->svfL.d,  md1->svfL.d,  md2->svfL.d,  md3->svfL.d};
+                    float s1L_[4] = {md0->svfL.s1, md1->svfL.s1, md2->svfL.s1, md3->svfL.s1};
+                    float s2L_[4] = {md0->svfL.s2, md1->svfL.s2, md2->svfL.s2, md3->svfL.s2};
+                    float32x4_t gL4  = vld1q_f32(gL_);
+                    float32x4_t dL4  = vld1q_f32(dL_);
+                    float32x4_t s1L4 = vld1q_f32(s1L_);
+                    float32x4_t s2L4 = vld1q_f32(s2L_);
+                
+                    // Gather SVF params/states (R)
+                    float gR_[4]  = {md0->svfR.g,  md1->svfR.g,  md2->svfR.g,  md3->svfR.g};
+                    float dR_[4]  = {md0->svfR.d,  md1->svfR.d,  md2->svfR.d,  md3->svfR.d};
+                    float s1R_[4] = {md0->svfR.s1, md1->svfR.s1, md2->svfR.s1, md3->svfR.s1};
+                    float s2R_[4] = {md0->svfR.s2, md1->svfR.s2, md2->svfR.s2, md3->svfR.s2};
+                    float32x4_t gR4  = vld1q_f32(gR_);
+                    float32x4_t dR4  = vld1q_f32(dR_);
+                    float32x4_t s1R4 = vld1q_f32(s1R_);
+                    float32x4_t s2R4 = vld1q_f32(s2R_);
+                
+                    // Drive update + input vectors
+                    float driveL0=md0->driveL, driveL1=md1->driveL, driveL2=md2->driveL, driveL3=md3->driveL;
+                    float driveR0=md0->driveR, driveR1=md1->driveR, driveR2=md2->driveR, driveR3=md3->driveR;
+                    const float att_a = 1.f;
+                    if(am0){ float excL = exL * md0->gain_nowL; float excR = exR * md0->gain_nowR; driveL0 += att_a*(excL-driveL0); driveR0 += att_a*(excR-driveR0); }
+                    if(am1){ float excL = exL * md1->gain_nowL; float excR = exR * md1->gain_nowR; driveL1 += att_a*(excL-driveL1); driveR1 += att_a*(excR-driveR1); }
+                    if(am2){ float excL = exL * md2->gain_nowL; float excR = exR * md2->gain_nowR; driveL2 += att_a*(excL-driveL2); driveR2 += att_a*(excR-driveR2); }
+                    if(am3){ float excL = exL * md3->gain_nowL; float excR = exR * md3->gain_nowR; driveL3 += att_a*(excL-driveL3); driveR3 += att_a*(excR-driveR3); }
+                    float xL_[4] = {driveL0, driveL1, driveL2, driveL3};
+                    float xR_[4] = {driveR0, driveR1, driveR2, driveR3};
+                    float32x4_t xL4 = vld1q_f32(xL_);
+                    float32x4_t xR4 = vld1q_f32(xR_);
+                
+                    float32x4_t yL4 = jb_svf_bp_tick4(gL4, dL4, &s1L4, &s2L4, xL4);
+                    float32x4_t yR4 = jb_svf_bp_tick4(gR4, dR4, &s1R4, &s2R4, xR4);
+                
+                    // Keep old state for inactive lanes; zero output for inactive lanes
+                    s1L4 = vbslq_f32(activeMask, s1L4, vld1q_f32(s1L_));
+                    s2L4 = vbslq_f32(activeMask, s2L4, vld1q_f32(s2L_));
+                    s1R4 = vbslq_f32(activeMask, s1R4, vld1q_f32(s1R_));
+                    s2R4 = vbslq_f32(activeMask, s2R4, vld1q_f32(s2R_));
+                    yL4  = vbslq_f32(activeMask, yL4, vdupq_n_f32(0.f));
+                    yR4  = vbslq_f32(activeMask, yR4, vdupq_n_f32(0.f));
+                
+                    float yLlane[4], yRlane[4], s1Llane[4], s2Llane[4], s1Rlane[4], s2Rlane[4];
+                    vst1q_f32(yLlane, yL4); vst1q_f32(yRlane, yR4);
+                    vst1q_f32(s1Llane, s1L4); vst1q_f32(s2Llane, s2L4);
+                    vst1q_f32(s1Rlane, s1R4); vst1q_f32(s2Rlane, s2R4);
+                
+                    const float e = v->rel_env2;
+                    if(am0){ md0->svfL.s1=s1Llane[0]; md0->svfL.s2=s2Llane[0]; md0->svfR.s1=s1Rlane[0]; md0->svfR.s2=s2Rlane[0]; md0->driveL=driveL0; md0->driveR=driveR0; float y0L=jb_kill_denorm(yLlane[0]); float y0R=jb_kill_denorm(yRlane[0]); md0->y_pre_lastL=y0L; md0->y_pre_lastR=y0R; b2OutL=jb_kill_denorm(b2OutL + (y0L*e)*bank_gain2); b2OutR=jb_kill_denorm(b2OutR + (y0R*e)*bank_gain2); }
+                    if(am1){ md1->svfL.s1=s1Llane[1]; md1->svfL.s2=s2Llane[1]; md1->svfR.s1=s1Rlane[1]; md1->svfR.s2=s2Rlane[1]; md1->driveL=driveL1; md1->driveR=driveR1; float y1L=jb_kill_denorm(yLlane[1]); float y1R=jb_kill_denorm(yRlane[1]); md1->y_pre_lastL=y1L; md1->y_pre_lastR=y1R; b2OutL=jb_kill_denorm(b2OutL + (y1L*e)*bank_gain2); b2OutR=jb_kill_denorm(b2OutR + (y1R*e)*bank_gain2); }
+                    if(am2){ md2->svfL.s1=s1Llane[2]; md2->svfL.s2=s2Llane[2]; md2->svfR.s1=s1Rlane[2]; md2->svfR.s2=s2Rlane[2]; md2->driveL=driveL2; md2->driveR=driveR2; float y2L=jb_kill_denorm(yLlane[2]); float y2R=jb_kill_denorm(yRlane[2]); md2->y_pre_lastL=y2L; md2->y_pre_lastR=y2R; b2OutL=jb_kill_denorm(b2OutL + (y2L*e)*bank_gain2); b2OutR=jb_kill_denorm(b2OutR + (y2R*e)*bank_gain2); }
+                    if(am3){ md3->svfL.s1=s1Llane[3]; md3->svfL.s2=s2Llane[3]; md3->svfR.s1=s1Rlane[3]; md3->svfR.s2=s2Rlane[3]; md3->driveL=driveL3; md3->driveR=driveR3; float y3L=jb_kill_denorm(yLlane[3]); float y3R=jb_kill_denorm(yRlane[3]); md3->y_pre_lastL=y3L; md3->y_pre_lastR=y3R; b2OutL=jb_kill_denorm(b2OutL + (y3L*e)*bank_gain2); b2OutR=jb_kill_denorm(b2OutR + (y3R*e)*bank_gain2); }
+                }
+                // scalar tail
+                for(; m < x->n_modes2; m++){ 
+                
                     if(!base2[m].active) continue;
                     jb_mode_rt_t *md=&v->m2[m];
                     float gL = md->gain_nowL;
@@ -3282,6 +3395,41 @@ if (fb2L > 0.99f) fb2L = 0.99f; else if (fb2L < -0.99f) fb2L = -0.99f;
 	                    b2OutL = jb_kill_denorm(b2OutL + (y_rawL * e2) * bank_gain2);
 	                    b2OutR = jb_kill_denorm(b2OutR + (y_rawR * e2) * bank_gain2);
                 }
+                #else
+                for(int m=0;m<x->n_modes2;m++){ 
+                
+                    if(!base2[m].active) continue;
+                    jb_mode_rt_t *md=&v->m2[m];
+                    float gL = md->gain_nowL;
+                    float gR = md->gain_nowR;
+                    if ((fabsf(gL) + fabsf(gR)) <= 0.f || md->nyq_kill) continue;
+
+                    float driveL = md->driveL;
+                    float driveR = md->driveR;
+                    const float att_a = 1.f;
+                    float excL = exL * gL;
+                    float excR = exR * gR;
+
+                    driveL += att_a*(excL - driveL);
+	                    float y_rawL = jb_svf_bp_tick(&md->svfL, driveL);
+	                    y_rawL = jb_kill_denorm(y_rawL);
+
+                    driveR += att_a*(excR - driveR);
+	                    float y_rawR = jb_svf_bp_tick(&md->svfR, driveR);
+	                    y_rawR = jb_kill_denorm(y_rawR);
+
+                    md->driveL = driveL;
+                    md->driveR = driveR;
+	                    // Pre-master, pre-envelope signal snapshot (for meters / hit detection)
+	                    md->y_pre_lastL = y_rawL;
+	                    md->y_pre_lastR = y_rawR;
+
+	                    // SUM into bank-2 voice output (no pan)
+	                    float e2 = v->rel_env2;
+	                    b2OutL = jb_kill_denorm(b2OutL + (y_rawL * e2) * bank_gain2);
+	                    b2OutR = jb_kill_denorm(b2OutR + (y_rawR * e2) * bank_gain2);
+                }
+                #endif
             }
             // BANK 1 input: exciter + bank1 feedback
             exL = ex0L + fb1L;
@@ -3289,7 +3437,79 @@ if (fb2L > 0.99f) fb2L = 0.99f; else if (fb2L < -0.99f) fb2L = -0.99f;
 
 // -------- BANK 1 --------
             if (bank_gain1 > 0.f && v->rel_env > 0.f){
-                for(int m=0;m<x->n_modes;m++){
+                #if JB_HAVE_NEON && JB_ENABLE_NEON
+                int m=0;
+                for(; m+3 < x->n_modes; m+=4){
+                    // Early skip if all 4 inactive
+                    jb_mode_rt_t *md0=&v->m[m+0];
+                    jb_mode_rt_t *md1=&v->m[m+1];
+                    jb_mode_rt_t *md2=&v->m[m+2];
+                    jb_mode_rt_t *md3=&v->m[m+3];
+                    uint32_t am0 = (base1[m+0].active && !md0->nyq_kill && (fabsf(md0->gain_nowL)+fabsf(md0->gain_nowR))>0.f) ? 0xFFFFFFFFu : 0u;
+                    uint32_t am1 = (base1[m+1].active && !md1->nyq_kill && (fabsf(md1->gain_nowL)+fabsf(md1->gain_nowR))>0.f) ? 0xFFFFFFFFu : 0u;
+                    uint32_t am2 = (base1[m+2].active && !md2->nyq_kill && (fabsf(md2->gain_nowL)+fabsf(md2->gain_nowR))>0.f) ? 0xFFFFFFFFu : 0u;
+                    uint32_t am3 = (base1[m+3].active && !md3->nyq_kill && (fabsf(md3->gain_nowL)+fabsf(md3->gain_nowR))>0.f) ? 0xFFFFFFFFu : 0u;
+                    if(!(am0|am1|am2|am3)) continue;
+                    uint32x4_t activeMask = (uint32x4_t){am0, am1, am2, am3};
+                
+                    // Gather SVF params/states (L)
+                    float gL_[4]  = {md0->svfL.g,  md1->svfL.g,  md2->svfL.g,  md3->svfL.g};
+                    float dL_[4]  = {md0->svfL.d,  md1->svfL.d,  md2->svfL.d,  md3->svfL.d};
+                    float s1L_[4] = {md0->svfL.s1, md1->svfL.s1, md2->svfL.s1, md3->svfL.s1};
+                    float s2L_[4] = {md0->svfL.s2, md1->svfL.s2, md2->svfL.s2, md3->svfL.s2};
+                    float32x4_t gL4  = vld1q_f32(gL_);
+                    float32x4_t dL4  = vld1q_f32(dL_);
+                    float32x4_t s1L4 = vld1q_f32(s1L_);
+                    float32x4_t s2L4 = vld1q_f32(s2L_);
+                
+                    // Gather SVF params/states (R)
+                    float gR_[4]  = {md0->svfR.g,  md1->svfR.g,  md2->svfR.g,  md3->svfR.g};
+                    float dR_[4]  = {md0->svfR.d,  md1->svfR.d,  md2->svfR.d,  md3->svfR.d};
+                    float s1R_[4] = {md0->svfR.s1, md1->svfR.s1, md2->svfR.s1, md3->svfR.s1};
+                    float s2R_[4] = {md0->svfR.s2, md1->svfR.s2, md2->svfR.s2, md3->svfR.s2};
+                    float32x4_t gR4  = vld1q_f32(gR_);
+                    float32x4_t dR4  = vld1q_f32(dR_);
+                    float32x4_t s1R4 = vld1q_f32(s1R_);
+                    float32x4_t s2R4 = vld1q_f32(s2R_);
+                
+                    // Drive update + input vectors
+                    float driveL0=md0->driveL, driveL1=md1->driveL, driveL2=md2->driveL, driveL3=md3->driveL;
+                    float driveR0=md0->driveR, driveR1=md1->driveR, driveR2=md2->driveR, driveR3=md3->driveR;
+                    const float att_a = 1.f;
+                    if(am0){ float excL = exL * md0->gain_nowL; float excR = exR * md0->gain_nowR; driveL0 += att_a*(excL-driveL0); driveR0 += att_a*(excR-driveR0); }
+                    if(am1){ float excL = exL * md1->gain_nowL; float excR = exR * md1->gain_nowR; driveL1 += att_a*(excL-driveL1); driveR1 += att_a*(excR-driveR1); }
+                    if(am2){ float excL = exL * md2->gain_nowL; float excR = exR * md2->gain_nowR; driveL2 += att_a*(excL-driveL2); driveR2 += att_a*(excR-driveR2); }
+                    if(am3){ float excL = exL * md3->gain_nowL; float excR = exR * md3->gain_nowR; driveL3 += att_a*(excL-driveL3); driveR3 += att_a*(excR-driveR3); }
+                    float xL_[4] = {driveL0, driveL1, driveL2, driveL3};
+                    float xR_[4] = {driveR0, driveR1, driveR2, driveR3};
+                    float32x4_t xL4 = vld1q_f32(xL_);
+                    float32x4_t xR4 = vld1q_f32(xR_);
+                
+                    float32x4_t yL4 = jb_svf_bp_tick4(gL4, dL4, &s1L4, &s2L4, xL4);
+                    float32x4_t yR4 = jb_svf_bp_tick4(gR4, dR4, &s1R4, &s2R4, xR4);
+                
+                    // Keep old state for inactive lanes; zero output for inactive lanes
+                    s1L4 = vbslq_f32(activeMask, s1L4, vld1q_f32(s1L_));
+                    s2L4 = vbslq_f32(activeMask, s2L4, vld1q_f32(s2L_));
+                    s1R4 = vbslq_f32(activeMask, s1R4, vld1q_f32(s1R_));
+                    s2R4 = vbslq_f32(activeMask, s2R4, vld1q_f32(s2R_));
+                    yL4  = vbslq_f32(activeMask, yL4, vdupq_n_f32(0.f));
+                    yR4  = vbslq_f32(activeMask, yR4, vdupq_n_f32(0.f));
+                
+                    float yLlane[4], yRlane[4], s1Llane[4], s2Llane[4], s1Rlane[4], s2Rlane[4];
+                    vst1q_f32(yLlane, yL4); vst1q_f32(yRlane, yR4);
+                    vst1q_f32(s1Llane, s1L4); vst1q_f32(s2Llane, s2L4);
+                    vst1q_f32(s1Rlane, s1R4); vst1q_f32(s2Rlane, s2R4);
+                
+                    const float e = v->rel_env;
+                    if(am0){ md0->svfL.s1=s1Llane[0]; md0->svfL.s2=s2Llane[0]; md0->svfR.s1=s1Rlane[0]; md0->svfR.s2=s2Rlane[0]; md0->driveL=driveL0; md0->driveR=driveR0; float y0L=jb_kill_denorm(yLlane[0]); float y0R=jb_kill_denorm(yRlane[0]); md0->y_pre_lastL=y0L; md0->y_pre_lastR=y0R; b1OutL=jb_kill_denorm(b1OutL + (y0L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y0R*e)*bank_gain1); }
+                    if(am1){ md1->svfL.s1=s1Llane[1]; md1->svfL.s2=s2Llane[1]; md1->svfR.s1=s1Rlane[1]; md1->svfR.s2=s2Rlane[1]; md1->driveL=driveL1; md1->driveR=driveR1; float y1L=jb_kill_denorm(yLlane[1]); float y1R=jb_kill_denorm(yRlane[1]); md1->y_pre_lastL=y1L; md1->y_pre_lastR=y1R; b1OutL=jb_kill_denorm(b1OutL + (y1L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y1R*e)*bank_gain1); }
+                    if(am2){ md2->svfL.s1=s1Llane[2]; md2->svfL.s2=s2Llane[2]; md2->svfR.s1=s1Rlane[2]; md2->svfR.s2=s2Rlane[2]; md2->driveL=driveL2; md2->driveR=driveR2; float y2L=jb_kill_denorm(yLlane[2]); float y2R=jb_kill_denorm(yRlane[2]); md2->y_pre_lastL=y2L; md2->y_pre_lastR=y2R; b1OutL=jb_kill_denorm(b1OutL + (y2L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y2R*e)*bank_gain1); }
+                    if(am3){ md3->svfL.s1=s1Llane[3]; md3->svfL.s2=s2Llane[3]; md3->svfR.s1=s1Rlane[3]; md3->svfR.s2=s2Rlane[3]; md3->driveL=driveL3; md3->driveR=driveR3; float y3L=jb_kill_denorm(yLlane[3]); float y3R=jb_kill_denorm(yRlane[3]); md3->y_pre_lastL=y3L; md3->y_pre_lastR=y3R; b1OutL=jb_kill_denorm(b1OutL + (y3L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y3R*e)*bank_gain1); }
+                }
+                // scalar tail
+                for(; m < x->n_modes; m++){ 
+                
                     if(!base1[m].active) continue;
                     jb_mode_rt_t *md=&v->m[m];
                     float gL = md->gain_nowL;
@@ -3320,6 +3540,40 @@ if (fb2L > 0.99f) fb2L = 0.99f; else if (fb2L < -0.99f) fb2L = -0.99f;
 	                    b1OutL = jb_kill_denorm(b1OutL + (y_rawL * e1) * bank_gain1);
 	                    b1OutR = jb_kill_denorm(b1OutR + (y_rawR * e1) * bank_gain1);
                 }
+                #else
+                for(int m=0;m<x->n_modes;m++){ 
+                
+                    if(!base1[m].active) continue;
+                    jb_mode_rt_t *md=&v->m[m];
+                    float gL = md->gain_nowL;
+                    float gR = md->gain_nowR;
+                    if ((fabsf(gL) + fabsf(gR)) <= 0.f || md->nyq_kill) continue;
+
+                    float driveL = md->driveL;
+                    float driveR = md->driveR;
+                    const float att_a = 1.f;
+                    float excL = exL * gL;
+                    float excR = exR * gR;
+
+                    driveL += att_a*(excL - driveL);
+	                    float y_rawL = jb_svf_bp_tick(&md->svfL, driveL);
+	                    y_rawL = jb_kill_denorm(y_rawL);
+
+                    driveR += att_a*(excR - driveR);
+	                    float y_rawR = jb_svf_bp_tick(&md->svfR, driveR);
+	                    y_rawR = jb_kill_denorm(y_rawR);
+
+                    md->driveL = driveL;
+                    md->driveR = driveR;
+	                    md->y_pre_lastL = y_rawL;
+	                    md->y_pre_lastR = y_rawR;
+
+	                    // SUM into bank-1 voice output (no pan)
+	                    float e1 = v->rel_env;
+	                    b1OutL = jb_kill_denorm(b1OutL + (y_rawL * e1) * bank_gain1);
+	                    b1OutR = jb_kill_denorm(b1OutR + (y_rawR * e1) * bank_gain1);
+                }
+                #endif
             }
             // Final per-voice sum (pre-space)
             float vOutL = b1OutL + b2OutL;
