@@ -17,23 +17,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install deps (Ubuntu)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential puredata-dev gcc-arm-linux-gnueabihf binutils-arm-linux-gnueabihf
-
+      # ---------- macOS (universal arm64+x86_64) ----------
       - name: Install Pd (macOS)
         if: runner.os == 'macOS'
         run: |
           brew update
           brew install --cask pd
-
-      - name: Build (ARMv7 hard-float + NEON)
-        if: runner.os == 'Linux'
-        run: |
-          make help || true
-          make all CC=arm-linux-gnueabihf-gcc
 
       - name: Build (macOS universal)
         if: runner.os == 'macOS'
@@ -41,20 +30,49 @@ jobs:
           make help || true
           make all
 
-      - name: Show PDINC/Help
-        run: make help || true
-
       - name: Print binary type (macOS)
         if: runner.os == 'macOS'
         run: |
           make fatcheck || true
 
+      # ---------- Bela / BeagleBone Black (armv7l, Debian 9 stretch glibc) ----------
+      # We build inside an ARMv7 Debian Stretch container to avoid GLIBC version mismatch on Bela.
+      - name: Set up QEMU (Linux)
+        if: runner.os == 'Linux'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+
+      - name: Set up Docker Buildx (Linux)
+        if: runner.os == 'Linux'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build (ARMv7 hard-float + NEON, Debian 9 stretch)
+        if: runner.os == 'Linux'
+        run: |
+          set -euxo pipefail
+          docker run --rm --platform linux/arm/v7             -v "${{ github.workspace }}:/work" -w /work             arm32v7/debian:stretch             bash -lc '
+              set -euxo pipefail
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                build-essential make wget ca-certificates xz-utils
+              # Pd headers: match Bela Pd 0.51-4 (grab source and use m_pd.h)
+              mkdir -p /tmp/pdsrc
+              cd /tmp/pdsrc
+              wget -qO pd.tar.gz https://github.com/pure-data/pure-data/archive/refs/tags/0.51-4.tar.gz
+              tar -xzf pd.tar.gz
+              export PDINC="/tmp/pdsrc/pure-data-0.51-4/src"
+              cd /work
+              make help || true
+              make all CC=gcc PDINC="$PDINC"
+              echo "---- file output ----"
+              file build/**/juicy_bank~.pd_linux || true
+            '
 
       - name: Print binary type (ARMv7 hard-float)
         if: runner.os == 'Linux'
         run: |
           file build/**/juicy_bank~.pd_linux || true
-          arm-linux-gnueabihf-readelf -h build/**/juicy_bank~.pd_linux | head -n 25 || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
