@@ -31,7 +31,7 @@ else ifeq ($(UNAME_S),Linux)
   PDINC ?= /usr/include/pd
   EXT      := pd_linux
   PLAT     := bela_armv7
-  CC      ?= arm-linux-gnueabihf-gcc
+  CC      := arm-linux-gnueabihf-gcc
   CFLAGS  ?= -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type -I"$(PDINC)" \
             -march=armv7-a -mtune=cortex-a8 -mfpu=neon -mfloat-abi=hard -DJB_ENABLE_NEON=1
   LDFLAGS ?= -shared -fPIC -Wl,-export-dynamic
