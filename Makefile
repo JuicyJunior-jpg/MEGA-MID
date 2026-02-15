@@ -1,80 +1,91 @@
-# Makefile — builds ONLY juicy_bank~ for Pd (Universal mac on macOS)
-SRC_DIR    := src
-BUILD_ROOT := build
+name: build-juicy-bank-universal
 
-BANK_SRC  := $(SRC_DIR)/juicy_bank_tilde.c
-BANK_BIN  := juicy_bank~
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
 
-UNAME_S := $(shell uname -s)
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
 
-# Detect Pd headers
-ifeq ($(UNAME_S),Darwin)
-  PD_APP := $(firstword \
-    $(wildcard /Applications/Pd*.app) \
-    $(wildcard $(HOME)/Applications/Pd*.app) \
-    $(wildcard /usr/local/Caskroom/pd/*/Pd*.app) \
-    $(wildcard /opt/homebrew/Caskroom/pd/*/Pd*.app))
-  PDINC ?= $(PD_APP)/Contents/Resources/src
-  CPPFLAGS += -I"$(PDINC)"
-  ifeq ($(PD_APP),)
-    $(warning Could not find Pd*.app automatically. Set PDINC=/path/to/Pd.app/Contents/Resources/src)
-  endif
-  EXT      := pd_darwin
-  PLAT     := macos
-  # Build a UNIVERSAL (arm64 + x86_64) binary
-  MAC_MIN  ?= 10.13
-  ARCHS    ?= -arch arm64 -arch x86_64
-  CFLAGS  ?= -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type $(USER_CFLAGS) $(ARCHS) -mmacosx-version-min=$(MAC_MIN)
-  LDFLAGS ?= -bundle -undefined dynamic_lookup $(ARCHS) -mmacosx-version-min=$(MAC_MIN)
-  LDLIBS  ?=
-else ifeq ($(UNAME_S),Linux)
-  # Bela / BeagleBone Black target: ARMv7 32-bit hard-float + NEON
-  PDINC ?= /usr/include/pd
-  CPPFLAGS += -I"$(PDINC)"
-  EXT      := pd_linux
-  PLAT     := bela_armv7
-  ARCH    := $(shell uname -m)
-  # If we're building on native ARMv7 (e.g. inside an arm32v7 container), use gcc.
-  # Otherwise (x86_64 runner), default to the ARM hard-float cross-compiler.
-  ifneq (,$(findstring armv7,$(ARCH)))
-    CC ?= gcc
-  else
-    CC ?= arm-linux-gnueabihf-gcc
-  endif
-  CFLAGS  ?= -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type $(USER_CFLAGS) \
-            -march=armv7-a -mtune=cortex-a8 -mfpu=neon -mfloat-abi=hard -DJB_ENABLE_NEON=1
-  LDFLAGS ?= -shared -fPIC -Wl,-export-dynamic
-  LDLIBS  ?= -lm
-else
-  PDINC ?= C:/Pd/src
-  CPPFLAGS += -I"$(PDINC)"
-  EXT      := pd_win
-  PLAT     := windows
-  CFLAGS  ?= -O3 -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type $(USER_CFLAGS)
-  LDFLAGS ?= -shared
-  LDLIBS  ?=
-endif
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-BUILD_DIR := $(BUILD_ROOT)/$(PLAT)
-OUT := $(BUILD_DIR)/$(BANK_BIN).$(EXT)
+      # -------- ARMv7 (Bela / Debian 9 "stretch") build on Linux runner --------
+      - name: Set up QEMU (Linux)
+        if: runner.os == 'Linux'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
 
-.PHONY: all clean dirs help fatcheck
-all: dirs $(OUT)
+      - name: Build ARMv7 (hard-float) in Debian Stretch container
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
 
-dirs:
-	@mkdir -p "$(BUILD_DIR)"
+          docker run --rm --platform linux/arm/v7             -v "$GITHUB_WORKSPACE:/work" -w /work             arm32v7/debian:stretch bash -lc '
+              set -euxo pipefail
 
-$(OUT): $(BANK_SRC) | dirs
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $< $(LDFLAGS) $(LDLIBS)
+              # Debian 9 "stretch" is EOL; use archive.debian.org mirrors.
+              printf "%s\n"                 "deb http://archive.debian.org/debian stretch main"                 "deb http://archive.debian.org/debian-security stretch/updates main"                 > /etc/apt/sources.list
 
-fatcheck:
-	@if [ "$(UNAME_S)" = "Darwin" ]; then file $(OUT); fi
+              # Disable "Valid-Until" checks (archive metadata is expired).
+              echo "Acquire::Check-Valid-Until \"false\";" > /etc/apt/apt.conf.d/99no-check-valid-until
 
-clean:
-	@rm -rf "$(BUILD_ROOT)"
+              apt-get -o Acquire::Check-Valid-Until=false update
+              apt-get install -y --no-install-recommends                 build-essential make wget ca-certificates xz-utils file
 
-help:
-	@echo "PDINC=$(PDINC)"
-	@echo "Platform=$(PLAT)  Ext=$(EXT)"
-	@echo "Build dir=$(BUILD_DIR)"
-	@echo "Universal (macOS only): ARCHS='$(ARCHS)'  MAC_MIN=$(MAC_MIN)"
+              # Pd headers: match Bela Pd 0.51-4 (grab source and use m_pd.h)
+              mkdir -p /tmp/pdsrc
+              cd /tmp/pdsrc
+              wget -qO pd.tar.gz https://github.com/pure-data/pure-data/archive/refs/tags/0.51-4.tar.gz
+              tar -xzf pd.tar.gz
+              export PDINC="/tmp/pdsrc/pure-data-0.51-4/src"
+
+              cd /work
+              make all CC=gcc PDINC="$PDINC"
+
+              echo "---- file output ----"
+              file build/**/juicy_bank~.pd_linux || true
+            '
+
+      - name: Upload ARMv7 artifact (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: juicy_bank-bela-armv7-debian9
+          path: build/**/juicy_bank~.pd_linux
+
+      # ------------------------------ macOS universal build ------------------------------
+      - name: Fetch Pd headers (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # Use Pure Data source headers (m_pd.h) matching Bela's Pd version.
+          mkdir -p /tmp/pdsrc
+          cd /tmp/pdsrc
+          curl -L -o pd.tar.gz https://github.com/pure-data/pure-data/archive/refs/tags/0.51-4.tar.gz
+          tar -xzf pd.tar.gz
+          echo "PDINC=/tmp/pdsrc/pure-data-0.51-4/src" >> "$GITHUB_ENV"
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          make all PDINC="$PDINC"
+
+      - name: Upload macOS artifact
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: juicy_bank-macos-universal
+          path: build/**/juicy_bank~.pd_darwin
