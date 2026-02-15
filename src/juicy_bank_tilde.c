@@ -20,6 +20,14 @@
 //     -o juicy_bank~.pd_linux juicy_bank_tilde.c
 
 #include "m_pd.h"
+
+/*
+  Build/CPU notes (especially for Bela / ARMv7):
+  - Use aggressive optimization flags in your build system, e.g.
+      -O3 (or -Ofast) -ffast-math -fno-math-errno
+      -mfpu=neon -mfloat-abi=hard (ARMv7 hard-float)
+  - Avoid any Pd API calls (gensym/post/pd_error/memory alloc) in perform().
+*/
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
@@ -823,6 +831,17 @@ typedef struct {
 // ---------- the object ----------
 static t_class *juicy_bank_tilde_class;
 static t_class *jb_tgtproxy_class;
+
+/* -------------------------------------------------------------------------
+   Cached Pd symbols (avoid gensym() in the audio thread)
+   NOTE: gensym() touches Pd's symbol table; keep it out of perform().
+   ------------------------------------------------------------------------- */
+static t_symbol *jb_sym_master_1     = NULL;
+static t_symbol *jb_sym_master_2     = NULL;
+static t_symbol *jb_sym_lfo2_amount  = NULL;
+static t_symbol *jb_sym_noise_timbre = NULL;
+static t_symbol *jb_sym_imp_shape    = NULL;
+
 
 // Proxy to accept ANY message on target-selection inlets (so message boxes like 'damper_1' work)
 typedef struct _juicy_bank_tilde t_juicy_bank_tilde; // forward
@@ -2942,18 +2961,39 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
   #endif
 #endif
 
+    /* ------------------ EARLY-OUT (CPU) ------------------
+       If there are no active voices AND feedback pressure is 0,
+       we can zero the outputs and return immediately.
+       This is a big win on Bela when idle.
+    ------------------------------------------------------- */
+    const float pressure = jb_clamp(x->exc_density, 0.f, 1.f); // 0 => feedback disabled by default
+    int any_active = 0;
+    if(pressure > 1e-6f){
+        any_active = 1; // feedback path could be active
+    } else {
+        for(int v=0; v<x->max_voices; ++v){
+            const jb_voice_t *V = &x->v[v];
+            if(V->state != V_IDLE || V->rel_env > 1e-6f || V->rel_env2 > 1e-6f){
+                any_active = 1;
+                break;
+            }
+        }
+    }
+    if(!any_active){
+        for(int i=0;i<n;i++){ outL[i]=0; outR[i]=0; }
+        return (w+5);
+    }
+
     // clear outputs
     for(int i=0;i<n;i++){ outL[i]=0; outR[i]=0; }
 
     // update LFOs once per block (for modulation matrix sources)
-    jb_update_lfos_block(x, n);
-
-    // Cache commonly-used symbols once per perform call (avoid gensym() in hot paths)
-    const t_symbol *sym_master_1     = gensym("master_1");
-    const t_symbol *sym_master_2     = gensym("master_2");
-    const t_symbol *sym_lfo2_amount  = gensym("lfo2_amount");
-    const t_symbol *sym_noise_timbre = gensym("noise_timbre");
-    const t_symbol *sym_imp_shape    = gensym("imp_shape");
+    jb_update_lfos_block(x, n);    // Cached symbols (initialized in setup()); no gensym() in the audio thread.
+    const t_symbol *sym_master_1     = jb_sym_master_1;
+    const t_symbol *sym_master_2     = jb_sym_master_2;
+    const t_symbol *sym_lfo2_amount  = jb_sym_lfo2_amount;
+    const t_symbol *sym_noise_timbre = jb_sym_noise_timbre;
+    const t_symbol *sym_imp_shape    = jb_sym_imp_shape;
 
     // NEW MOD LANES: LFO1 output (scaled by its amount) + a few global mods that must happen pre-exciter-update
     const t_symbol *lfo1_tgt = x->lfo_target[0];
@@ -3011,8 +3051,9 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     // Pressure (reuses former density inlet): feedback amount + safety limiter target
     // pressure controls the *maximum reinjection gain* (not a loudness target).
     // AGC now acts as a one-sided limiter (attenuates only) to prevent runaway.
-    const float pressure = jb_clamp(x->exc_density, 0.f, 1.f);
-    const float fb_gain_cmd   = 0.95f * pressure * pressure;   // 0..0.95 (fine control at low end)
+    /* pressure already computed above (early-out) */
+    const int   fb_enabled  = (pressure > 1e-6f);
+    const float fb_gain_cmd   = fb_enabled ? (0.95f * pressure * pressure) : 0.f;   // 0..0.95 (fine control at low end)
     const float fb_env_target = 0.65f * pressure;              // 0..0.65 (abs level target for limiter)
 
     // Feedback Time/Phase controls (clamped once per block)
@@ -3175,6 +3216,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
             float fb1L = 0.f, fb1R = 0.f;
             float fb2L = 0.f, fb2R = 0.f;
+            if(fb_enabled){
             {
                 // Bank 1 (index 0)
                 const int b = 0;
@@ -3275,6 +3317,9 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
 if (fb2L > 0.99f) fb2L = 0.99f; else if (fb2L < -0.99f) fb2L = -0.99f;
                 if (fb2R > 0.99f) fb2R = 0.99f; else if (fb2R < -0.99f) fb2R = -0.99f;
+            }
+            } else {
+                // feedback disabled (pressure==0): no reinjection, skip per-sample feedback work
             }
 
 // ---------- INTERNAL EXCITER (no feedback mixed into noise/impulse) ----------
@@ -5593,6 +5638,16 @@ static void juicy_bank_tilde_anything(t_juicy_bank_tilde *x, t_symbol *s, int ar
 
 
 void juicy_bank_tilde_setup(void){
+
+    // Cache symbols once (avoid gensym() in the audio thread)
+    if(!jb_sym_master_1){
+        jb_sym_master_1     = gensym("master_1");
+        jb_sym_master_2     = gensym("master_2");
+        jb_sym_lfo2_amount  = gensym("lfo2_amount");
+        jb_sym_noise_timbre = gensym("noise_timbre");
+        jb_sym_imp_shape    = gensym("imp_shape");
+    }
+
     // Target-inlet proxy class (accepts bare selectors like 'brightness_1')
     if (!jb_tgtproxy_class){
         jb_tgtproxy_class = class_new(gensym("_jb_tgtproxy"),
