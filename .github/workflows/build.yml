@@ -50,7 +50,7 @@ jobs:
               export PDINC="/tmp/pdsrc/pure-data-0.51-4/src"
 
               cd /work
-              make all CC=gcc PDINC="$PDINC"
+              make all CC=gcc PDINC="$PDINC" CFLAGS="-O3 -DNDEBUG -ffast-math -fno-math-errno -funsafe-math-optimizations -fomit-frame-pointer -ftree-vectorize -mcpu=cortex-a8 -mfpu=neon -mfloat-abi=hard"
 
               echo "---- file output ----"
               file build/**/juicy_bank~.pd_linux || true
