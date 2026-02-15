@@ -3074,233 +3074,9 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                         // ---------- FEEDBACK (REMOVED) ----------
             // The entire feedback system has been removed for Bela stability.
             // Keep these as zeros so downstream routing stays identical.
-            float fb1L = 0.f, fb1R = 0.f;
-            float fb2L = 0.f, fb2R = 0.f;
-
-// BANK 1 input: exciter + bank1 feedback
-            exL = ex0L + fb1L;
-            exR = ex0R + fb1R;
-
-// -------- BANK 1 --------
-            if (bank_gain1 > 0.f && v->rel_env > 0.f){
-                #if JB_HAVE_NEON && JB_ENABLE_NEON
-                int m=0;
-                for(; m+3 < x->n_modes; m+=4){
-                    // Early skip if all 4 inactive
-                    jb_mode_rt_t *md0=&v->m[m+0];
-                    jb_mode_rt_t *md1=&v->m[m+1];
-                    jb_mode_rt_t *md2=&v->m[m+2];
-                    jb_mode_rt_t *md3=&v->m[m+3];
-                    uint32_t am0 = (base1[m+0].active && !md0->nyq_kill && (fabsf(md0->gain_nowL)+fabsf(md0->gain_nowR))>0.f) ? 0xFFFFFFFFu : 0u;
-                    uint32_t am1 = (base1[m+1].active && !md1->nyq_kill && (fabsf(md1->gain_nowL)+fabsf(md1->gain_nowR))>0.f) ? 0xFFFFFFFFu : 0u;
-                    uint32_t am2 = (base1[m+2].active && !md2->nyq_kill && (fabsf(md2->gain_nowL)+fabsf(md2->gain_nowR))>0.f) ? 0xFFFFFFFFu : 0u;
-                    uint32_t am3 = (base1[m+3].active && !md3->nyq_kill && (fabsf(md3->gain_nowL)+fabsf(md3->gain_nowR))>0.f) ? 0xFFFFFFFFu : 0u;
-                    if(!(am0|am1|am2|am3)) continue;
-                    uint32x4_t activeMask = (uint32x4_t){am0, am1, am2, am3};
-                
-                    // Gather SVF params/states (L)
-                    float gL_[4]  = {md0->svfL.g,  md1->svfL.g,  md2->svfL.g,  md3->svfL.g};
-                    float dL_[4]  = {md0->svfL.d,  md1->svfL.d,  md2->svfL.d,  md3->svfL.d};
-                    float s1L_[4] = {md0->svfL.s1, md1->svfL.s1, md2->svfL.s1, md3->svfL.s1};
-                    float s2L_[4] = {md0->svfL.s2, md1->svfL.s2, md2->svfL.s2, md3->svfL.s2};
-                    float32x4_t gL4  = vld1q_f32(gL_);
-                    float32x4_t dL4  = vld1q_f32(dL_);
-                    float32x4_t s1L4 = vld1q_f32(s1L_);
-                    float32x4_t s2L4 = vld1q_f32(s2L_);
-                
-                    // Gather SVF params/states (R)
-                    float gR_[4]  = {md0->svfR.g,  md1->svfR.g,  md2->svfR.g,  md3->svfR.g};
-                    float dR_[4]  = {md0->svfR.d,  md1->svfR.d,  md2->svfR.d,  md3->svfR.d};
-                    float s1R_[4] = {md0->svfR.s1, md1->svfR.s1, md2->svfR.s1, md3->svfR.s1};
-                    float s2R_[4] = {md0->svfR.s2, md1->svfR.s2, md2->svfR.s2, md3->svfR.s2};
-                    float32x4_t gR4  = vld1q_f32(gR_);
-                    float32x4_t dR4  = vld1q_f32(dR_);
-                    float32x4_t s1R4 = vld1q_f32(s1R_);
-                    float32x4_t s2R4 = vld1q_f32(s2R_);
-                
-                    // Drive update + input vectors
-                    float driveL0=md0->driveL, driveL1=md1->driveL, driveL2=md2->driveL, driveL3=md3->driveL;
-                    float driveR0=md0->driveR, driveR1=md1->driveR, driveR2=md2->driveR, driveR3=md3->driveR;
-                    const float att_a = 1.f;
-                    if(am0){ float excL = exL * md0->gain_nowL; float excR = exR * md0->gain_nowR; driveL0 += att_a*(excL-driveL0); driveR0 += att_a*(excR-driveR0); }
-                    if(am1){ float excL = exL * md1->gain_nowL; float excR = exR * md1->gain_nowR; driveL1 += att_a*(excL-driveL1); driveR1 += att_a*(excR-driveR1); }
-                    if(am2){ float excL = exL * md2->gain_nowL; float excR = exR * md2->gain_nowR; driveL2 += att_a*(excL-driveL2); driveR2 += att_a*(excR-driveR2); }
-                    if(am3){ float excL = exL * md3->gain_nowL; float excR = exR * md3->gain_nowR; driveL3 += att_a*(excL-driveL3); driveR3 += att_a*(excR-driveR3); }
-                    float xL_[4] = {driveL0, driveL1, driveL2, driveL3};
-                    float xR_[4] = {driveR0, driveR1, driveR2, driveR3};
-                    float32x4_t xL4 = vld1q_f32(xL_);
-                    float32x4_t xR4 = vld1q_f32(xR_);
-                
-                    float32x4_t yL4 = jb_svf_bp_tick4(gL4, dL4, &s1L4, &s2L4, xL4);
-                    float32x4_t yR4 = jb_svf_bp_tick4(gR4, dR4, &s1R4, &s2R4, xR4);
-                
-                    // Keep old state for inactive lanes; zero output for inactive lanes
-                    s1L4 = vbslq_f32(activeMask, s1L4, vld1q_f32(s1L_));
-                    s2L4 = vbslq_f32(activeMask, s2L4, vld1q_f32(s2L_));
-                    s1R4 = vbslq_f32(activeMask, s1R4, vld1q_f32(s1R_));
-                    s2R4 = vbslq_f32(activeMask, s2R4, vld1q_f32(s2R_));
-                    yL4  = vbslq_f32(activeMask, yL4, vdupq_n_f32(0.f));
-                    yR4  = vbslq_f32(activeMask, yR4, vdupq_n_f32(0.f));
-                
-                    float yLlane[4], yRlane[4], s1Llane[4], s2Llane[4], s1Rlane[4], s2Rlane[4];
-                    vst1q_f32(yLlane, yL4); vst1q_f32(yRlane, yR4);
-                    vst1q_f32(s1Llane, s1L4); vst1q_f32(s2Llane, s2L4);
-                    vst1q_f32(s1Rlane, s1R4); vst1q_f32(s2Rlane, s2R4);
-                
-                    const float e = v->rel_env;
-                    if(am0){ md0->svfL.s1=s1Llane[0]; md0->svfL.s2=s2Llane[0]; md0->svfR.s1=s1Rlane[0]; md0->svfR.s2=s2Rlane[0]; md0->driveL=driveL0; md0->driveR=driveR0; float y0L=jb_kill_denorm(yLlane[0]); float y0R=jb_kill_denorm(yRlane[0]); md0->y_pre_lastL=y0L; md0->y_pre_lastR=y0R; b1OutL=jb_kill_denorm(b1OutL + (y0L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y0R*e)*bank_gain1); }
-                    if(am1){ md1->svfL.s1=s1Llane[1]; md1->svfL.s2=s2Llane[1]; md1->svfR.s1=s1Rlane[1]; md1->svfR.s2=s2Rlane[1]; md1->driveL=driveL1; md1->driveR=driveR1; float y1L=jb_kill_denorm(yLlane[1]); float y1R=jb_kill_denorm(yRlane[1]); md1->y_pre_lastL=y1L; md1->y_pre_lastR=y1R; b1OutL=jb_kill_denorm(b1OutL + (y1L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y1R*e)*bank_gain1); }
-                    if(am2){ md2->svfL.s1=s1Llane[2]; md2->svfL.s2=s2Llane[2]; md2->svfR.s1=s1Rlane[2]; md2->svfR.s2=s2Rlane[2]; md2->driveL=driveL2; md2->driveR=driveR2; float y2L=jb_kill_denorm(yLlane[2]); float y2R=jb_kill_denorm(yRlane[2]); md2->y_pre_lastL=y2L; md2->y_pre_lastR=y2R; b1OutL=jb_kill_denorm(b1OutL + (y2L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y2R*e)*bank_gain1); }
-                    if(am3){ md3->svfL.s1=s1Llane[3]; md3->svfL.s2=s2Llane[3]; md3->svfR.s1=s1Rlane[3]; md3->svfR.s2=s2Rlane[3]; md3->driveL=driveL3; md3->driveR=driveR3; float y3L=jb_kill_denorm(yLlane[3]); float y3R=jb_kill_denorm(yRlane[3]); md3->y_pre_lastL=y3L; md3->y_pre_lastR=y3R; b1OutL=jb_kill_denorm(b1OutL + (y3L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y3R*e)*bank_gain1); }
-                }
-                // scalar tail
-                for(; m < x->n_modes; m++){ 
-                
-                    if(!base1[m].active) continue;
-                    jb_mode_rt_t *md=&v->m[m];
-                    float gL = md->gain_nowL;
-                    float gR = md->gain_nowR;
-                    if ((fabsf(gL) + fabsf(gR)) <= 0.f || md->nyq_kill) continue;
-
-                    float driveL = md->driveL;
-                    float driveR = md->driveR;
-                    const float att_a = 1.f;
-                    float excL = exL * gL;
-                    float excR = exR * gR;
-
-                    driveL += att_a*(excL - driveL);
-	                    float y_rawL = jb_svf_bp_tick(&md->svfL, driveL);
-	                    y_rawL = jb_kill_denorm(y_rawL);
-
-                    driveR += att_a*(excR - driveR);
-	                    float y_rawR = jb_svf_bp_tick(&md->svfR, driveR);
-	                    y_rawR = jb_kill_denorm(y_rawR);
-
-                    md->driveL = driveL;
-                    md->driveR = driveR;
-	                    md->y_pre_lastL = y_rawL;
-	                    md->y_pre_lastR = y_rawR;
-
-	                    // SUM into bank-1 voice output (no pan)
-	                    float e1 = v->rel_env;
-	                    b1OutL = jb_kill_denorm(b1OutL + (y_rawL * e1) * bank_gain1);
-	                    b1OutR = jb_kill_denorm(b1OutR + (y_rawR * e1) * bank_gain1);
-                }
-                #else
-                for(int m=0;m<x->n_modes;m++){ 
-                
-                    if(!base1[m].active) continue;
-                    jb_mode_rt_t *md=&v->m[m];
-                    float gL = md->gain_nowL;
-                    float gR = md->gain_nowR;
-                    if ((fabsf(gL) + fabsf(gR)) <= 0.f || md->nyq_kill) continue;
-
-                    float driveL = md->driveL;
-                    float driveR = md->driveR;
-                    const float att_a = 1.f;
-                    float excL = exL * gL;
-                    float excR = exR * gR;
-
-                    driveL += att_a*(excL - driveL);
-	                    float y_rawL = jb_svf_bp_tick(&md->svfL, driveL);
-	                    y_rawL = jb_kill_denorm(y_rawL);
-
-                    driveR += att_a*(excR - driveR);
-	                    float y_rawR = jb_svf_bp_tick(&md->svfR, driveR);
-	                    y_rawR = jb_kill_denorm(y_rawR);
-
-                    md->driveL = driveL;
-                    md->driveR = driveR;
-	                    md->y_pre_lastL = y_rawL;
-	                    md->y_pre_lastR = y_rawR;
-
-	                    // SUM into bank-1 voice output (no pan)
-	                    float e1 = v->rel_env;
-	                    b1OutL = jb_kill_denorm(b1OutL + (y_rawL * e1) * bank_gain1);
-	                    b1OutR = jb_kill_denorm(b1OutR + (y_rawR * e1) * bank_gain1);
-                }
-                #endif
-            }
-            // Final per-voice sum (pre-space)
-            float vOutL = b1OutL + b2OutL;
-            float vOutR = b1OutR + b2OutR;
-
-            // --- voice output + safety watchdog ---
-            // If anything goes unstable (NaN/INF or runaway magnitude), hard-reset this voice.
-            if (!jb_isfinitef(vOutL) || !jb_isfinitef(vOutR) ||
-                fabsf(vOutL) > JB_PANIC_ABS_MAX || fabsf(vOutR) > JB_PANIC_ABS_MAX){
-                jb_voice_panic_reset(x, v);
-                vOutL = 0.f;
-                vOutR = 0.f;
-            }
-            // Update feedback sources for next sample (per bank, per voice)
-
-            // NaN/Inf guard (Bela safety)
-            if(!jb_isfinitef(vOutL) || !jb_isfinitef(vOutR)){
-                jb_voice_force_idle(v);
-                vOutL = 0.f;
-                vOutR = 0.f;
-            }
-
-            outL[i] += vOutL;
-            outR[i] += vOutR;
-
-            // Energy meter (used for stealing + tail cleanup). Uses abs-sum with 50ms smoothing.
-            {
-                float e_in = fabsf(vOutL) + fabsf(vOutR);
-                if (!jb_isfinitef(e_in)) e_in = 0.f;
-                v->energy = jb_kill_denorm(a_energy * v->energy + one_minus_a_energy * e_in);
-            }
-
-            // Release handling:
-            // - Attack voices (0..max_voices-1): use the classic release_amt fade.
-            // - Tail voices (max_voices..total_voices-1): NO extra fade (natural decay); freed when silent.
-            if (v->state == V_RELEASE){
-                const int is_tail = (vix >= x->max_voices);
-
-                // Apply release envelope to ALL voices (including tails), so the RELEASE control
-                // behaves consistently even during fast re-triggers that migrate voices into the tail pool.
-                float a_rel1 = a_rel1_block;
-                float a_rel2 = a_rel2_block;
-
-                v->rel_env  *= a_rel1;
-                v->rel_env2 *= a_rel2;
-                if (v->rel_env  < 1e-5f) v->rel_env  = 0.f;
-                if (v->rel_env2 < 1e-5f) v->rel_env2 = 0.f;
-
-                // Fast path: if envelopes hit zero, free immediately.
-                if (v->rel_env == 0.f && v->rel_env2 == 0.f){
-                    v->state = V_IDLE;
-                    if (is_tail){
-                        v->energy = 0.f;
-                        for (int b = 0; b < 2; ++b){
-                        }
-                    }
-                } else if (is_tail){
-                    // Tail cleanup: once the exciter envelope is idle and output energy is gone, free the tail voice.
-                    if (v->exc.env.stage == JB_EXC_ENV_IDLE && v->energy < tail_energy_thresh){
-                        v->state = V_IDLE;
-                        v->energy = 0.f;
-                        for (int b = 0; b < 2; ++b){
-                        }
-                    }
-                }
-
-
-            } else if (v->state == V_HELD) {
-                v->rel_env  = 1.f;
-                v->rel_env2 = 1.f;
-            } else {
-                v->rel_env  = 0.f;
-                v->rel_env2 = 0.f;
-            }
-
-        } // end samples
-    } // end voices
-
-
-    // Final safety: never output NaN/INF (can destabilize audio drivers / cause "freezing").
     for (int i = 0; i < n; ++i){
+            float exL, exR;
+            jb_exc_process_sample(&v->exc, exc_w_imp, exc_w_noise, &exL, &exR);
         if (!jb_isfinitef(outL[i])) outL[i] = 0.f;
         if (!jb_isfinitef(outR[i])) outR[i] = 0.f;
     }
@@ -3340,6 +3116,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         const float dry_w = 1.f - mix;
 
         for (int i = 0; i < n; ++i){
+            float exL, exR;
+            jb_exc_process_sample(&v->exc, exc_w_imp, exc_w_noise, &exL, &exR);
             const float dryL = outL[i];
             const float dryR = outR[i];
 
@@ -4169,6 +3947,8 @@ static int jb_write_wav_f32_stereo(const char *path, const float *L, const float
     fwrite(&data_bytes, 4, 1, fp);
 
     for (int i = 0; i < n; ++i){
+            float exL, exR;
+            jb_exc_process_sample(&v->exc, exc_w_imp, exc_w_noise, &exL, &exR);
         fwrite(&L[i], sizeof(float), 1, fp);
         fwrite(&R[i], sizeof(float), 1, fp);
     }
