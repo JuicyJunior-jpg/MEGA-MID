@@ -15,6 +15,7 @@ ifeq ($(UNAME_S),Darwin)
     $(wildcard /usr/local/Caskroom/pd/*/Pd*.app) \
     $(wildcard /opt/homebrew/Caskroom/pd/*/Pd*.app))
   PDINC ?= $(PD_APP)/Contents/Resources/src
+  CPPFLAGS += -I"$(PDINC)"
   ifeq ($(PD_APP),)
     $(warning Could not find Pd*.app automatically. Set PDINC=/path/to/Pd.app/Contents/Resources/src)
   endif
@@ -23,12 +24,13 @@ ifeq ($(UNAME_S),Darwin)
   # Build a UNIVERSAL (arm64 + x86_64) binary
   MAC_MIN  ?= 10.13
   ARCHS    ?= -arch arm64 -arch x86_64
-  CFLAGS  ?= -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type -I"$(PDINC)" $(ARCHS) -mmacosx-version-min=$(MAC_MIN)
+  CFLAGS  ?= -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type $(USER_CFLAGS) $(ARCHS) -mmacosx-version-min=$(MAC_MIN)
   LDFLAGS ?= -bundle -undefined dynamic_lookup $(ARCHS) -mmacosx-version-min=$(MAC_MIN)
   LDLIBS  ?=
 else ifeq ($(UNAME_S),Linux)
   # Bela / BeagleBone Black target: ARMv7 32-bit hard-float + NEON
   PDINC ?= /usr/include/pd
+  CPPFLAGS += -I"$(PDINC)"
   EXT      := pd_linux
   PLAT     := bela_armv7
   ARCH    := $(shell uname -m)
@@ -39,15 +41,16 @@ else ifeq ($(UNAME_S),Linux)
   else
     CC ?= arm-linux-gnueabihf-gcc
   endif
-  CFLAGS  ?= -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type -I"$(PDINC)" \
+  CFLAGS  ?= -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type $(USER_CFLAGS) \
             -march=armv7-a -mtune=cortex-a8 -mfpu=neon -mfloat-abi=hard -DJB_ENABLE_NEON=1
   LDFLAGS ?= -shared -fPIC -Wl,-export-dynamic
   LDLIBS  ?= -lm
 else
   PDINC ?= C:/Pd/src
+  CPPFLAGS += -I"$(PDINC)"
   EXT      := pd_win
   PLAT     := windows
-  CFLAGS  ?= -O3 -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type -I"$(PDINC)"
+  CFLAGS  ?= -O3 -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type $(USER_CFLAGS)
   LDFLAGS ?= -shared
   LDLIBS  ?=
 endif
@@ -62,7 +65,7 @@ dirs:
 	@mkdir -p "$(BUILD_DIR)"
 
 $(OUT): $(BANK_SRC) | dirs
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $< $(LDFLAGS) $(LDLIBS)
 
 fatcheck:
 	@if [ "$(UNAME_S)" = "Darwin" ]; then file $(OUT); fi
