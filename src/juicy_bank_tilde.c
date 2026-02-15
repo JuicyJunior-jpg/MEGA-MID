@@ -89,38 +89,9 @@
 // ---------- utils ----------
 static inline float jb_clamp(float x, float lo, float hi){ return (x<lo)?lo:((x>hi)?hi:x); }
 
-}
 
 // 3rd-order (4-point) Lagrange interpolation for fractional delay reads.
 // w is the write index pointing to the NEXT sample to be written.
-static inline float jb_delay_read_lagrange(const float *buf, int w, float delay_samps){
-    // Clamp delay to safe range (needs 2 samples lookahead)
-    if (delay_samps < 2.f) delay_samps = 2.f;
-
-    float rp = (float)w - delay_samps;
-    int i0 = (int)floorf(rp);
-    float frac = rp - (float)i0; // 0..1
-
-
-    // Lagrange basis polynomials (order 3)
-    const float c0 = -0.16666667f * frac * (frac - 1.f) * (frac - 2.f);
-    const float c1 =  0.5f        * (frac + 1.f) * (frac - 1.f) * (frac - 2.f);
-    const float c2 = -0.5f        * (frac + 1.f) * frac * (frac - 2.f);
-    const float c3 =  0.16666667f * (frac + 1.f) * frac * (frac - 1.f);
-
-    return y0*c0 + y1*c1 + y2*c2 + y3*c3;
-}
-
-// 3rd-order (4-point) Lagrange interpolation read with PRECOMPUTED coefficients.
-// This avoids floorf() + coefficient recompute in the hot per-sample loop.
-// intDelay = floor(delay_samps), frac = delay_samps - intDelay (0..1).
-// If frac==0, set frac_is_zero=1 and pass i0_offset=intDelay, else i0_offset=intDelay+1.
-static inline float jb_delay_read_lagrange_pre(const float *buf, int w, int i0_offset,
-                                              float c0, float c1, float c2, float c3){
-    const int i0 = (w - i0_offset);
-    return y0*c0 + y1*c1 + y2*c2 + y3*c3;
-}
-
 // 1st-order allpass (phase dispersion)
 static inline float jb_allpass1_run(float x, float a, float *x1, float *y1){
     const float y = (a * x) + (*x1) - (a * (*y1));
@@ -266,9 +237,6 @@ static inline float jb_rng_bi(jb_rng_t *r){ return 2.f * jb_rng_uni(r) - 1.f; }
 #define JB_PANIC_ABS_MAX 1.0e6f
 #endif
 
-static inline int jb_isfinitef(float x){
-    return isfinite(x);
-}
 static inline float jb_kill_denorm(float x){
     return (fabsf(x) < 1e-20f) ? 0.f : x;
 }
@@ -2452,10 +2420,6 @@ static void jb_update_voice_gains2(const t_juicy_bank_tilde *x, jb_voice_t *v){
     jb_update_voice_gains_bank(x, v, 1);
 }
 static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb_rng_t *rng){
-    // Feedback loop state (per bank)
-    for (int b = 0; b < 2; ++b){
-        }
-    }
     v->rel_env  = 1.f;
     v->rel_env2 = 1.f;
     v->energy = 0.f;
