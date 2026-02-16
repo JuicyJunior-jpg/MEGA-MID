@@ -3334,8 +3334,17 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 #endif
             }
             // Final per-voice sum (pre-space)
-            float vOutL = b1OutL + b2OutL;
-            float vOutR = b1OutR + b2OutR;
+                // apply per-bank release envelopes then accumulate into output buffers
+                b1OutL *= v->rel_env;
+                b1OutR *= v->rel_env;
+                b2OutL *= v->rel_env2;
+                b2OutR *= v->rel_env2;
+
+                const float vOutL = b1OutL + b2OutL;
+                const float vOutR = b1OutR + b2OutR;
+
+                outL[i] += vOutL;
+                outR[i] += vOutR;
 
             // --- voice output + safety watchdog ---
             // If anything goes unstable (NaN/INF or runaway magnitude), hard-reset this voice.
@@ -4705,7 +4714,9 @@ x->excite_pos2    = x->excite_pos;
     x->in_exc_release       = floatinlet_new(&x->x_obj, &x->exc_release_ms);
     x->in_exc_release_curve = floatinlet_new(&x->x_obj, &x->exc_release_curve);
 
-    x->in_exc_density       = floatinlet_new(&x->x_obj, &x->exc_density);
+    // feedback-adjacent parameter removed:
+    // "pressure" (exc_density) inlet used to drive feedback AGC target.
+    x->in_exc_density       = NULL;
     x->in_exc_imp_shape    = floatinlet_new(&x->x_obj, &x->exc_imp_shape);
     x->in_exc_shape         = floatinlet_new(&x->x_obj, &x->exc_shape);
 
