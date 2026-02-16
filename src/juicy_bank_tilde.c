@@ -2417,84 +2417,77 @@ static void jb_update_voice_gains2(const t_juicy_bank_tilde *x, jb_voice_t *v){
     jb_update_voice_gains_bank(x, v, 1);
 }
 static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb_rng_t *rng){
-    // Feedback loop state (per bank)
-    for (int b = 0; b < 2; ++b){
-        }
-    }
+    (void)rng;
+
+    // Release envelopes (used for smooth note-off / voice stealing)
     v->rel_env  = 1.f;
     v->rel_env2 = 1.f;
+
+    // Optional energy meter (not used for stealing anymore, keep sane)
     v->energy = 0.f;
 
-    // Per-voice one-shot LFO runtime
+    // Per-voice one-shot LFO state
     for (int li = 0; li < JB_N_LFO; ++li){
-        v->lfo_phase_state[li] = 0.f;
-        v->lfo_val[li] = 0.f;
-        v->lfo_snh[li] = 0.f;
-        v->lfo_oneshot_done[li] = 0;
+        v->lfo_oneshot_prev01[li] = -1.f;
+        v->lfo_oneshot_hold01[li] = 0.f;
     }
 
-    // Internal exciter reset (note-on reset + voice-steal reset)
+    // Exciter runtime
     jb_exc_voice_reset_runtime(&v->exc);
 
-    // Velocity mapping overrides reset
+    // Velocity-mapping overrides
     for (int b = 0; b < 2; ++b){
-        v->velmap_pos[b] = -1.f;
-        v->velmap_pickup[b] = -1.f;
-        v->velmap_master_add[b] = 0.f;
-        v->velmap_brightness_add[b] = 0.f;
-        for (int d = 0; d < JB_N_DAMPERS; ++d){
-            v->velmap_bell_zeta_on[b][d] = 0;
-            v->velmap_bell_zeta[b][d] = 0.f;
+        for (int d = 0; d < JB_MAX_DAMPERS; ++d){
+            v->velmap_damp[b][d] = -1.f;
+            v->velmap_bell_zeta[b][d] = -1.f;
         }
     }
 
-    // BANK 1
-    for(int i=0;i<x->n_modes;i++){
-        jb_mode_rt_t *md=&v->m[i];
-        md->ratio_now = x->base[i].base_ratio;
-        md->decay_ms_now = x->base[i].base_decay_ms;
-        md->gain_nowL = x->base[i].base_gain; md->gain_nowR = x->base[i].base_gain;
-        md->t60_s = md->decay_ms_now*0.001f;
-        jb_svf_reset(&md->svfL);
-        jb_svf_reset(&md->svfR);
-        md->driveL=md->driveR=0.f;
-        md->y_pre_lastL=md->y_pre_lastR=0.f;
-        md->hit_gateL=md->hit_gateR=0; md->hit_coolL=md->hit_coolR=0;
-        md->md_hit_offsetL = 0.f; md->md_hit_offsetR = 0.f;
-        md->nyq_kill = 0;
-
-        v->disp_offset[i]=0.f; v->disp_target[i]=0.f;
-                (void)rng;
+    // Reset per-mode runtime state for both banks
+    for (int i = 0; i < x->n_modes; ++i){
+        v->m[i].svfL.s1 = v->m[i].svfL.s2 = 0.f;
+        v->m[i].svfR.s1 = v->m[i].svfR.s2 = 0.f;
+        v->m[i].y_pre_lastL = v->m[i].y_pre_lastR = 0.f;
+        v->m[i].disp_y1L = v->m[i].disp_y2L = 0.f;
+        v->m[i].disp_y1R = v->m[i].disp_y2R = 0.f;
     }
-
-    // BANK 2
-    for(int i=0;i<x->n_modes2;i++){
-        jb_mode_rt_t *md=&v->m2[i];
-        md->ratio_now = x->base2[i].base_ratio;
-        md->decay_ms_now = x->base2[i].base_decay_ms;
-        md->gain_nowL = x->base2[i].base_gain; md->gain_nowR = x->base2[i].base_gain;
-        md->t60_s = md->decay_ms_now*0.001f;
-        jb_svf_reset(&md->svfL);
-        jb_svf_reset(&md->svfR);
-        md->driveL=md->driveR=0.f;
-        md->y_pre_lastL=md->y_pre_lastR=0.f;
-        md->hit_gateL=md->hit_gateR=0; md->hit_coolL=md->hit_coolR=0;
-        md->md_hit_offsetL = 0.f; md->md_hit_offsetR = 0.f;
-        md->nyq_kill = 0;
-
-        v->disp_offset2[i]=0.f; v->disp_target2[i]=0.f;
-            }
+    for (int i = 0; i < x->n_modes2; ++i){
+        v->m2[i].svfL.s1 = v->m2[i].svfL.s2 = 0.f;
+        v->m2[i].svfR.s1 = v->m2[i].svfR.s2 = 0.f;
+        v->m2[i].y_pre_lastL = v->m2[i].y_pre_lastR = 0.f;
+        v->m2[i].disp_y1L = v->m2[i].disp_y2L = 0.f;
+        v->m2[i].disp_y1R = v->m2[i].disp_y2R = 0.f;
+    }
 }
+
 
 static int jb_find_voice_to_steal(t_juicy_bank_tilde *x){
-    int best=-1; float bestE=1e9f;
+    // Prefer an IDLE voice; otherwise steal the quietest RELEASE voice.
+    int best_idle = -1;
+    int best_rel  = -1;
+    float best_rel_env = 1e9f;
+
     for(int i=0;i<x->max_voices;i++){
-        if (x->v[i].state==V_IDLE) return i;
-        float e = x->v[i].energy;
-        if (e<bestE){ bestE=e; best=i; }
+        const jb_voice_t *v = &x->v[i];
+        if(v->state == V_IDLE){
+            best_idle = i;
+            break;
+        }
+        if(v->state == V_RELEASE){
+            const float e = (v->rel_env < v->rel_env2 ? v->rel_env : v->rel_env2);
+            if(e < best_rel_env){
+                best_rel_env = e;
+                best_rel = i;
+            }
+        }
     }
-    return (best<0)?0:best;
+    if(best_idle >= 0) return best_idle;
+    if(best_rel  >= 0) return best_rel;
+
+    // Worst case: steal voice 0 (all voices held)
+    return 0;
 }
+
 
 // ---------- INTERNAL EXCITER (Fusion STEP 2) — note triggers ----------
 
@@ -2895,29 +2888,23 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 #endif
 
     /* ------------------ EARLY-OUT (CPU) ------------------
-       If there are no active voices AND feedback pressure is 0,
-       we can zero the outputs and return immediately.
-       This is a big win on Bela when idle.
-    ------------------------------------------------------- */
-    const float pressure = jb_clamp(x->exc_density, 0.f, 1.f); // 0 => feedback disabled by default
+   If there are no active voices, we can zero the outputs and return immediately.
+   This is a big win on Bela when idle.
+------------------------------------------------------- */
     int any_active = 0;
-    if(pressure > 1e-6f){
-        any_active = 1; // feedback path could be active
-    } else {
-        for(int v=0; v<x->max_voices; ++v){
-            const jb_voice_t *V = &x->v[v];
-            if(V->state != V_IDLE || V->rel_env > 1e-6f || V->rel_env2 > 1e-6f){
-                any_active = 1;
-                break;
-            }
+    for(int v=0; v<x->max_voices; ++v){
+        const jb_voice_t *V = &x->v[v];
+        if(V->state != V_IDLE || V->rel_env > 1e-6f || V->rel_env2 > 1e-6f){
+            any_active = 1;
+            break;
         }
     }
     if(!any_active){
         for(int i=0;i<n;i++){ outL[i]=0; outR[i]=0; }
-        return (w+5);
+        return (w + 5);
     }
 
-    // clear outputs
+// clear outputs
     for(int i=0;i<n;i++){ outL[i]=0; outR[i]=0; }
 
     // update LFOs once per block (for modulation matrix sources)
@@ -3013,6 +3000,15 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         if (master_mod2 >= 0.f) bank_gain2 = master_base2 + master_mod2 * (1.f - master_base2);
         else                    bank_gain2 = master_base2 + master_mod2 * master_base2;
 
+
+    // Release time (per bank): map 0..1 -> ~5ms..2000ms and convert to per-sample exp coefficient
+    const float rel_amt1 = jb_bank_release_amt(x, 0);
+    const float rel_amt2 = jb_bank_release_amt(x, 1);
+    const float rel_ms1  = 5.f + 1995.f * rel_amt1;
+    const float rel_ms2  = 5.f + 1995.f * rel_amt2;
+    const float a_rel1_sample = expf(-1.f / (rel_ms1 * 0.001f * x->sr));
+    const float a_rel2_sample = expf(-1.f / (rel_ms2 * 0.001f * x->sr));
+
         // LFO1/LFO2 -> master_* (bank output volume): additive + clamp (0..1)
         {
             const t_symbol *lfo2_tgt_local = x->lfo_target[1];
@@ -3044,36 +3040,16 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         const jb_mode_base_t *base1 = x->base;
         const jb_mode_base_t *base2 = x->base2;
 
-        // ---------- FEEDBACK precompute (per voice, per block) ----------
-
-        // Lagrange delay read coefficients (constant across the block)
-        if (frac < 1e-9f) frac = 0.f;
-        const int i0_offset = intDelay + (frac > 0.f ? 1 : 0);
-
-        const float c0 = -0.16666667f * frac * (frac - 1.f) * (frac - 2.f);
-        const float c1 =  0.5f        * (frac + 1.f) * (frac - 1.f) * (frac - 2.f);
-        const float c2 = -0.5f        * (frac + 1.f) * frac * (frac - 2.f);
-        const float c3 =  0.16666667f * (frac + 1.f) * frac * (frac - 1.f);
-
-        // Allpass dispersion coefficient (constant across the block)
-        fc *= (v->f0 > 1.f ? (v->f0 / 440.f) : 1.f);
-        fc = jb_clamp(fc, 50.f, 15000.f);
-        const float tanv = tanf((float)M_PI * fc / x->sr);
-
         for(int i=0;i<n;i++){
             // Per-bank voice outputs (pre-space)
             float b1OutL = 0.f, b1OutR = 0.f;
             float b2OutL = 0.f, b2OutR = 0.f;
-            // ---------- FEEDBACK (per-bank, per-voice) ----------
-            // Each bank ONLY feeds back its own output. Feedback is injected at the
-            // same junction as the exciter input, but it does NOT pass through the
-            // exciter ADSR/noise path.
-            // Prism-style feedback shaping: keytracked fractional delay (Time) + 1st-order allpass dispersion (Phase)
-
-
-            // Feedback removed: excite both banks directly from the internal exciter.
+            // Exciter (feedback removed)
+            float ex0L = 0.f, ex0R = 0.f;
+            jb_exc_process_sample(x, v, &ex0L, &ex0R);
             float exL = ex0L;
             float exR = ex0R;
+
 
 // -------- BANK 2 --------
             if (bank_gain2 > 0.f && v->rel_env2 > 0.f){
@@ -3373,60 +3349,37 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 vOutL = 0.f;
                 vOutR = 0.f;
             }
-            // Update feedback sources for next sample (per bank, per voice)
+                        // Release / voice-steal envelopes (feedback system removed)
+            if (v->steal_countdown > 0){
+                // Hard voice-steal fade: force envelope to countdown ratio (linear)
+                float fade = (float)v->steal_countdown / (float)JB_STEAL_FADE_SAMPLES;
+                if (fade < 0.f) fade = 0.f;
+                v->rel_env  = fade;
+                v->rel_env2 = fade;
+                v->steal_countdown--;
 
-            outL[i] += vOutL;
-            outR[i] += vOutR;
-
-            // Energy meter (used for stealing + tail cleanup). Uses abs-sum with 50ms smoothing.
-            {
-                float e_in = fabsf(vOutL) + fabsf(vOutR);
-                if (!jb_isfinitef(e_in)) e_in = 0.f;
-                v->energy = jb_kill_denorm(a_energy * v->energy + one_minus_a_energy * e_in);
-            }
-
-            // Release handling:
-            // - Attack voices (0..max_voices-1): use the classic release_amt fade.
-            // - Tail voices (max_voices..total_voices-1): NO extra fade (natural decay); freed when silent.
-            if (v->state == V_RELEASE){
-                // If this release is a "steal fade" for a pending note, force a very fast fade.
-                float a_rel1 = a_rel1_block;
-                float a_rel2 = a_rel2_block;
-
-                if (v->pending_note && v->steal_countdown > 0){
-                    // ~-60dB in JB_STEAL_FADE_SAMPLES samples.
-                    const float a_steal = powf(0.001f, 1.f / (float)JB_STEAL_FADE_SAMPLES);
-                    a_rel1 = a_steal;
-                    a_rel2 = a_steal;
-                    v->steal_countdown--;
+                if (v->steal_countdown <= 0){
+                    v->rel_env = v->rel_env2 = 0.f;
+                    v->state = V_IDLE;
+                    v->active = 0;
                 }
+            } else if (v->state == V_RELEASE){
+                v->rel_env  *= a_rel1_sample;
+                v->rel_env2 *= a_rel2_sample;
 
-                v->rel_env  *= a_rel1;
-                v->rel_env2 *= a_rel2;
-                if (v->rel_env  < 1e-5f) v->rel_env  = 0.f;
-                if (v->rel_env2 < 1e-5f) v->rel_env2 = 0.f;
+                if (v->rel_env < 1e-6f)  v->rel_env  = 0.f;
+                if (v->rel_env2 < 1e-6f) v->rel_env2 = 0.f;
 
-                // If we finished the steal-fade, start the pending note ASAP.
-                if (v->pending_note && v->steal_countdown <= 0){
-                    jb_start_note_on_voice(x, v, v->pending_f0, v->pending_vel);
-                    // continue with HELD processing in this same sample
-                } else {
-                    // Normal release: if both banks are silent, free the voice.
-                    if (v->rel_env == 0.f && v->rel_env2 == 0.f){
-                        v->state = V_IDLE;
-                        v->energy = 0.f;
-                        continue;
-                    }
+                if (v->rel_env <= 0.f && v->rel_env2 <= 0.f){
+                    v->state = V_IDLE;
+                    v->active = 0;
                 }
-            } else if (v->state == V_HELD) {
+            } else {
                 v->rel_env  = 1.f;
                 v->rel_env2 = 1.f;
-            } else {
-                v->rel_env  = 0.f;
-                v->rel_env2 = 0.f;
             }
 
-        } // end samples
+} // end samples
     } // end voices
 
 
