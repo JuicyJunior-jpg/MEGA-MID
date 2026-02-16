@@ -1,5 +1,5 @@
 // juicy_bank~ — modal resonator bank (V5.0)
-// 5-voice poly + 2 tail voices, true stereo banks, Behavior + Body + Individual inlets.
+// 6-voice poly (no tail-voice logic), true stereo banks, Behavior + Body + Individual inlets.
 // NEW (V5.0):
 //   • **Spacing** inlet (after dispersion, before anisotropy): nudges each mode toward the *next* harmonic
 //     ratio (ceil or +1 if already integer). 0 = no shift, 1 = fully at next ratio.
@@ -68,7 +68,6 @@
 #define JB_MAX_MODES    32
 #define JB_MAX_VOICES    6
 #define JB_ATTACK_VOICES 6
-#define JB_TAIL_VOICES   0
 #define JB_N_MODSRC 4
 #define JB_N_MODTGT    15
 #define JB_N_LFO       2
@@ -909,7 +908,7 @@ float density_amt; jb_density_mode density_mode;
 
     // voices
     int   max_voices;
-    int   total_voices; // attack+tail voices actually processed
+    int   total_voices; // voices actually processed
     jb_voice_t v[JB_MAX_VOICES];
 
     // current edit index for Individual setters
@@ -2607,7 +2606,7 @@ static void jb_note_on(t_juicy_bank_tilde *x, float f0, float vel){
     vel = jb_exc_midi_to_vel01(vel);
 
     // If this voice is currently active, do a very short fade-out before restarting it
-    // to avoid hard discontinuities (no "tail voices" anymore).
+    // to avoid hard discontinuities.
     if (v->state != V_IDLE){
         v->pending_note = 1;
         v->pending_f0   = f0;
@@ -2783,7 +2782,7 @@ static void jb_apply_velocity_mapping(t_juicy_bank_tilde *x, jb_voice_t *v){
 
 static void jb_note_on_voice(t_juicy_bank_tilde *x, int vix1, float f0, float vel){
     // This path is used by [note_poly]/[poly]-style voice addressing.
-    // We still want tail behavior here: stealing a busy attack voice migrates it into the tail pool.
+    // We still want smooth behavior here: stealing a busy voice fades it out briefly before restarting.
     if (vix1 < 1) vix1 = 1;
     if (vix1 > x->max_voices) vix1 = x->max_voices;
     int idx = vix1 - 1;
@@ -3119,7 +3118,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     if(am2){ md2->svfL.s1=s1Llane[2]; md2->svfL.s2=s2Llane[2]; md2->svfR.s1=s1Rlane[2]; md2->svfR.s2=s2Rlane[2]; md2->driveL=driveL2; md2->driveR=driveR2; float y2L=jb_kill_denorm(yLlane[2]); float y2R=jb_kill_denorm(yRlane[2]); md2->y_pre_lastL=y2L; md2->y_pre_lastR=y2R; b2OutL=jb_kill_denorm(b2OutL + (y2L*e)*bank_gain2); b2OutR=jb_kill_denorm(b2OutR + (y2R*e)*bank_gain2); }
                     if(am3){ md3->svfL.s1=s1Llane[3]; md3->svfL.s2=s2Llane[3]; md3->svfR.s1=s1Rlane[3]; md3->svfR.s2=s2Rlane[3]; md3->driveL=driveL3; md3->driveR=driveR3; float y3L=jb_kill_denorm(yLlane[3]); float y3R=jb_kill_denorm(yRlane[3]); md3->y_pre_lastL=y3L; md3->y_pre_lastR=y3R; b2OutL=jb_kill_denorm(b2OutL + (y3L*e)*bank_gain2); b2OutR=jb_kill_denorm(b2OutR + (y3R*e)*bank_gain2); }
                 }
-                // scalar tail
+                // scalar smoothing
                 for(; m < x->n_modes2; m++){ 
                 
                     if(!base2[m].active) continue;
@@ -3265,7 +3264,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     if(am2){ md2->svfL.s1=s1Llane[2]; md2->svfL.s2=s2Llane[2]; md2->svfR.s1=s1Rlane[2]; md2->svfR.s2=s2Rlane[2]; md2->driveL=driveL2; md2->driveR=driveR2; float y2L=jb_kill_denorm(yLlane[2]); float y2R=jb_kill_denorm(yRlane[2]); md2->y_pre_lastL=y2L; md2->y_pre_lastR=y2R; b1OutL=jb_kill_denorm(b1OutL + (y2L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y2R*e)*bank_gain1); }
                     if(am3){ md3->svfL.s1=s1Llane[3]; md3->svfL.s2=s2Llane[3]; md3->svfR.s1=s1Rlane[3]; md3->svfR.s2=s2Rlane[3]; md3->driveL=driveL3; md3->driveR=driveR3; float y3L=jb_kill_denorm(yLlane[3]); float y3R=jb_kill_denorm(yRlane[3]); md3->y_pre_lastL=y3L; md3->y_pre_lastR=y3R; b1OutL=jb_kill_denorm(b1OutL + (y3L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y3R*e)*bank_gain1); }
                 }
-                // scalar tail
+                // scalar smoothing
                 for(; m < x->n_modes; m++){ 
                 
                     if(!base1[m].active) continue;
@@ -4154,7 +4153,7 @@ static void juicy_bank_tilde_note(t_juicy_bank_tilde *x, t_floatarg f0, t_floata
 static void juicy_bank_tilde_voices(t_juicy_bank_tilde *x, t_floatarg nf){
     (void)nf; x->max_voices = JB_MAX_VOICES;
     x->total_voices = JB_MAX_VOICES;
-// fixed playable/tail split
+// fixed playable split
 }
 
 static void juicy_bank_tilde_note_midi(t_juicy_bank_tilde *x, t_floatarg midi, t_floatarg vel){
@@ -4715,8 +4714,8 @@ x->excite_pos2    = x->excite_pos;
     x->in_exc_release_curve = floatinlet_new(&x->x_obj, &x->exc_release_curve);
 
     // feedback-adjacent parameter removed:
-    // "pressure" (exc_density) inlet used to drive feedback AGC target.
-    x->in_exc_density       = NULL;
+    // "exc_density" (exc_density) inlet used to drive feedback AGC target.
+    x->in_exc_density       = floatinlet_new(&x->x_obj, &x->exc_density);
     x->in_exc_imp_shape    = floatinlet_new(&x->x_obj, &x->exc_imp_shape);
     x->in_exc_shape         = floatinlet_new(&x->x_obj, &x->exc_shape);
 
