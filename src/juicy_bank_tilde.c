@@ -2902,7 +2902,17 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     for(int i=0;i<n;i++){ outL[i]=0; outR[i]=0; }
 
     // update LFOs once per block (for modulation matrix sources)
-    jb_update_lfos_block(x, n);    // Cached symbols (initialized in setup()); no gensym() in the audio thread.
+    jb_update_lfos_block(x, n);    
+    // ensure per-voice coefficients/gains are up to date (otherwise modes stay at 0 and you get silence)
+    for (int vi = 0; vi < x->max_voices; ++vi){
+        jb_voice_t *v = &x->v[vi];
+        if (v->state != V_IDLE){
+            jb_update_voice_coeffs(x, v);
+            jb_update_voice_gains(x, v);
+        }
+    }
+
+// Cached symbols (initialized in setup()); no gensym() in the audio thread.
     const t_symbol *sym_master_1     = jb_sym_master_1;
     const t_symbol *sym_master_2     = jb_sym_master_2;
     const t_symbol *sym_lfo2_amount  = jb_sym_lfo2_amount;
