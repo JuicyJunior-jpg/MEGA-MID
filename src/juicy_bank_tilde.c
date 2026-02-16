@@ -2428,17 +2428,17 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
 
     // Per-voice one-shot LFO state
     for (int li = 0; li < JB_N_LFO; ++li){
-        v->lfo_oneshot_prev01[li] = -1.f;
-        v->lfo_oneshot_hold01[li] = 0.f;
+        v->lfo_phase_state[li] = 0.f;
+        v->lfo_val[li]         = 0.f;
+        v->lfo_snh[li]         = 0.f;
+        v->lfo_oneshot_done[li]= 0;
     }
-
     // Exciter runtime
     jb_exc_voice_reset_runtime(&v->exc);
 
     // Velocity-mapping overrides
     for (int b = 0; b < 2; ++b){
-        for (int d = 0; d < JB_MAX_DAMPERS; ++d){
-            v->velmap_damp[b][d] = -1.f;
+        for (int d = 0; d < JB_N_DAMPERS; ++d){
             v->velmap_bell_zeta[b][d] = -1.f;
         }
     }
@@ -2448,15 +2448,11 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
         v->m[i].svfL.s1 = v->m[i].svfL.s2 = 0.f;
         v->m[i].svfR.s1 = v->m[i].svfR.s2 = 0.f;
         v->m[i].y_pre_lastL = v->m[i].y_pre_lastR = 0.f;
-        v->m[i].disp_y1L = v->m[i].disp_y2L = 0.f;
-        v->m[i].disp_y1R = v->m[i].disp_y2R = 0.f;
     }
     for (int i = 0; i < x->n_modes2; ++i){
         v->m2[i].svfL.s1 = v->m2[i].svfL.s2 = 0.f;
         v->m2[i].svfR.s1 = v->m2[i].svfR.s2 = 0.f;
         v->m2[i].y_pre_lastL = v->m2[i].y_pre_lastR = 0.f;
-        v->m2[i].disp_y1L = v->m2[i].disp_y2L = 0.f;
-        v->m2[i].disp_y1R = v->m2[i].disp_y2R = 0.f;
     }
 }
 
@@ -3046,7 +3042,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             float b2OutL = 0.f, b2OutR = 0.f;
             // Exciter (feedback removed)
             float ex0L = 0.f, ex0R = 0.f;
-            jb_exc_process_sample(x, v, &ex0L, &ex0R);
+            jb_exc_process_sample(x, v, exc_w_imp, exc_w_noise, &ex0L, &ex0R);
             float exL = ex0L;
             float exR = ex0R;
 
@@ -3361,7 +3357,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 if (v->steal_countdown <= 0){
                     v->rel_env = v->rel_env2 = 0.f;
                     v->state = V_IDLE;
-                    v->active = 0;
+                    v->state = V_IDLE;
                 }
             } else if (v->state == V_RELEASE){
                 v->rel_env  *= a_rel1_sample;
@@ -3372,7 +3368,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
                 if (v->rel_env <= 0.f && v->rel_env2 <= 0.f){
                     v->state = V_IDLE;
-                    v->active = 0;
+                    v->state = V_IDLE;
                 }
             } else {
                 v->rel_env  = 1.f;
