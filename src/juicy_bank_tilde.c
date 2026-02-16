@@ -1064,7 +1064,6 @@ char preset_edit_name[JB_PRESET_NAME_MAX + 1];
     t_inlet *in_exc_sustain;
     t_inlet *in_exc_release;
     t_inlet *in_exc_release_curve;
-    t_inlet *in_exc_density;
     t_inlet *in_exc_imp_shape;
     t_inlet *in_exc_shape;
 
@@ -4378,7 +4377,6 @@ inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     if (x->in_exc_sustain) inlet_free(x->in_exc_sustain);
     if (x->in_exc_release) inlet_free(x->in_exc_release);
     if (x->in_exc_release_curve) inlet_free(x->in_exc_release_curve);
-    if (x->in_exc_density) inlet_free(x->in_exc_density);
     if (x->in_exc_imp_shape) inlet_free(x->in_exc_imp_shape);
     if (x->in_exc_shape) inlet_free(x->in_exc_shape);
 
@@ -4561,7 +4559,7 @@ x->excite_pos2    = x->excite_pos;
     x->exc_release_ms    = 400.f;
     x->exc_release_curve = 0.f;
 
-    x->exc_density    = 0.f;  // Pressure (AGC target 0..1 -> 0..0.98)
+    x->exc_density    = 1.f;  // Pressure (AGC target 0..1 -> 0..0.98)
     x->exc_imp_shape  = 0.5f;  // Impulse-only Shape (old shape logic)
     x->exc_shape      = 0.5f;  // Noise Color (slope EQ)
     // Feedback-loop AGC defaults (0..1 mapped to time constants in DSP)
@@ -4715,7 +4713,6 @@ x->excite_pos2    = x->excite_pos;
 
     // feedback-adjacent parameter removed:
     // "exc_density" (exc_density) inlet used to drive feedback AGC target.
-    x->in_exc_density       = floatinlet_new(&x->x_obj, &x->exc_density);
     x->in_exc_imp_shape    = floatinlet_new(&x->x_obj, &x->exc_imp_shape);
     x->in_exc_shape         = floatinlet_new(&x->x_obj, &x->exc_shape);
 
