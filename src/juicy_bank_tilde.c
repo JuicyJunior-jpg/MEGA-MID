@@ -86,8 +86,6 @@
 #define JB_SPACE_AP_MAX    700
 
 // Feedback delay line (per voice). Power-of-two ring buffer for fast wrap.
-#define JB_FB_DELAY_MAX  8192
-#define JB_FB_DELAY_MASK (JB_FB_DELAY_MAX - 1)
 
 
 
@@ -96,43 +94,10 @@ static inline float jb_clamp(float x, float lo, float hi){ return (x<lo)?lo:((x>
 
 // 3rd-order (4-point) Lagrange interpolation for fractional delay reads.
 // w is the write index pointing to the NEXT sample to be written.
-static inline float jb_delay_read_lagrange(const float *buf, int w, float delay_samps){
-    // Clamp delay to safe range (needs 2 samples lookahead)
-    if (delay_samps < 2.f) delay_samps = 2.f;
-    if (delay_samps > (float)(JB_FB_DELAY_MAX - 3)) delay_samps = (float)(JB_FB_DELAY_MAX - 3);
-
-    float rp = (float)w - delay_samps;
-    int i0 = (int)floorf(rp);
-    float frac = rp - (float)i0; // 0..1
-
-    const float y0 = buf[(i0 - 1) & JB_FB_DELAY_MASK];
-    const float y1 = buf[(i0 + 0) & JB_FB_DELAY_MASK];
-    const float y2 = buf[(i0 + 1) & JB_FB_DELAY_MASK];
-    const float y3 = buf[(i0 + 2) & JB_FB_DELAY_MASK];
-
-    // Lagrange basis polynomials (order 3)
-    const float c0 = -0.16666667f * frac * (frac - 1.f) * (frac - 2.f);
-    const float c1 =  0.5f        * (frac + 1.f) * (frac - 1.f) * (frac - 2.f);
-    const float c2 = -0.5f        * (frac + 1.f) * frac * (frac - 2.f);
-    const float c3 =  0.16666667f * (frac + 1.f) * frac * (frac - 1.f);
-
-    return y0*c0 + y1*c1 + y2*c2 + y3*c3;
-}
-
 // 3rd-order (4-point) Lagrange interpolation read with PRECOMPUTED coefficients.
 // This avoids floorf() + coefficient recompute in the hot per-sample loop.
 // intDelay = floor(delay_samps), frac = delay_samps - intDelay (0..1).
 // If frac==0, set frac_is_zero=1 and pass i0_offset=intDelay, else i0_offset=intDelay+1.
-static inline float jb_delay_read_lagrange_pre(const float *buf, int w, int i0_offset,
-                                              float c0, float c1, float c2, float c3){
-    const int i0 = (w - i0_offset);
-    const float y0 = buf[(i0 - 1) & JB_FB_DELAY_MASK];
-    const float y1 = buf[(i0 + 0) & JB_FB_DELAY_MASK];
-    const float y2 = buf[(i0 + 1) & JB_FB_DELAY_MASK];
-    const float y3 = buf[(i0 + 2) & JB_FB_DELAY_MASK];
-    return y0*c0 + y1*c1 + y2*c2 + y3*c3;
-}
-
 // 1st-order allpass (phase dispersion)
 static inline float jb_allpass1_run(float x, float a, float *x1, float *y1){
     const float y = (a * x) + (*x1) - (a * (*y1));
@@ -372,7 +337,6 @@ static inline float jb_hadd_f32x4(float32x4_t v){
 static const int jb_space_base_delay[JB_SPACE_NCOMB] = { 1117, 1373, 1481, 1607, 1103, 1361, 1471, 1597 };
 static const int jb_space_ap_delay[JB_SPACE_NAP]     = { 225, 556, 341, 441 }; // L:225,556 | R:341,441 (primes)
 
-// Feedback comb filter with 1-pole damping inside the feedback path.
 static inline float jb_space_comb_tick(float *buf, int maxlen, int *w, int delay,
                                        float in, float g, float damp, float *lp_state)
 {
@@ -819,18 +783,7 @@ typedef struct {
 
     // Feedback loop state (per voice, per bank, 1-sample delayed)
     // Each bank ONLY feeds back its own output.
-    float fb_prevL[2], fb_prevR[2];         // last bank output (pre-space), L/R
-    float fb_hp_x1L[2], fb_hp_y1L[2];       // 20Hz DC-blocker state (L)
-    float fb_hp_x1R[2], fb_hp_y1R[2];       // 20Hz DC-blocker state (R)
-    float fb_agc_gain[2];                   // AGC gain applied to feedback before reinjection
-    float fb_agc_env[2];                    // AGC level follower (mono abs)
-        float fb_amp_env[2];                   // feedback amplitude envelope (0..1), per bank
 // Feedback delay + dispersion (per voice, per bank)
-    int   fb_delay_w[2];                                    // ring write index
-    float fb_delay_bufL[2][JB_FB_DELAY_MAX];                // delay buffers (L)
-    float fb_delay_bufR[2][JB_FB_DELAY_MAX];                // delay buffers (R)
-    float fb_ap_x1L[2], fb_ap_y1L[2];                       // 1st-order allpass state (L)
-    float fb_ap_x1R[2], fb_ap_y1R[2];                       // 1st-order allpass state (R)
 
     // runtime per-mode — BANK 1/2
     jb_mode_rt_t m[JB_MAX_MODES];
@@ -969,7 +922,6 @@ float density_amt; jb_density_mode density_mode;
 
     // DC HP
     float hp_a, hpL_x1, hpL_y1, hpR_x1, hpR_y1;
-    float fb_hp_a; // 20Hz DC blocker inside Pressure feedback loop
 
     // SPACE parameters (0..1)
     float space_size;
@@ -1096,17 +1048,11 @@ char preset_edit_name[JB_PRESET_NAME_MAX + 1];
     // exc_shape: repurposed -> Noise Color (0..1; red..white..violet)
     float exc_shape;
     // Feedback loop extra shaping (Prism-style)
-    // fb_time: keytracked feedback delay (0..1 -> 0.5..2 periods)
-    float fb_time;
-    // fb_phase: allpass dispersion amount (0..1)
-    float fb_phase;
     // per-block computed (shared)
     float exc_noise_color_gL, exc_noise_color_gH, exc_noise_color_comp;
 
     // --- FEEDBACK AGC (per-bank, per-voice) ---
     // Attack/Release are 0..1 UI parameters mapped to time constants (seconds).
-    float fb_agc_attack;
-    float fb_agc_release;
 
     float noise_scale;   // factory trim (linear amp)
     float impulse_scale; // factory trim (linear amp)
@@ -1120,14 +1066,10 @@ char preset_edit_name[JB_PRESET_NAME_MAX + 1];
     t_inlet *in_exc_release;
     t_inlet *in_exc_release_curve;
     t_inlet *in_exc_density;
-    t_inlet *in_fb_time;
-    t_inlet *in_fb_phase;
     t_inlet *in_exc_imp_shape;
     t_inlet *in_exc_shape;
 
     // AGC inlets (placed after timbre/color, before LFO index)
-    t_inlet *in_fb_agc_attack;
-    t_inlet *in_fb_agc_release;
 
     // --- MOD SECTION inlets (targets/amounts; actual wiring added next step) ---
     t_inlet *in_lfo_index;
@@ -2477,18 +2419,6 @@ static void jb_update_voice_gains2(const t_juicy_bank_tilde *x, jb_voice_t *v){
 static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb_rng_t *rng){
     // Feedback loop state (per bank)
     for (int b = 0; b < 2; ++b){
-        v->fb_prevL[b] = v->fb_prevR[b] = 0.f;
-        v->fb_hp_x1L[b] = v->fb_hp_y1L[b] = 0.f;
-        v->fb_hp_x1R[b] = v->fb_hp_y1R[b] = 0.f;
-        v->fb_agc_gain[b] = 1.f;
-        v->fb_agc_env[b]  = 0.f;
-                v->fb_amp_env[b]  = 0.f;
-v->fb_delay_w[b] = 0;
-        v->fb_ap_x1L[b] = v->fb_ap_y1L[b] = 0.f;
-        v->fb_ap_x1R[b] = v->fb_ap_y1R[b] = 0.f;
-        for (int n = 0; n < JB_FB_DELAY_MAX; ++n){
-            v->fb_delay_bufL[b][n] = 0.f;
-            v->fb_delay_bufR[b][n] = 0.f;
         }
     }
     v->rel_env  = 1.f;
@@ -2579,11 +2509,6 @@ static void jb_voice_panic_reset(t_juicy_bank_tilde *x, jb_voice_t *v){
     v->energy = 0.f;
     // Feedback loop state (per bank)
     for (int b = 0; b < 2; ++b){
-        v->fb_prevL[b] = v->fb_prevR[b] = 0.f;
-        v->fb_hp_x1L[b] = v->fb_hp_y1L[b] = 0.f;
-        v->fb_hp_x1R[b] = v->fb_hp_y1R[b] = 0.f;
-        v->fb_agc_gain[b] = 1.f;
-        v->fb_agc_env[b]  = 0.f;
     }
 
     // Internal exciter reset
@@ -3056,75 +2981,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     float exc_t = 0.5f * (exc_f + 1.f);
     float exc_w_imp   = sinf(0.5f * (float)M_PI * exc_t);
     float exc_w_noise = cosf(0.5f * (float)M_PI * exc_t);
-    // Pressure (reuses former density inlet): feedback amount + safety limiter target
-    // pressure controls the *maximum reinjection gain* (not a loudness target).
-    // AGC now acts as a one-sided limiter (attenuates only) to prevent runaway.
-    /* pressure already computed above (early-out) */
-    const int   fb_enabled  = (pressure > 1e-6f);
-    const float fb_gain_cmd   = fb_enabled ? (0.95f * pressure * pressure) : 0.f;   // 0..0.95 (fine control at low end)
-    const float fb_env_target = 0.65f * pressure;              // 0..0.65 (abs level target for limiter)
-
-    // Feedback Time/Phase controls (clamped once per block)
-    const float fb_time_v  = jb_clamp(x->fb_time,  0.f, 1.f);
-    const float fb_phase_v = jb_clamp(x->fb_phase, 0.f, 1.f);
-
-    // Time scaling (0..1 -> 0.5..2.0) computed once per block
-    const float fb_time_scale = powf(2.f, (fb_time_v - 0.5f) * 2.f);
-
-    // Phase base mapping (log map 0..1 -> 15000..200 Hz) computed once per block.
-    // Per-voice keytracking is applied later.
-    const float fb_fc_base = 15000.f * powf((200.f / 15000.f), fb_phase_v);
-
-    // Feedback amplitude envelope (per block) — uses the existing fb_agc_attack/release UI knobs
-    // Attack:  0..1 -> 1ms..500ms  (fade-in on note-on)
-    // Release: 0..1 -> 5ms..4000ms (fade-out on note-off)
-    const float fb_amp_tauA = 0.001f + 0.499f * jb_clamp(x->fb_agc_attack,  0.f, 1.f);
-    const float fb_amp_tauR = 0.005f + 3.995f * jb_clamp(x->fb_agc_release, 0.f, 1.f);
-    const float a_fb_amp_attack  = expf(-1.0f / (x->sr * fb_amp_tauA));
-    const float a_fb_amp_release = expf(-1.0f / (x->sr * fb_amp_tauR));
-    const float one_minus_a_fb_amp_attack  = 1.f - a_fb_amp_attack;
-    const float one_minus_a_fb_amp_release = 1.f - a_fb_amp_release;
-
-    // Feedback limiter (AGC) smoothing coefficients (per block) — fixed "limiter-like" behavior
-    // Fast clamp-down, slower recovery. This is NOT a musical envelope.
-    const float fb_lim_tauA = 0.003f;  // 3ms
-    const float fb_lim_tauR = 0.150f;  // 150ms
-    const float a_fb_lim_attack  = expf(-1.0f / (x->sr * fb_lim_tauA));
-    const float a_fb_lim_release = expf(-1.0f / (x->sr * fb_lim_tauR));
-    const float one_minus_a_fb_lim_attack  = 1.f - a_fb_lim_attack;
-    const float one_minus_a_fb_lim_release = 1.f - a_fb_lim_release;
-
-    // Level detector (abs follower) for limiter: fixed 10ms time constant
-    const float a_fb_env = expf(-1.0f / (x->sr * 0.010f));
-    const float one_minus_a_fb_env = 1.f - a_fb_env;
-    // Energy meter (per voice) used for voice stealing and tail cleanup.
-    // 50ms time constant -> responsive but stable.
-    const float a_energy = expf(-1.0f / (x->sr * 0.050f));
-    const float one_minus_a_energy = 1.f - a_energy;
-    const float tail_energy_thresh = 1e-6f;
-
-    // Release envelope coefficients (per block): avoids expf() in the per-sample loop.
-    const float rel_tau1 = 0.02f + 4.98f * jb_clamp(x->release_amt,  0.f, 1.f);
-    const float rel_tau2 = 0.02f + 4.98f * jb_clamp(x->release_amt2, 0.f, 1.f);
-    const float a_rel1_block = expf(-1.0f / (x->sr * rel_tau1));
-    const float a_rel2_block = expf(-1.0f / (x->sr * rel_tau2));
-
-    // Per-block updates that don't change sample-phase
-    for(int vix=0; vix<x->total_voices; ++vix){
-        jb_voice_t *v = &x->v[vix];
-        if (v->state==V_IDLE) continue;
-        jb_update_lfos_oneshot_voice_block(x, v, n);
-        jb_project_behavior_into_voice(x, v); // keep behavior up-to-date
-        jb_update_voice_coeffs(x, v);
-        jb_update_voice_gains(x, v);
-        // bank 2 runtime prep (render/mix happens in STEP 2B-2)
-        jb_project_behavior_into_voice2(x, v);
-        jb_update_voice_coeffs2(x, v);
-        jb_update_voice_gains2(x, v);
-    }
-
-    // constants
-
     // Process per-voice, sample-major so feedback uses only a 2-sample delay (no block latency)
     for(int vix=0; vix<x->total_voices; ++vix){
         jb_voice_t *v = &x->v[vix];
@@ -3189,14 +3045,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         const jb_mode_base_t *base2 = x->base2;
 
         // ---------- FEEDBACK precompute (per voice, per block) ----------
-        // These depend only on global fb_time/fb_phase and this voice pitch, so we keep them out of the hot per-sample loop.
-        float fb_delay_samps = (v->f0 > 1.f ? (x->sr / v->f0) : (x->sr / 110.f)) * fb_time_scale;
-        if (fb_delay_samps < 4.f) fb_delay_samps = 4.f;
-        if (fb_delay_samps > (float)(JB_FB_DELAY_MAX - 4)) fb_delay_samps = (float)(JB_FB_DELAY_MAX - 4);
 
         // Lagrange delay read coefficients (constant across the block)
-        int intDelay = (int)fb_delay_samps;
-        float frac = fb_delay_samps - (float)intDelay; // 0..1
         if (frac < 1e-9f) frac = 0.f;
         const int i0_offset = intDelay + (frac > 0.f ? 1 : 0);
 
@@ -3206,11 +3056,9 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         const float c3 =  0.16666667f * (frac + 1.f) * frac * (frac - 1.f);
 
         // Allpass dispersion coefficient (constant across the block)
-        float fc = fb_fc_base;
         fc *= (v->f0 > 1.f ? (v->f0 / 440.f) : 1.f);
         fc = jb_clamp(fc, 50.f, 15000.f);
         const float tanv = tanf((float)M_PI * fc / x->sr);
-        const float fb_ap_a = (tanv - 1.f) / (tanv + 1.f);
 
         for(int i=0;i<n;i++){
             // Per-bank voice outputs (pre-space)
@@ -3222,127 +3070,12 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             // exciter ADSR/noise path.
             // Prism-style feedback shaping: keytracked fractional delay (Time) + 1st-order allpass dispersion (Phase)
 
-            float fb1L = 0.f, fb1R = 0.f;
-            float fb2L = 0.f, fb2R = 0.f;
-            if(0){ /* feedback disabled */
-            {
-                // Bank 1 (index 0)
-                const int b = 0;
-                float inL = jb_hp1_run_a(v->fb_prevL[b], x->fb_hp_a, &v->fb_hp_x1L[b], &v->fb_hp_y1L[b]);
-                float inR = jb_hp1_run_a(v->fb_prevR[b], x->fb_hp_a, &v->fb_hp_x1R[b], &v->fb_hp_y1R[b]);
-                inL = jb_softclip_thresh(inL, 0.75f);
-                inR = jb_softclip_thresh(inR, 0.75f);
 
-                // Delay (fractional) -> Allpass dispersion
-                int w = v->fb_delay_w[b];
-                v->fb_delay_bufL[b][w] = inL;
-                v->fb_delay_bufR[b][w] = inR;
-                w = (w + 1) & JB_FB_DELAY_MASK;
-                v->fb_delay_w[b] = w;
-
-                float dL = jb_delay_read_lagrange_pre(v->fb_delay_bufL[b], w, i0_offset, c0, c1, c2, c3);
-                float dR = jb_delay_read_lagrange_pre(v->fb_delay_bufR[b], w, i0_offset, c0, c1, c2, c3);
-                dL = jb_allpass1_run(dL, fb_ap_a, &v->fb_ap_x1L[b], &v->fb_ap_y1L[b]);
-                dR = jb_allpass1_run(dR, fb_ap_a, &v->fb_ap_x1R[b], &v->fb_ap_y1R[b]);
-
-                float lvl = 0.5f * (fabsf(dL) + fabsf(dR));
-                v->fb_agc_env[b] = jb_kill_denorm(a_fb_env * v->fb_agc_env[b] + one_minus_a_fb_env * lvl);
-
-                // One-sided limiter: only attenuate when feedback gets too loud.
-                float desired = 1.f;
-                if (fb_env_target > 1e-9f) {
-                    const float env = v->fb_agc_env[b];
-                    if (env > fb_env_target) desired = fb_env_target / (env + 1e-6f);
-                }
-                if (desired > 1.f) desired = 1.f;
-                if (desired < 0.f) desired = 0.f;
-
-                float g = v->fb_agc_gain[b];
-                if (desired < g) g = a_fb_lim_attack * g + one_minus_a_fb_lim_attack * desired;
-                else             g = a_fb_lim_release * g + one_minus_a_fb_lim_release * desired;
-                v->fb_agc_gain[b] = g;
-
-                // Feedback amplitude envelope (note-gated): fades reinjection in/out so feedback stops after note-off.
-                const float fb_amp_target = (v->state == V_HELD) ? 1.f : 0.f;
-                float fb_amp = v->fb_amp_env[b];
-                if (fb_amp_target < fb_amp) fb_amp = a_fb_amp_release * fb_amp + one_minus_a_fb_amp_release * fb_amp_target;
-                else                        fb_amp = a_fb_amp_attack  * fb_amp + one_minus_a_fb_amp_attack  * fb_amp_target;
-                v->fb_amp_env[b] = fb_amp;
-
-                const float fb_gain = fb_gain_cmd * fb_amp * g;
-                fb1L = dL * fb_gain;
-                fb1R = dR * fb_gain;
-
-// Final safety saturator (ceiling ~= 0.99)
-                if (fb1L > 0.99f) fb1L = 0.99f; else if (fb1L < -0.99f) fb1L = -0.99f;
-                if (fb1R > 0.99f) fb1R = 0.99f; else if (fb1R < -0.99f) fb1R = -0.99f;
-            }
-            {
-                // Bank 2 (index 1)
-                const int b = 1;
-                float inL = jb_hp1_run_a(v->fb_prevL[b], x->fb_hp_a, &v->fb_hp_x1L[b], &v->fb_hp_y1L[b]);
-                float inR = jb_hp1_run_a(v->fb_prevR[b], x->fb_hp_a, &v->fb_hp_x1R[b], &v->fb_hp_y1R[b]);
-                inL = jb_softclip_thresh(inL, 0.75f);
-                inR = jb_softclip_thresh(inR, 0.75f);
-
-                int w = v->fb_delay_w[b];
-                v->fb_delay_bufL[b][w] = inL;
-                v->fb_delay_bufR[b][w] = inR;
-                w = (w + 1) & JB_FB_DELAY_MASK;
-                v->fb_delay_w[b] = w;
-
-                float dL = jb_delay_read_lagrange_pre(v->fb_delay_bufL[b], w, i0_offset, c0, c1, c2, c3);
-                float dR = jb_delay_read_lagrange_pre(v->fb_delay_bufR[b], w, i0_offset, c0, c1, c2, c3);
-                dL = jb_allpass1_run(dL, fb_ap_a, &v->fb_ap_x1L[b], &v->fb_ap_y1L[b]);
-                dR = jb_allpass1_run(dR, fb_ap_a, &v->fb_ap_x1R[b], &v->fb_ap_y1R[b]);
-
-                float lvl = 0.5f * (fabsf(dL) + fabsf(dR));
-                v->fb_agc_env[b] = jb_kill_denorm(a_fb_env * v->fb_agc_env[b] + one_minus_a_fb_env * lvl);
-
-                float desired = 1.f;
-                if (fb_env_target > 1e-9f) {
-                    const float env = v->fb_agc_env[b];
-                    if (env > fb_env_target) desired = fb_env_target / (env + 1e-6f);
-                }
-                if (desired > 1.f) desired = 1.f;
-                if (desired < 0.f) desired = 0.f;
-
-                float g = v->fb_agc_gain[b];
-                if (desired < g) g = a_fb_lim_attack * g + one_minus_a_fb_lim_attack * desired;
-                else             g = a_fb_lim_release * g + one_minus_a_fb_lim_release * desired;
-                v->fb_agc_gain[b] = g;
-
-                // Feedback amplitude envelope (note-gated): fades reinjection in/out so feedback stops after note-off.
-                const float fb_amp_target = (v->state == V_HELD) ? 1.f : 0.f;
-                float fb_amp = v->fb_amp_env[b];
-                if (fb_amp_target < fb_amp) fb_amp = a_fb_amp_release * fb_amp + one_minus_a_fb_amp_release * fb_amp_target;
-                else                        fb_amp = a_fb_amp_attack  * fb_amp + one_minus_a_fb_amp_attack  * fb_amp_target;
-                v->fb_amp_env[b] = fb_amp;
-
-                const float fb_gain = fb_gain_cmd * fb_amp * g;
-                fb2L = dL * fb_gain;
-                fb2R = dR * fb_gain;
-
-if (fb2L > 0.99f) fb2L = 0.99f; else if (fb2L < -0.99f) fb2L = -0.99f;
-                if (fb2R > 0.99f) fb2R = 0.99f; else if (fb2R < -0.99f) fb2R = -0.99f;
-            }
-            } else {
-                // feedback disabled (pressure==0): no reinjection, skip per-sample feedback work
-            }
-
-// ---------- INTERNAL EXCITER (no feedback mixed into noise/impulse) ----------
-            float ex0L = 0.f, ex0R = 0.f;
-            jb_exc_process_sample(x, v,
-                                 exc_w_imp, exc_w_noise,
-                                 &ex0L, &ex0R);
-            ex0L = jb_kill_denorm(ex0L);
-            ex0R = jb_kill_denorm(ex0R);
-            if (!jb_isfinitef(ex0L) || !jb_isfinitef(ex0R)) { ex0L = 0.f; ex0R = 0.f; }
-
-            // BANK 2 input: exciter + bank2 feedback
+            // Feedback removed: excite both banks directly from the internal exciter.
             float exL = ex0L;
             float exR = ex0R;
-            // -------- BANK 2 --------
+
+// -------- BANK 2 --------
             if (bank_gain2 > 0.f && v->rel_env2 > 0.f){
                 #if JB_HAVE_NEON && JB_ENABLE_NEON
                 int m=0;
@@ -3484,9 +3217,9 @@ if (fb2L > 0.99f) fb2L = 0.99f; else if (fb2L < -0.99f) fb2L = -0.99f;
                 }
                 #endif
             }
-            // BANK 1 input: exciter + bank1 feedback
-            exL = ex0L + fb1L;
-            exR = ex0R + fb1R;
+            // BANK 1 input: internal exciter
+            exL = ex0L;
+            exR = ex0R;
 
 // -------- BANK 1 --------
             if (bank_gain1 > 0.f && v->rel_env > 0.f){
@@ -3641,10 +3374,6 @@ if (fb2L > 0.99f) fb2L = 0.99f; else if (fb2L < -0.99f) fb2L = -0.99f;
                 vOutR = 0.f;
             }
             // Update feedback sources for next sample (per bank, per voice)
-            v->fb_prevL[0] = jb_kill_denorm(b1OutL);
-            v->fb_prevR[0] = jb_kill_denorm(b1OutR);
-            v->fb_prevL[1] = jb_kill_denorm(b2OutL);
-            v->fb_prevR[1] = jb_kill_denorm(b2OutR);
 
             outL[i] += vOutL;
             outR[i] += vOutR;
@@ -4486,11 +4215,6 @@ static void juicy_bank_tilde_reset(t_juicy_bank_tilde *x){
         x->v[v].state = V_IDLE; x->v[v].f0 = x->basef0_ref; x->v[v].vel = 0.f; x->v[v].energy=0.f; x->v[v].rel_env = 1.f; x->v[v].rel_env2 = 1.f;
         jb_exc_voice_reset_runtime(&x->v[v].exc);
         for (int b = 0; b < 2; ++b){
-            x->v[v].fb_prevL[b] = x->v[v].fb_prevR[b] = 0.f;
-            x->v[v].fb_hp_x1L[b] = x->v[v].fb_hp_y1L[b] = 0.f;
-            x->v[v].fb_hp_x1R[b] = x->v[v].fb_hp_y1R[b] = 0.f;
-            x->v[v].fb_agc_gain[b] = 1.f;
-            x->v[v].fb_agc_env[b] = 0.f;
         }
         for(int i=0;i<JB_MAX_MODES;i++){
             x->v[v].disp_offset[i]=x->v[v].disp_target[i]=0.f;
@@ -4510,11 +4234,6 @@ static void juicy_bank_tilde_preset_recall(t_juicy_bank_tilde *x){
         x->v[v].rel_env2 = 1.f;
         jb_exc_voice_reset_runtime(&x->v[v].exc);
         for (int b = 0; b < 2; ++b){
-            x->v[v].fb_prevL[b] = x->v[v].fb_prevR[b] = 0.f;
-            x->v[v].fb_hp_x1L[b] = x->v[v].fb_hp_y1L[b] = 0.f;
-            x->v[v].fb_hp_x1R[b] = x->v[v].fb_hp_y1R[b] = 0.f;
-            x->v[v].fb_agc_gain[b] = 1.f;
-            x->v[v].fb_agc_env[b] = 0.f;
         }
     }
 }
@@ -4523,7 +4242,6 @@ static void juicy_bank_tilde_preset_recall(t_juicy_bank_tilde *x){
 static void juicy_bank_tilde_dsp(t_juicy_bank_tilde *x, t_signal **sp){
     x->sr = sp[0]->s_sr;
     float fc=8.f;  float RC=1.f/(2.f*M_PI*fc);  float dt=1.f/x->sr; x->hp_a=RC/(RC+dt);
-    float fc_fb=20.f; float RCfb=1.f/(2.f*M_PI*fc_fb); x->fb_hp_a=RCfb/(RCfb+dt);
 
     // sp layout: [outL, outR] (internal exciter; no external signal inlets)
     t_int argv[2 + 2 + 1];
@@ -4704,12 +4422,8 @@ inlet_free(x->in_index); inlet_free(x->in_ratio); inlet_free(x->in_gain);
     if (x->in_exc_release) inlet_free(x->in_exc_release);
     if (x->in_exc_release_curve) inlet_free(x->in_exc_release_curve);
     if (x->in_exc_density) inlet_free(x->in_exc_density);
-    if (x->in_fb_time) inlet_free(x->in_fb_time);
-    if (x->in_fb_phase) inlet_free(x->in_fb_phase);
     if (x->in_exc_imp_shape) inlet_free(x->in_exc_imp_shape);
     if (x->in_exc_shape) inlet_free(x->in_exc_shape);
-    if (x->in_fb_agc_attack) inlet_free(x->in_fb_agc_attack);
-    if (x->in_fb_agc_release) inlet_free(x->in_fb_agc_release);
 
     // MOD SECTION inlets
     if (x->in_lfo_index) inlet_free(x->in_lfo_index);
@@ -4891,13 +4605,9 @@ x->excite_pos2    = x->excite_pos;
     x->exc_release_curve = 0.f;
 
     x->exc_density    = 0.f;  // Pressure (AGC target 0..1 -> 0..0.98)
-    x->fb_time        = 0.5f; // Time (keytracked delay): mid = 1 period
-    x->fb_phase       = 0.f;  // Phase (allpass dispersion): off
     x->exc_imp_shape  = 0.5f;  // Impulse-only Shape (old shape logic)
     x->exc_shape      = 0.5f;  // Noise Color (slope EQ)
     // Feedback-loop AGC defaults (0..1 mapped to time constants in DSP)
-    x->fb_agc_attack  = 0.15f;
-    x->fb_agc_release = 0.55f;
     x->noise_scale  = 1.f;
     x->impulse_scale = 1.f;
 
@@ -4953,7 +4663,6 @@ x->excite_pos2    = x->excite_pos;
 
     jb_rng_seed(&x->rng, 0xC0FFEEu);
     x->hp_a=0.f; x->hpL_x1=x->hpL_y1=x->hpR_x1=x->hpR_y1=0.f;
-    x->fb_hp_a=0.f;
 
     // Two-bank scaffolding (STEP 1): bank 1 selected; bank 2 silent by default
     x->edit_bank = 0;
@@ -5048,14 +4757,10 @@ x->excite_pos2    = x->excite_pos;
     x->in_exc_release_curve = floatinlet_new(&x->x_obj, &x->exc_release_curve);
 
     x->in_exc_density       = floatinlet_new(&x->x_obj, &x->exc_density);
-    x->in_fb_time           = floatinlet_new(&x->x_obj, &x->fb_time);
-    x->in_fb_phase          = floatinlet_new(&x->x_obj, &x->fb_phase);
     x->in_exc_imp_shape    = floatinlet_new(&x->x_obj, &x->exc_imp_shape);
     x->in_exc_shape         = floatinlet_new(&x->x_obj, &x->exc_shape);
 
     // Feedback AGC inlets (placed AFTER timbre/color, BEFORE LFO index)
-    x->in_fb_agc_attack      = floatinlet_new(&x->x_obj, &x->fb_agc_attack);
-    x->in_fb_agc_release     = floatinlet_new(&x->x_obj, &x->fb_agc_release);
 
     // LFO inlets
     // --- MOD SECTION (starts after exciter controls) ---
