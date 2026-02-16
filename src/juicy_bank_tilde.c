@@ -3340,20 +3340,20 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 b2OutL *= v->rel_env2;
                 b2OutR *= v->rel_env2;
 
-                const float vOutL = b1OutL + b2OutL;
-                const float vOutR = b1OutR + b2OutR;
+				float vOutL = b1OutL + b2OutL;
+				float vOutR = b1OutR + b2OutR;
 
-                outL[i] += vOutL;
-                outR[i] += vOutR;
+				// --- voice output + safety watchdog ---
+				// If anything goes unstable (NaN/INF or runaway magnitude), hard-reset this voice.
+				if (!jb_isfinitef(vOutL) || !jb_isfinitef(vOutR) ||
+				    fabsf(vOutL) > JB_PANIC_ABS_MAX || fabsf(vOutR) > JB_PANIC_ABS_MAX){
+				    jb_voice_panic_reset(x, v);
+				    vOutL = 0.f;
+				    vOutR = 0.f;
+				}
 
-            // --- voice output + safety watchdog ---
-            // If anything goes unstable (NaN/INF or runaway magnitude), hard-reset this voice.
-            if (!jb_isfinitef(vOutL) || !jb_isfinitef(vOutR) ||
-                fabsf(vOutL) > JB_PANIC_ABS_MAX || fabsf(vOutR) > JB_PANIC_ABS_MAX){
-                jb_voice_panic_reset(x, v);
-                vOutL = 0.f;
-                vOutR = 0.f;
-            }
+				outL[i] += vOutL;
+				outR[i] += vOutR;
                         // Release / voice-steal envelopes (feedback system removed)
             if (v->steal_countdown > 0){
                 // Hard voice-steal fade: force envelope to countdown ratio (linear)
