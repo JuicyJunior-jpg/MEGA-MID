@@ -3351,11 +3351,6 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 				float vOutL = b1OutL + b2OutL;
 				float vOutR = b1OutR + b2OutR;
 
-				// If one channel ends up numerically zero (common when pickup/pos is at an endpoint),
-				// mirror the other channel so you never get a silent side by accident.
-				if (fabsf(vOutL) < 1e-20f && fabsf(vOutR) > 1e-20f) vOutL = vOutR;
-				if (fabsf(vOutR) < 1e-20f && fabsf(vOutL) > 1e-20f) vOutR = vOutL;
-
 				// --- voice output + safety watchdog ---
 				// If anything goes unstable (NaN/INF or runaway magnitude), hard-reset this voice.
 				if (!jb_isfinitef(vOutL) || !jb_isfinitef(vOutR) ||
