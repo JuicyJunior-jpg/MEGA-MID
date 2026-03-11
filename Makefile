@@ -1,4 +1,4 @@
-# Makefile — builds ONLY juicy_bank~ for Pd (Universal mac on macOS)
+# Makefile — builds ONLY juicy_bank~ for Pd
 SRC_DIR    := src
 BUILD_ROOT := build
 
@@ -7,7 +7,6 @@ BANK_BIN  := juicy_bank~
 
 UNAME_S := $(shell uname -s)
 
-# Detect Pd headers
 ifeq ($(UNAME_S),Darwin)
   PD_APP := $(firstword \
     $(wildcard /Applications/Pd*.app) \
@@ -20,29 +19,28 @@ ifeq ($(UNAME_S),Darwin)
   endif
   EXT      := pd_darwin
   PLAT     := macos
-  # Build a UNIVERSAL (arm64 + x86_64) binary
   MAC_MIN  ?= 10.13
   ARCHS    ?= -arch arm64 -arch x86_64
-  CFLAGS  ?= -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type -I"$(PDINC)" $(ARCHS) -mmacosx-version-min=$(MAC_MIN)
-  LDFLAGS ?= -bundle -undefined dynamic_lookup $(ARCHS) -mmacosx-version-min=$(MAC_MIN)
-  LDLIBS  ?=
+  OPTFLAGS ?= -O3 -ffast-math -fno-math-errno
+  CFLAGS   ?= $(OPTFLAGS) -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type -I"$(PDINC)" $(ARCHS) -mmacosx-version-min=$(MAC_MIN)
+  LDFLAGS  ?= -bundle -undefined dynamic_lookup $(ARCHS) -mmacosx-version-min=$(MAC_MIN)
+  LDLIBS   ?=
 else ifeq ($(UNAME_S),Linux)
-  # Bela / BeagleBone Black target: ARMv7 32-bit hard-float + NEON
+  # Bela Stereo Gem / PocketBeagle 2 target: ARMv8-A (Cortex-A53 class) + NEON/SIMD
   PDINC ?= /usr/include/pd
   EXT      := pd_linux
-  PLAT     := bela_armv7
+  PLAT     := bela_gem_armv8
   ARCH    := $(shell uname -m)
-  # If we're building on native ARMv7 (e.g. inside an arm32v7 container), use gcc.
-  # Otherwise (x86_64 runner), default to the ARM hard-float cross-compiler.
-  ifneq (,$(findstring armv7,$(ARCH)))
+  ifneq (,$(filter aarch64 arm64,$(ARCH)))
     CC ?= gcc
   else
-    CC ?= arm-linux-gnueabihf-gcc
+    CC ?= aarch64-linux-gnu-gcc
   endif
-  CFLAGS  ?= -O3 -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type -I"$(PDINC)" \
-            -march=armv7-a -mtune=cortex-a8 -mfpu=neon -mfloat-abi=hard -DJB_ENABLE_NEON=1
-  LDFLAGS ?= -shared -fPIC -Wl,-export-dynamic
-  LDLIBS  ?= -lm
+  OPTFLAGS ?= -O3 -ffast-math -fno-math-errno
+  CFLAGS   ?= $(OPTFLAGS) -fPIC -DPD -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type -I"$(PDINC)" \
+              -march=armv8-a+simd -mtune=cortex-a53 -DJB_ENABLE_NEON=1
+  LDFLAGS  ?= -shared -fPIC -Wl,-export-dynamic
+  LDLIBS   ?= -lm
 else
   PDINC ?= C:/Pd/src
   EXT      := pd_win
