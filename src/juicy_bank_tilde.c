@@ -786,7 +786,66 @@ typedef struct {
     // runtime per-mode — BANK 1/2
     jb_mode_rt_t m[JB_MAX_MODES];
     jb_mode_rt_t m2[JB_MAX_MODES];
+
+    // --- SoA hot-path mirrors (render-time working set) ---
+    // These arrays are kept in sync from the AoS mode structs when coeffs/gains are rebuilt,
+    // then used as the render-time source of truth to reduce gather/scatter and improve cache/SIMD access.
+    float soa_svfL_g[2][JB_MAX_MODES];
+    float soa_svfL_d[2][JB_MAX_MODES];
+    float soa_svfL_s1[2][JB_MAX_MODES];
+    float soa_svfL_s2[2][JB_MAX_MODES];
+    float soa_svfR_g[2][JB_MAX_MODES];
+    float soa_svfR_d[2][JB_MAX_MODES];
+    float soa_svfR_s1[2][JB_MAX_MODES];
+    float soa_svfR_s2[2][JB_MAX_MODES];
+    float soa_gainL[2][JB_MAX_MODES];
+    float soa_gainR[2][JB_MAX_MODES];
+    float soa_driveL[2][JB_MAX_MODES];
+    float soa_driveR[2][JB_MAX_MODES];
+    float soa_ylastL[2][JB_MAX_MODES];
+    float soa_ylastR[2][JB_MAX_MODES];
+    uint8_t soa_active[2][JB_MAX_MODES];
 } jb_voice_t;
+
+static inline jb_mode_rt_t *jb_voice_bank_modes(jb_voice_t *v, int bank){
+    return bank ? v->m2 : v->m;
+}
+
+static inline void jb_sync_mode_to_soa(jb_voice_t *v, int bank, int idx, const jb_mode_rt_t *md){
+    v->soa_svfL_g[bank][idx]  = md->svfL.g;
+    v->soa_svfL_d[bank][idx]  = md->svfL.d;
+    v->soa_svfL_s1[bank][idx] = md->svfL.s1;
+    v->soa_svfL_s2[bank][idx] = md->svfL.s2;
+    v->soa_svfR_g[bank][idx]  = md->svfR.g;
+    v->soa_svfR_d[bank][idx]  = md->svfR.d;
+    v->soa_svfR_s1[bank][idx] = md->svfR.s1;
+    v->soa_svfR_s2[bank][idx] = md->svfR.s2;
+    v->soa_gainL[bank][idx]   = md->gain_nowL;
+    v->soa_gainR[bank][idx]   = md->gain_nowR;
+    v->soa_driveL[bank][idx]  = md->driveL;
+    v->soa_driveR[bank][idx]  = md->driveR;
+    v->soa_ylastL[bank][idx]  = md->y_pre_lastL;
+    v->soa_ylastR[bank][idx]  = md->y_pre_lastR;
+    v->soa_active[bank][idx]  = md->render_active;
+}
+
+static inline void jb_sync_bank_to_soa(jb_voice_t *v, int bank, int n_modes){
+    jb_mode_rt_t *m = jb_voice_bank_modes(v, bank);
+    for(int i=0;i<n_modes;++i) jb_sync_mode_to_soa(v, bank, i, &m[i]);
+}
+
+static inline void jb_zero_bank_soa(jb_voice_t *v, int bank, int n_modes){
+    for(int i=0;i<n_modes;++i){
+        v->soa_svfL_g[bank][i] = v->soa_svfL_d[bank][i] = 0.f;
+        v->soa_svfL_s1[bank][i] = v->soa_svfL_s2[bank][i] = 0.f;
+        v->soa_svfR_g[bank][i] = v->soa_svfR_d[bank][i] = 0.f;
+        v->soa_svfR_s1[bank][i] = v->soa_svfR_s2[bank][i] = 0.f;
+        v->soa_gainL[bank][i] = v->soa_gainR[bank][i] = 0.f;
+        v->soa_driveL[bank][i] = v->soa_driveR[bank][i] = 0.f;
+        v->soa_ylastL[bank][i] = v->soa_ylastR[bank][i] = 0.f;
+        v->soa_active[bank][i] = 0u;
+    }
+}
 
 // ---------- the object ----------
 static t_class *juicy_bank_tilde_class;
@@ -2397,6 +2456,7 @@ float md_amt = jb_clamp(jb_bank_micro_detune(x, bank),0.f,1.f);
         jb_svf_set_params(&md->svfL, gL, R);
         jb_svf_set_params(&md->svfR, gR, R);
     }
+    jb_sync_bank_to_soa(v, bank, n_modes);
 }
 static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
     jb_update_voice_coeffs_bank(x, v, 0);
@@ -2683,6 +2743,8 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
         v->disp_offset2[i]=0.f; v->disp_target2[i]=0.f;
             }
 
+    jb_sync_bank_to_soa(v, 0, x->n_modes);
+    jb_sync_bank_to_soa(v, 1, x->n_modes2);
     jb_mark_voice_dirty(v);
 }
 
@@ -2751,6 +2813,8 @@ static void jb_voice_panic_reset(t_juicy_bank_tilde *x, jb_voice_t *v){
         md->nyq_kill = 0;
         md->render_active = 0;
     }
+    jb_sync_bank_to_soa(v, 0, x->n_modes);
+    jb_sync_bank_to_soa(v, 1, x->n_modes2);
     jb_mark_voice_dirty(v);
 }
 
@@ -3236,45 +3300,46 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 int m=0;
                 for(; m+3 < x->n_modes2; m+=4){
                     // Early skip if all 4 inactive
+                    const int bank = 1;
                     jb_mode_rt_t *md0=&v->m2[m+0];
                     jb_mode_rt_t *md1=&v->m2[m+1];
                     jb_mode_rt_t *md2=&v->m2[m+2];
                     jb_mode_rt_t *md3=&v->m2[m+3];
-                    uint32_t am0 = (md0->render_active) ? 0xFFFFFFFFu : 0u;
-                    uint32_t am1 = (md1->render_active) ? 0xFFFFFFFFu : 0u;
-                    uint32_t am2 = (md2->render_active) ? 0xFFFFFFFFu : 0u;
-                    uint32_t am3 = (md3->render_active) ? 0xFFFFFFFFu : 0u;
+                    uint32_t am0 = v->soa_active[bank][m+0] ? 0xFFFFFFFFu : 0u;
+                    uint32_t am1 = v->soa_active[bank][m+1] ? 0xFFFFFFFFu : 0u;
+                    uint32_t am2 = v->soa_active[bank][m+2] ? 0xFFFFFFFFu : 0u;
+                    uint32_t am3 = v->soa_active[bank][m+3] ? 0xFFFFFFFFu : 0u;
                     if(!(am0|am1|am2|am3)) continue;
                     uint32x4_t activeMask = (uint32x4_t){am0, am1, am2, am3};
                 
                     // Gather SVF params/states (L)
-                    float gL_[4]  = {md0->svfL.g,  md1->svfL.g,  md2->svfL.g,  md3->svfL.g};
-                    float dL_[4]  = {md0->svfL.d,  md1->svfL.d,  md2->svfL.d,  md3->svfL.d};
-                    float s1L_[4] = {md0->svfL.s1, md1->svfL.s1, md2->svfL.s1, md3->svfL.s1};
-                    float s2L_[4] = {md0->svfL.s2, md1->svfL.s2, md2->svfL.s2, md3->svfL.s2};
+                    float gL_[4]  = {v->soa_svfL_g[bank][m+0],  v->soa_svfL_g[bank][m+1],  v->soa_svfL_g[bank][m+2],  v->soa_svfL_g[bank][m+3]};
+                    float dL_[4]  = {v->soa_svfL_d[bank][m+0],  v->soa_svfL_d[bank][m+1],  v->soa_svfL_d[bank][m+2],  v->soa_svfL_d[bank][m+3]};
+                    float s1L_[4] = {v->soa_svfL_s1[bank][m+0], v->soa_svfL_s1[bank][m+1], v->soa_svfL_s1[bank][m+2], v->soa_svfL_s1[bank][m+3]};
+                    float s2L_[4] = {v->soa_svfL_s2[bank][m+0], v->soa_svfL_s2[bank][m+1], v->soa_svfL_s2[bank][m+2], v->soa_svfL_s2[bank][m+3]};
                     float32x4_t gL4  = vld1q_f32(gL_);
                     float32x4_t dL4  = vld1q_f32(dL_);
                     float32x4_t s1L4 = vld1q_f32(s1L_);
                     float32x4_t s2L4 = vld1q_f32(s2L_);
                 
                     // Gather SVF params/states (R)
-                    float gR_[4]  = {md0->svfR.g,  md1->svfR.g,  md2->svfR.g,  md3->svfR.g};
-                    float dR_[4]  = {md0->svfR.d,  md1->svfR.d,  md2->svfR.d,  md3->svfR.d};
-                    float s1R_[4] = {md0->svfR.s1, md1->svfR.s1, md2->svfR.s1, md3->svfR.s1};
-                    float s2R_[4] = {md0->svfR.s2, md1->svfR.s2, md2->svfR.s2, md3->svfR.s2};
+                    float gR_[4]  = {v->soa_svfR_g[bank][m+0],  v->soa_svfR_g[bank][m+1],  v->soa_svfR_g[bank][m+2],  v->soa_svfR_g[bank][m+3]};
+                    float dR_[4]  = {v->soa_svfR_d[bank][m+0],  v->soa_svfR_d[bank][m+1],  v->soa_svfR_d[bank][m+2],  v->soa_svfR_d[bank][m+3]};
+                    float s1R_[4] = {v->soa_svfR_s1[bank][m+0], v->soa_svfR_s1[bank][m+1], v->soa_svfR_s1[bank][m+2], v->soa_svfR_s1[bank][m+3]};
+                    float s2R_[4] = {v->soa_svfR_s2[bank][m+0], v->soa_svfR_s2[bank][m+1], v->soa_svfR_s2[bank][m+2], v->soa_svfR_s2[bank][m+3]};
                     float32x4_t gR4  = vld1q_f32(gR_);
                     float32x4_t dR4  = vld1q_f32(dR_);
                     float32x4_t s1R4 = vld1q_f32(s1R_);
                     float32x4_t s2R4 = vld1q_f32(s2R_);
                 
                     // Drive update + input vectors
-                    float driveL0=md0->driveL, driveL1=md1->driveL, driveL2=md2->driveL, driveL3=md3->driveL;
-                    float driveR0=md0->driveR, driveR1=md1->driveR, driveR2=md2->driveR, driveR3=md3->driveR;
+                    float driveL0=v->soa_driveL[bank][m+0], driveL1=v->soa_driveL[bank][m+1], driveL2=v->soa_driveL[bank][m+2], driveL3=v->soa_driveL[bank][m+3];
+                    float driveR0=v->soa_driveR[bank][m+0], driveR1=v->soa_driveR[bank][m+1], driveR2=v->soa_driveR[bank][m+2], driveR3=v->soa_driveR[bank][m+3];
                     const float att_a = 1.f;
-                    if(am0){ float excL = exL * md0->gain_nowL; float excR = exR * md0->gain_nowR; driveL0 += att_a*(excL-driveL0); driveR0 += att_a*(excR-driveR0); }
-                    if(am1){ float excL = exL * md1->gain_nowL; float excR = exR * md1->gain_nowR; driveL1 += att_a*(excL-driveL1); driveR1 += att_a*(excR-driveR1); }
-                    if(am2){ float excL = exL * md2->gain_nowL; float excR = exR * md2->gain_nowR; driveL2 += att_a*(excL-driveL2); driveR2 += att_a*(excR-driveR2); }
-                    if(am3){ float excL = exL * md3->gain_nowL; float excR = exR * md3->gain_nowR; driveL3 += att_a*(excL-driveL3); driveR3 += att_a*(excR-driveR3); }
+                    if(am0){ float excL = exL * v->soa_gainL[bank][m+0]; float excR = exR * v->soa_gainR[bank][m+0]; driveL0 += att_a*(excL-driveL0); driveR0 += att_a*(excR-driveR0); }
+                    if(am1){ float excL = exL * v->soa_gainL[bank][m+1]; float excR = exR * v->soa_gainR[bank][m+1]; driveL1 += att_a*(excL-driveL1); driveR1 += att_a*(excR-driveR1); }
+                    if(am2){ float excL = exL * v->soa_gainL[bank][m+2]; float excR = exR * v->soa_gainR[bank][m+2]; driveL2 += att_a*(excL-driveL2); driveR2 += att_a*(excR-driveR2); }
+                    if(am3){ float excL = exL * v->soa_gainL[bank][m+3]; float excR = exR * v->soa_gainR[bank][m+3]; driveL3 += att_a*(excL-driveL3); driveR3 += att_a*(excR-driveR3); }
                     float xL_[4] = {driveL0, driveL1, driveL2, driveL3};
                     float xR_[4] = {driveR0, driveR1, driveR2, driveR3};
                     float32x4_t xL4 = vld1q_f32(xL_);
@@ -3297,22 +3362,23 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     vst1q_f32(s1Rlane, s1R4); vst1q_f32(s2Rlane, s2R4);
                 
                     const float e = v->rel_env2;
-                    if(am0){ md0->svfL.s1=s1Llane[0]; md0->svfL.s2=s2Llane[0]; md0->svfR.s1=s1Rlane[0]; md0->svfR.s2=s2Rlane[0]; md0->driveL=driveL0; md0->driveR=driveR0; float y0L=jb_kill_denorm(yLlane[0]); float y0R=jb_kill_denorm(yRlane[0]); md0->y_pre_lastL=y0L; md0->y_pre_lastR=y0R; b2OutL=jb_kill_denorm(b2OutL + (y0L*e)*bank_gain2); b2OutR=jb_kill_denorm(b2OutR + (y0R*e)*bank_gain2); }
-                    if(am1){ md1->svfL.s1=s1Llane[1]; md1->svfL.s2=s2Llane[1]; md1->svfR.s1=s1Rlane[1]; md1->svfR.s2=s2Rlane[1]; md1->driveL=driveL1; md1->driveR=driveR1; float y1L=jb_kill_denorm(yLlane[1]); float y1R=jb_kill_denorm(yRlane[1]); md1->y_pre_lastL=y1L; md1->y_pre_lastR=y1R; b2OutL=jb_kill_denorm(b2OutL + (y1L*e)*bank_gain2); b2OutR=jb_kill_denorm(b2OutR + (y1R*e)*bank_gain2); }
-                    if(am2){ md2->svfL.s1=s1Llane[2]; md2->svfL.s2=s2Llane[2]; md2->svfR.s1=s1Rlane[2]; md2->svfR.s2=s2Rlane[2]; md2->driveL=driveL2; md2->driveR=driveR2; float y2L=jb_kill_denorm(yLlane[2]); float y2R=jb_kill_denorm(yRlane[2]); md2->y_pre_lastL=y2L; md2->y_pre_lastR=y2R; b2OutL=jb_kill_denorm(b2OutL + (y2L*e)*bank_gain2); b2OutR=jb_kill_denorm(b2OutR + (y2R*e)*bank_gain2); }
-                    if(am3){ md3->svfL.s1=s1Llane[3]; md3->svfL.s2=s2Llane[3]; md3->svfR.s1=s1Rlane[3]; md3->svfR.s2=s2Rlane[3]; md3->driveL=driveL3; md3->driveR=driveR3; float y3L=jb_kill_denorm(yLlane[3]); float y3R=jb_kill_denorm(yRlane[3]); md3->y_pre_lastL=y3L; md3->y_pre_lastR=y3R; b2OutL=jb_kill_denorm(b2OutL + (y3L*e)*bank_gain2); b2OutR=jb_kill_denorm(b2OutR + (y3R*e)*bank_gain2); }
+                    if(am0){ v->soa_svfL_s1[bank][m+0]=s1Llane[0]; v->soa_svfL_s2[bank][m+0]=s2Llane[0]; v->soa_svfR_s1[bank][m+0]=s1Rlane[0]; v->soa_svfR_s2[bank][m+0]=s2Rlane[0]; v->soa_driveL[bank][m+0]=driveL0; v->soa_driveR[bank][m+0]=driveR0; float y0L=jb_kill_denorm(yLlane[0]); float y0R=jb_kill_denorm(yRlane[0]); v->soa_ylastL[bank][m+0]=y0L; v->soa_ylastR[bank][m+0]=y0R; md0->y_pre_lastL=y0L; md0->y_pre_lastR=y0R; b2OutL=jb_kill_denorm(b2OutL + (y0L*e)*bank_gain2); b2OutR=jb_kill_denorm(b2OutR + (y0R*e)*bank_gain2); }
+                    if(am1){ v->soa_svfL_s1[bank][m+1]=s1Llane[1]; v->soa_svfL_s2[bank][m+1]=s2Llane[1]; v->soa_svfR_s1[bank][m+1]=s1Rlane[1]; v->soa_svfR_s2[bank][m+1]=s2Rlane[1]; v->soa_driveL[bank][m+1]=driveL1; v->soa_driveR[bank][m+1]=driveR1; float y1L=jb_kill_denorm(yLlane[1]); float y1R=jb_kill_denorm(yRlane[1]); v->soa_ylastL[bank][m+1]=y1L; v->soa_ylastR[bank][m+1]=y1R; md1->y_pre_lastL=y1L; md1->y_pre_lastR=y1R; b2OutL=jb_kill_denorm(b2OutL + (y1L*e)*bank_gain2); b2OutR=jb_kill_denorm(b2OutR + (y1R*e)*bank_gain2); }
+                    if(am2){ v->soa_svfL_s1[bank][m+2]=s1Llane[2]; v->soa_svfL_s2[bank][m+2]=s2Llane[2]; v->soa_svfR_s1[bank][m+2]=s1Rlane[2]; v->soa_svfR_s2[bank][m+2]=s2Rlane[2]; v->soa_driveL[bank][m+2]=driveL2; v->soa_driveR[bank][m+2]=driveR2; float y2L=jb_kill_denorm(yLlane[2]); float y2R=jb_kill_denorm(yRlane[2]); v->soa_ylastL[bank][m+2]=y2L; v->soa_ylastR[bank][m+2]=y2R; md2->y_pre_lastL=y2L; md2->y_pre_lastR=y2R; b2OutL=jb_kill_denorm(b2OutL + (y2L*e)*bank_gain2); b2OutR=jb_kill_denorm(b2OutR + (y2R*e)*bank_gain2); }
+                    if(am3){ v->soa_svfL_s1[bank][m+3]=s1Llane[3]; v->soa_svfL_s2[bank][m+3]=s2Llane[3]; v->soa_svfR_s1[bank][m+3]=s1Rlane[3]; v->soa_svfR_s2[bank][m+3]=s2Rlane[3]; v->soa_driveL[bank][m+3]=driveL3; v->soa_driveR[bank][m+3]=driveR3; float y3L=jb_kill_denorm(yLlane[3]); float y3R=jb_kill_denorm(yRlane[3]); v->soa_ylastL[bank][m+3]=y3L; v->soa_ylastR[bank][m+3]=y3R; md3->y_pre_lastL=y3L; md3->y_pre_lastR=y3R; b2OutL=jb_kill_denorm(b2OutL + (y3L*e)*bank_gain2); b2OutR=jb_kill_denorm(b2OutR + (y3R*e)*bank_gain2); }
                 }
                 // scalar tail
                 for(; m < x->n_modes2; m++){ 
                 
                     if(!base2[m].active) continue;
                     jb_mode_rt_t *md=&v->m2[m];
-                    float gL = md->gain_nowL;
-                    float gR = md->gain_nowR;
-                    if (!md->render_active) continue;
+                    const int bank = 1;
+                    float gL = v->soa_gainL[bank][m];
+                    float gR = v->soa_gainR[bank][m];
+                    if (!v->soa_active[bank][m]) continue;
 
-                    float driveL = md->driveL;
-                    float driveR = md->driveR;
+                    float driveL = v->soa_driveL[bank][m];
+                    float driveR = v->soa_driveR[bank][m];
                     const float att_a = 1.f;
                     float excL = exL * gL;
                     float excR = exR * gR;
@@ -3325,9 +3391,13 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 	                    float y_rawR = jb_svf_bp_tick(&md->svfR, driveR);
 	                    y_rawR = jb_kill_denorm(y_rawR);
 
+                    v->soa_driveL[bank][m] = driveL;
+                    v->soa_driveR[bank][m] = driveR;
                     md->driveL = driveL;
                     md->driveR = driveR;
 	                    // Pre-master, pre-envelope signal snapshot (for meters / hit detection)
+	                    v->soa_ylastL[bank][m] = y_rawL;
+	                    v->soa_ylastR[bank][m] = y_rawR;
 	                    md->y_pre_lastL = y_rawL;
 	                    md->y_pre_lastR = y_rawR;
 
@@ -3341,12 +3411,13 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 
                     if(!base2[m].active) continue;
                     jb_mode_rt_t *md=&v->m2[m];
-                    float gL = md->gain_nowL;
-                    float gR = md->gain_nowR;
-                    if (!md->render_active) continue;
+                    const int bank = 1;
+                    float gL = v->soa_gainL[bank][m];
+                    float gR = v->soa_gainR[bank][m];
+                    if (!v->soa_active[bank][m]) continue;
 
-                    float driveL = md->driveL;
-                    float driveR = md->driveR;
+                    float driveL = v->soa_driveL[bank][m];
+                    float driveR = v->soa_driveR[bank][m];
                     const float att_a = 1.f;
                     float excL = exL * gL;
                     float excR = exR * gR;
@@ -3382,45 +3453,46 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 int m=0;
                 for(; m+3 < x->n_modes; m+=4){
                     // Early skip if all 4 inactive
+                    const int bank = 0;
                     jb_mode_rt_t *md0=&v->m[m+0];
                     jb_mode_rt_t *md1=&v->m[m+1];
                     jb_mode_rt_t *md2=&v->m[m+2];
                     jb_mode_rt_t *md3=&v->m[m+3];
-                    uint32_t am0 = (md0->render_active) ? 0xFFFFFFFFu : 0u;
-                    uint32_t am1 = (md1->render_active) ? 0xFFFFFFFFu : 0u;
-                    uint32_t am2 = (md2->render_active) ? 0xFFFFFFFFu : 0u;
-                    uint32_t am3 = (md3->render_active) ? 0xFFFFFFFFu : 0u;
+                    uint32_t am0 = v->soa_active[bank][m+0] ? 0xFFFFFFFFu : 0u;
+                    uint32_t am1 = v->soa_active[bank][m+1] ? 0xFFFFFFFFu : 0u;
+                    uint32_t am2 = v->soa_active[bank][m+2] ? 0xFFFFFFFFu : 0u;
+                    uint32_t am3 = v->soa_active[bank][m+3] ? 0xFFFFFFFFu : 0u;
                     if(!(am0|am1|am2|am3)) continue;
                     uint32x4_t activeMask = (uint32x4_t){am0, am1, am2, am3};
                 
                     // Gather SVF params/states (L)
-                    float gL_[4]  = {md0->svfL.g,  md1->svfL.g,  md2->svfL.g,  md3->svfL.g};
-                    float dL_[4]  = {md0->svfL.d,  md1->svfL.d,  md2->svfL.d,  md3->svfL.d};
-                    float s1L_[4] = {md0->svfL.s1, md1->svfL.s1, md2->svfL.s1, md3->svfL.s1};
-                    float s2L_[4] = {md0->svfL.s2, md1->svfL.s2, md2->svfL.s2, md3->svfL.s2};
+                    float gL_[4]  = {v->soa_svfL_g[bank][m+0],  v->soa_svfL_g[bank][m+1],  v->soa_svfL_g[bank][m+2],  v->soa_svfL_g[bank][m+3]};
+                    float dL_[4]  = {v->soa_svfL_d[bank][m+0],  v->soa_svfL_d[bank][m+1],  v->soa_svfL_d[bank][m+2],  v->soa_svfL_d[bank][m+3]};
+                    float s1L_[4] = {v->soa_svfL_s1[bank][m+0], v->soa_svfL_s1[bank][m+1], v->soa_svfL_s1[bank][m+2], v->soa_svfL_s1[bank][m+3]};
+                    float s2L_[4] = {v->soa_svfL_s2[bank][m+0], v->soa_svfL_s2[bank][m+1], v->soa_svfL_s2[bank][m+2], v->soa_svfL_s2[bank][m+3]};
                     float32x4_t gL4  = vld1q_f32(gL_);
                     float32x4_t dL4  = vld1q_f32(dL_);
                     float32x4_t s1L4 = vld1q_f32(s1L_);
                     float32x4_t s2L4 = vld1q_f32(s2L_);
                 
                     // Gather SVF params/states (R)
-                    float gR_[4]  = {md0->svfR.g,  md1->svfR.g,  md2->svfR.g,  md3->svfR.g};
-                    float dR_[4]  = {md0->svfR.d,  md1->svfR.d,  md2->svfR.d,  md3->svfR.d};
-                    float s1R_[4] = {md0->svfR.s1, md1->svfR.s1, md2->svfR.s1, md3->svfR.s1};
-                    float s2R_[4] = {md0->svfR.s2, md1->svfR.s2, md2->svfR.s2, md3->svfR.s2};
+                    float gR_[4]  = {v->soa_svfR_g[bank][m+0],  v->soa_svfR_g[bank][m+1],  v->soa_svfR_g[bank][m+2],  v->soa_svfR_g[bank][m+3]};
+                    float dR_[4]  = {v->soa_svfR_d[bank][m+0],  v->soa_svfR_d[bank][m+1],  v->soa_svfR_d[bank][m+2],  v->soa_svfR_d[bank][m+3]};
+                    float s1R_[4] = {v->soa_svfR_s1[bank][m+0], v->soa_svfR_s1[bank][m+1], v->soa_svfR_s1[bank][m+2], v->soa_svfR_s1[bank][m+3]};
+                    float s2R_[4] = {v->soa_svfR_s2[bank][m+0], v->soa_svfR_s2[bank][m+1], v->soa_svfR_s2[bank][m+2], v->soa_svfR_s2[bank][m+3]};
                     float32x4_t gR4  = vld1q_f32(gR_);
                     float32x4_t dR4  = vld1q_f32(dR_);
                     float32x4_t s1R4 = vld1q_f32(s1R_);
                     float32x4_t s2R4 = vld1q_f32(s2R_);
                 
                     // Drive update + input vectors
-                    float driveL0=md0->driveL, driveL1=md1->driveL, driveL2=md2->driveL, driveL3=md3->driveL;
-                    float driveR0=md0->driveR, driveR1=md1->driveR, driveR2=md2->driveR, driveR3=md3->driveR;
+                    float driveL0=v->soa_driveL[bank][m+0], driveL1=v->soa_driveL[bank][m+1], driveL2=v->soa_driveL[bank][m+2], driveL3=v->soa_driveL[bank][m+3];
+                    float driveR0=v->soa_driveR[bank][m+0], driveR1=v->soa_driveR[bank][m+1], driveR2=v->soa_driveR[bank][m+2], driveR3=v->soa_driveR[bank][m+3];
                     const float att_a = 1.f;
-                    if(am0){ float excL = exL * md0->gain_nowL; float excR = exR * md0->gain_nowR; driveL0 += att_a*(excL-driveL0); driveR0 += att_a*(excR-driveR0); }
-                    if(am1){ float excL = exL * md1->gain_nowL; float excR = exR * md1->gain_nowR; driveL1 += att_a*(excL-driveL1); driveR1 += att_a*(excR-driveR1); }
-                    if(am2){ float excL = exL * md2->gain_nowL; float excR = exR * md2->gain_nowR; driveL2 += att_a*(excL-driveL2); driveR2 += att_a*(excR-driveR2); }
-                    if(am3){ float excL = exL * md3->gain_nowL; float excR = exR * md3->gain_nowR; driveL3 += att_a*(excL-driveL3); driveR3 += att_a*(excR-driveR3); }
+                    if(am0){ float excL = exL * v->soa_gainL[bank][m+0]; float excR = exR * v->soa_gainR[bank][m+0]; driveL0 += att_a*(excL-driveL0); driveR0 += att_a*(excR-driveR0); }
+                    if(am1){ float excL = exL * v->soa_gainL[bank][m+1]; float excR = exR * v->soa_gainR[bank][m+1]; driveL1 += att_a*(excL-driveL1); driveR1 += att_a*(excR-driveR1); }
+                    if(am2){ float excL = exL * v->soa_gainL[bank][m+2]; float excR = exR * v->soa_gainR[bank][m+2]; driveL2 += att_a*(excL-driveL2); driveR2 += att_a*(excR-driveR2); }
+                    if(am3){ float excL = exL * v->soa_gainL[bank][m+3]; float excR = exR * v->soa_gainR[bank][m+3]; driveL3 += att_a*(excL-driveL3); driveR3 += att_a*(excR-driveR3); }
                     float xL_[4] = {driveL0, driveL1, driveL2, driveL3};
                     float xR_[4] = {driveR0, driveR1, driveR2, driveR3};
                     float32x4_t xL4 = vld1q_f32(xL_);
@@ -3443,22 +3515,23 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     vst1q_f32(s1Rlane, s1R4); vst1q_f32(s2Rlane, s2R4);
                 
                     const float e = v->rel_env;
-                    if(am0){ md0->svfL.s1=s1Llane[0]; md0->svfL.s2=s2Llane[0]; md0->svfR.s1=s1Rlane[0]; md0->svfR.s2=s2Rlane[0]; md0->driveL=driveL0; md0->driveR=driveR0; float y0L=jb_kill_denorm(yLlane[0]); float y0R=jb_kill_denorm(yRlane[0]); md0->y_pre_lastL=y0L; md0->y_pre_lastR=y0R; b1OutL=jb_kill_denorm(b1OutL + (y0L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y0R*e)*bank_gain1); }
-                    if(am1){ md1->svfL.s1=s1Llane[1]; md1->svfL.s2=s2Llane[1]; md1->svfR.s1=s1Rlane[1]; md1->svfR.s2=s2Rlane[1]; md1->driveL=driveL1; md1->driveR=driveR1; float y1L=jb_kill_denorm(yLlane[1]); float y1R=jb_kill_denorm(yRlane[1]); md1->y_pre_lastL=y1L; md1->y_pre_lastR=y1R; b1OutL=jb_kill_denorm(b1OutL + (y1L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y1R*e)*bank_gain1); }
-                    if(am2){ md2->svfL.s1=s1Llane[2]; md2->svfL.s2=s2Llane[2]; md2->svfR.s1=s1Rlane[2]; md2->svfR.s2=s2Rlane[2]; md2->driveL=driveL2; md2->driveR=driveR2; float y2L=jb_kill_denorm(yLlane[2]); float y2R=jb_kill_denorm(yRlane[2]); md2->y_pre_lastL=y2L; md2->y_pre_lastR=y2R; b1OutL=jb_kill_denorm(b1OutL + (y2L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y2R*e)*bank_gain1); }
-                    if(am3){ md3->svfL.s1=s1Llane[3]; md3->svfL.s2=s2Llane[3]; md3->svfR.s1=s1Rlane[3]; md3->svfR.s2=s2Rlane[3]; md3->driveL=driveL3; md3->driveR=driveR3; float y3L=jb_kill_denorm(yLlane[3]); float y3R=jb_kill_denorm(yRlane[3]); md3->y_pre_lastL=y3L; md3->y_pre_lastR=y3R; b1OutL=jb_kill_denorm(b1OutL + (y3L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y3R*e)*bank_gain1); }
+                    if(am0){ v->soa_svfL_s1[bank][m+0]=s1Llane[0]; v->soa_svfL_s2[bank][m+0]=s2Llane[0]; v->soa_svfR_s1[bank][m+0]=s1Rlane[0]; v->soa_svfR_s2[bank][m+0]=s2Rlane[0]; v->soa_driveL[bank][m+0]=driveL0; v->soa_driveR[bank][m+0]=driveR0; float y0L=jb_kill_denorm(yLlane[0]); float y0R=jb_kill_denorm(yRlane[0]); v->soa_ylastL[bank][m+0]=y0L; v->soa_ylastR[bank][m+0]=y0R; md0->y_pre_lastL=y0L; md0->y_pre_lastR=y0R; b1OutL=jb_kill_denorm(b1OutL + (y0L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y0R*e)*bank_gain1); }
+                    if(am1){ v->soa_svfL_s1[bank][m+1]=s1Llane[1]; v->soa_svfL_s2[bank][m+1]=s2Llane[1]; v->soa_svfR_s1[bank][m+1]=s1Rlane[1]; v->soa_svfR_s2[bank][m+1]=s2Rlane[1]; v->soa_driveL[bank][m+1]=driveL1; v->soa_driveR[bank][m+1]=driveR1; float y1L=jb_kill_denorm(yLlane[1]); float y1R=jb_kill_denorm(yRlane[1]); v->soa_ylastL[bank][m+1]=y1L; v->soa_ylastR[bank][m+1]=y1R; md1->y_pre_lastL=y1L; md1->y_pre_lastR=y1R; b1OutL=jb_kill_denorm(b1OutL + (y1L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y1R*e)*bank_gain1); }
+                    if(am2){ v->soa_svfL_s1[bank][m+2]=s1Llane[2]; v->soa_svfL_s2[bank][m+2]=s2Llane[2]; v->soa_svfR_s1[bank][m+2]=s1Rlane[2]; v->soa_svfR_s2[bank][m+2]=s2Rlane[2]; v->soa_driveL[bank][m+2]=driveL2; v->soa_driveR[bank][m+2]=driveR2; float y2L=jb_kill_denorm(yLlane[2]); float y2R=jb_kill_denorm(yRlane[2]); v->soa_ylastL[bank][m+2]=y2L; v->soa_ylastR[bank][m+2]=y2R; md2->y_pre_lastL=y2L; md2->y_pre_lastR=y2R; b1OutL=jb_kill_denorm(b1OutL + (y2L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y2R*e)*bank_gain1); }
+                    if(am3){ v->soa_svfL_s1[bank][m+3]=s1Llane[3]; v->soa_svfL_s2[bank][m+3]=s2Llane[3]; v->soa_svfR_s1[bank][m+3]=s1Rlane[3]; v->soa_svfR_s2[bank][m+3]=s2Rlane[3]; v->soa_driveL[bank][m+3]=driveL3; v->soa_driveR[bank][m+3]=driveR3; float y3L=jb_kill_denorm(yLlane[3]); float y3R=jb_kill_denorm(yRlane[3]); v->soa_ylastL[bank][m+3]=y3L; v->soa_ylastR[bank][m+3]=y3R; md3->y_pre_lastL=y3L; md3->y_pre_lastR=y3R; b1OutL=jb_kill_denorm(b1OutL + (y3L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y3R*e)*bank_gain1); }
                 }
                 // scalar tail
                 for(; m < x->n_modes; m++){ 
                 
                     if(!base1[m].active) continue;
                     jb_mode_rt_t *md=&v->m[m];
-                    float gL = md->gain_nowL;
-                    float gR = md->gain_nowR;
-                    if (!md->render_active) continue;
+                    const int bank = 0;
+                    float gL = v->soa_gainL[bank][m];
+                    float gR = v->soa_gainR[bank][m];
+                    if (!v->soa_active[bank][m]) continue;
 
-                    float driveL = md->driveL;
-                    float driveR = md->driveR;
+                    float driveL = v->soa_driveL[bank][m];
+                    float driveR = v->soa_driveR[bank][m];
                     const float att_a = 1.f;
                     float excL = exL * gL;
                     float excR = exR * gR;
@@ -3471,8 +3544,12 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 	                    float y_rawR = jb_svf_bp_tick(&md->svfR, driveR);
 	                    y_rawR = jb_kill_denorm(y_rawR);
 
+                    v->soa_driveL[bank][m] = driveL;
+                    v->soa_driveR[bank][m] = driveR;
                     md->driveL = driveL;
                     md->driveR = driveR;
+	                    v->soa_ylastL[bank][m] = y_rawL;
+	                    v->soa_ylastR[bank][m] = y_rawR;
 	                    md->y_pre_lastL = y_rawL;
 	                    md->y_pre_lastR = y_rawR;
 
@@ -3486,12 +3563,13 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 
                     if(!base1[m].active) continue;
                     jb_mode_rt_t *md=&v->m[m];
-                    float gL = md->gain_nowL;
-                    float gR = md->gain_nowR;
-                    if (!md->render_active) continue;
+                    const int bank = 0;
+                    float gL = v->soa_gainL[bank][m];
+                    float gR = v->soa_gainR[bank][m];
+                    if (!v->soa_active[bank][m]) continue;
 
-                    float driveL = md->driveL;
-                    float driveR = md->driveR;
+                    float driveL = v->soa_driveL[bank][m];
+                    float driveR = v->soa_driveR[bank][m];
                     const float att_a = 1.f;
                     float excL = exL * gL;
                     float excR = exR * gR;
@@ -3504,8 +3582,12 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 	                    float y_rawR = jb_svf_bp_tick(&md->svfR, driveR);
 	                    y_rawR = jb_kill_denorm(y_rawR);
 
+                    v->soa_driveL[bank][m] = driveL;
+                    v->soa_driveR[bank][m] = driveR;
                     md->driveL = driveL;
                     md->driveR = driveR;
+	                    v->soa_ylastL[bank][m] = y_rawL;
+	                    v->soa_ylastR[bank][m] = y_rawR;
 	                    md->y_pre_lastL = y_rawL;
 	                    md->y_pre_lastR = y_rawR;
 
