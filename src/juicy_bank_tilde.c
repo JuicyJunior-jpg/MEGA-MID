@@ -1506,6 +1506,13 @@ static void jb_init_luts_once(void){
             jb_bright_lut[bi][ri] = powf(rr, -alpha);
         }
     }
+    for (int i = 0; i <= JB_TAN_LUT_SIZE; ++i){
+        float u = (float)i / (float)JB_TAN_LUT_SIZE;
+        float a = (0.5f * (float)M_PI) * u;
+        float t = tanf(a);
+        if (!isfinite(t) || t > 1.0e6f) t = 1.0e6f;
+        jb_tan_lut[i] = t;
+    }
     jb_luts_ready = 1;
 }
 
@@ -1518,6 +1525,28 @@ static inline float jb_fast_sinpi(float x){
     float f = p - (float)i;
     float a = jb_sinpi_lut[i];
     float b = jb_sinpi_lut[i + 1];
+    return a + (b - a) * f;
+}
+
+static inline float jb_fast_sin2pi(float x){
+    x = jb_wrap01(x);
+    if (x <= 0.5f) return jb_fast_sinpi(2.f * x);
+    return -jb_fast_sinpi(2.f * (x - 0.5f));
+}
+
+static inline float jb_fast_cos2pi(float x){
+    return jb_fast_sin2pi(x + 0.25f);
+}
+
+static inline float jb_fast_tan_halfpi_u(float u){
+    u = jb_clamp(u, 0.f, 0.999999f);
+    float p = u * (float)JB_TAN_LUT_SIZE;
+    int i = (int)p;
+    if (i < 0) i = 0;
+    if (i >= JB_TAN_LUT_SIZE) return jb_tan_lut[JB_TAN_LUT_SIZE];
+    float f = p - (float)i;
+    float a = jb_tan_lut[i];
+    float b = jb_tan_lut[i + 1];
     return a + (b - a) * f;
 }
 
