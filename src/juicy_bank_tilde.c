@@ -159,6 +159,124 @@ typedef enum {
     JB_PRESET_MODE_SLOT   = 2
 } jb_preset_mode_t;
 
+// -------------------- HARDWARE / WORKFLOW SCAFFOLD (transition step 1) --------------------
+typedef enum {
+    JB_PAGE_PLAY = 0,
+    JB_PAGE_PLAY_ALT,
+    JB_PAGE_BODY_A,
+    JB_PAGE_BODY_B,
+    JB_PAGE_DAMPERS,
+    JB_PAGE_EXCITER_A,
+    JB_PAGE_EXCITER_B,
+    JB_PAGE_SPACE,
+    JB_PAGE_MOD_LFO1,
+    JB_PAGE_MOD_LFO2,
+    JB_PAGE_VELOCITY,
+    JB_PAGE_GLOBAL_EDIT,
+    JB_PAGE_RESONATOR_EDIT,
+    JB_PAGE_PRESET,
+    JB_PAGE_COUNT
+} jb_page_t;
+
+typedef enum {
+    JB_FAMILY_PLAY = 0,
+    JB_FAMILY_BODY,
+    JB_FAMILY_EXCITER,
+    JB_FAMILY_MOD,
+    JB_FAMILY_EDIT,
+    JB_FAMILY_PRESET,
+    JB_FAMILY_COUNT
+} jb_page_family_t;
+
+typedef enum {
+    JB_BTN_PLAY = 0,
+    JB_BTN_BODY,
+    JB_BTN_EXCITER,
+    JB_BTN_MOD,
+    JB_BTN_SHIFT,
+    JB_BTN_BACK,
+    JB_BTN_SAVE,
+    JB_BTN_PRESET,
+    JB_BTN_COUNT
+} jb_button_t;
+
+typedef enum {
+    JB_UI_NORMAL = 0,
+    JB_UI_SAVE_MODE
+} jb_ui_mode_t;
+
+typedef enum {
+    JB_HW_PARAM_NONE = 0,
+    JB_HW_PARAM_MASTER,
+    JB_HW_PARAM_BRIGHTNESS,
+    JB_HW_PARAM_POSITION,
+    JB_HW_PARAM_PICKUP,
+    JB_HW_PARAM_SPACE_WETDRY,
+    JB_HW_PARAM_EXC_FADER,
+    JB_HW_PARAM_STRETCH,
+    JB_HW_PARAM_WARP,
+    JB_HW_PARAM_DISPERSION,
+    JB_HW_PARAM_DENSITY,
+    JB_HW_PARAM_PARTIALS,
+    JB_HW_PARAM_BELL_FREQ,
+    JB_HW_PARAM_BELL_ZETA,
+    JB_HW_PARAM_BELL_NPL,
+    JB_HW_PARAM_BELL_NPR,
+    JB_HW_PARAM_BELL_NPM,
+    JB_HW_PARAM_EXC_ATTACK,
+    JB_HW_PARAM_EXC_DECAY,
+    JB_HW_PARAM_EXC_SUSTAIN,
+    JB_HW_PARAM_EXC_RELEASE,
+    JB_HW_PARAM_NOISE_COLOR,
+    JB_HW_PARAM_IMPULSE_SHAPE,
+    JB_HW_PARAM_EXC_ATTACK_CURVE,
+    JB_HW_PARAM_EXC_DECAY_CURVE,
+    JB_HW_PARAM_EXC_RELEASE_CURVE,
+    JB_HW_PARAM_SPACE_SIZE,
+    JB_HW_PARAM_SPACE_DECAY,
+    JB_HW_PARAM_SPACE_DIFFUSION,
+    JB_HW_PARAM_SPACE_DAMPING,
+    JB_HW_PARAM_LFO_TARGET,
+    JB_HW_PARAM_LFO_SHAPE,
+    JB_HW_PARAM_LFO_RATE,
+    JB_HW_PARAM_LFO_PHASE,
+    JB_HW_PARAM_LFO_MODE,
+    JB_HW_PARAM_LFO_AMOUNT,
+    JB_HW_PARAM_VEL_AMOUNT,
+    JB_HW_PARAM_VEL_TARGET,
+    JB_HW_PARAM_BANK_SELECT,
+    JB_HW_PARAM_OCTAVE,
+    JB_HW_PARAM_SEMITONE,
+    JB_HW_PARAM_TUNE,
+    JB_HW_PARAM_RESONATOR_INDEX,
+    JB_HW_PARAM_RATIO,
+    JB_HW_PARAM_GAIN,
+    JB_HW_PARAM_DECAY
+} jb_hw_param_t;
+
+typedef struct {
+    float normalized;
+    int caught;
+} jb_hw_pot_state_t;
+
+typedef struct {
+    jb_page_t current_page;
+    jb_page_t last_page_in_family[JB_FAMILY_COUNT];
+    int shift_held;
+    jb_ui_mode_t ui_mode;
+    int selected_bell;
+    int selected_resonator;
+    int preset_cursor;
+    int highlighted_pot;
+} jb_workflow_state_t;
+
+typedef struct {
+    const char *label;
+    float min_value;
+    float max_value;
+    int is_integer;
+} jb_hw_param_spec_t;
+
 // single-preset snapshot (add fields as synth grows; kept as plain floats for speed)
 typedef struct _jb_preset {
     int   used;                         // 0=empty
@@ -786,66 +904,7 @@ typedef struct {
     // runtime per-mode — BANK 1/2
     jb_mode_rt_t m[JB_MAX_MODES];
     jb_mode_rt_t m2[JB_MAX_MODES];
-
-    // --- SoA hot-path mirrors (render-time working set) ---
-    // These arrays are kept in sync from the AoS mode structs when coeffs/gains are rebuilt,
-    // then used as the render-time source of truth to reduce gather/scatter and improve cache/SIMD access.
-    float soa_svfL_g[2][JB_MAX_MODES];
-    float soa_svfL_d[2][JB_MAX_MODES];
-    float soa_svfL_s1[2][JB_MAX_MODES];
-    float soa_svfL_s2[2][JB_MAX_MODES];
-    float soa_svfR_g[2][JB_MAX_MODES];
-    float soa_svfR_d[2][JB_MAX_MODES];
-    float soa_svfR_s1[2][JB_MAX_MODES];
-    float soa_svfR_s2[2][JB_MAX_MODES];
-    float soa_gainL[2][JB_MAX_MODES];
-    float soa_gainR[2][JB_MAX_MODES];
-    float soa_driveL[2][JB_MAX_MODES];
-    float soa_driveR[2][JB_MAX_MODES];
-    float soa_ylastL[2][JB_MAX_MODES];
-    float soa_ylastR[2][JB_MAX_MODES];
-    uint8_t soa_active[2][JB_MAX_MODES];
 } jb_voice_t;
-
-static inline jb_mode_rt_t *jb_voice_bank_modes(jb_voice_t *v, int bank){
-    return bank ? v->m2 : v->m;
-}
-
-static inline void jb_sync_mode_to_soa(jb_voice_t *v, int bank, int idx, const jb_mode_rt_t *md){
-    v->soa_svfL_g[bank][idx]  = md->svfL.g;
-    v->soa_svfL_d[bank][idx]  = md->svfL.d;
-    v->soa_svfL_s1[bank][idx] = md->svfL.s1;
-    v->soa_svfL_s2[bank][idx] = md->svfL.s2;
-    v->soa_svfR_g[bank][idx]  = md->svfR.g;
-    v->soa_svfR_d[bank][idx]  = md->svfR.d;
-    v->soa_svfR_s1[bank][idx] = md->svfR.s1;
-    v->soa_svfR_s2[bank][idx] = md->svfR.s2;
-    v->soa_gainL[bank][idx]   = md->gain_nowL;
-    v->soa_gainR[bank][idx]   = md->gain_nowR;
-    v->soa_driveL[bank][idx]  = md->driveL;
-    v->soa_driveR[bank][idx]  = md->driveR;
-    v->soa_ylastL[bank][idx]  = md->y_pre_lastL;
-    v->soa_ylastR[bank][idx]  = md->y_pre_lastR;
-    v->soa_active[bank][idx]  = md->render_active;
-}
-
-static inline void jb_sync_bank_to_soa(jb_voice_t *v, int bank, int n_modes){
-    jb_mode_rt_t *m = jb_voice_bank_modes(v, bank);
-    for(int i=0;i<n_modes;++i) jb_sync_mode_to_soa(v, bank, i, &m[i]);
-}
-
-static inline void jb_zero_bank_soa(jb_voice_t *v, int bank, int n_modes){
-    for(int i=0;i<n_modes;++i){
-        v->soa_svfL_g[bank][i] = v->soa_svfL_d[bank][i] = 0.f;
-        v->soa_svfL_s1[bank][i] = v->soa_svfL_s2[bank][i] = 0.f;
-        v->soa_svfR_g[bank][i] = v->soa_svfR_d[bank][i] = 0.f;
-        v->soa_svfR_s1[bank][i] = v->soa_svfR_s2[bank][i] = 0.f;
-        v->soa_gainL[bank][i] = v->soa_gainR[bank][i] = 0.f;
-        v->soa_driveL[bank][i] = v->soa_driveR[bank][i] = 0.f;
-        v->soa_ylastL[bank][i] = v->soa_ylastR[bank][i] = 0.f;
-        v->soa_active[bank][i] = 0u;
-    }
-}
 
 // ---------- the object ----------
 static t_class *juicy_bank_tilde_class;
@@ -887,6 +946,81 @@ static t_symbol *jb_sym_pickup_1     = NULL;
 static t_symbol *jb_sym_pickup_2     = NULL;
 static t_symbol *jb_sym_none         = NULL;
 
+
+static const jb_page_family_t jb_page_family_map[JB_PAGE_COUNT] = {
+    JB_FAMILY_PLAY, JB_FAMILY_PLAY,
+    JB_FAMILY_BODY, JB_FAMILY_BODY, JB_FAMILY_BODY,
+    JB_FAMILY_EXCITER, JB_FAMILY_EXCITER, JB_FAMILY_EXCITER,
+    JB_FAMILY_MOD, JB_FAMILY_MOD, JB_FAMILY_MOD, JB_FAMILY_MOD,
+    JB_FAMILY_EDIT,
+    JB_FAMILY_PRESET
+};
+
+static const jb_hw_param_t jb_page_param_map[JB_PAGE_COUNT][6] = {
+    [JB_PAGE_PLAY] =        { JB_HW_PARAM_MASTER, JB_HW_PARAM_EXC_FADER, JB_HW_PARAM_BRIGHTNESS, JB_HW_PARAM_POSITION, JB_HW_PARAM_PICKUP, JB_HW_PARAM_SPACE_WETDRY },
+    [JB_PAGE_PLAY_ALT] =    { JB_HW_PARAM_PARTIALS, JB_HW_PARAM_DENSITY, JB_HW_PARAM_STRETCH, JB_HW_PARAM_WARP, JB_HW_PARAM_DISPERSION, JB_HW_PARAM_NONE },
+    [JB_PAGE_BODY_A] =      { JB_HW_PARAM_DENSITY, JB_HW_PARAM_STRETCH, JB_HW_PARAM_WARP, JB_HW_PARAM_DISPERSION, JB_HW_PARAM_BRIGHTNESS, JB_HW_PARAM_PARTIALS },
+    [JB_PAGE_BODY_B] =      { JB_HW_PARAM_DENSITY, JB_HW_PARAM_STRETCH, JB_HW_PARAM_WARP, JB_HW_PARAM_DISPERSION, JB_HW_PARAM_BRIGHTNESS, JB_HW_PARAM_PARTIALS },
+    [JB_PAGE_DAMPERS] =     { JB_HW_PARAM_BELL_FREQ, JB_HW_PARAM_BELL_ZETA, JB_HW_PARAM_BELL_NPL, JB_HW_PARAM_BELL_NPR, JB_HW_PARAM_BELL_NPM, JB_HW_PARAM_NONE },
+    [JB_PAGE_EXCITER_A] =   { JB_HW_PARAM_EXC_FADER, JB_HW_PARAM_EXC_ATTACK, JB_HW_PARAM_EXC_DECAY, JB_HW_PARAM_EXC_SUSTAIN, JB_HW_PARAM_EXC_RELEASE, JB_HW_PARAM_NOISE_COLOR },
+    [JB_PAGE_EXCITER_B] =   { JB_HW_PARAM_IMPULSE_SHAPE, JB_HW_PARAM_EXC_ATTACK_CURVE, JB_HW_PARAM_EXC_DECAY_CURVE, JB_HW_PARAM_EXC_RELEASE_CURVE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE },
+    [JB_PAGE_SPACE] =       { JB_HW_PARAM_SPACE_SIZE, JB_HW_PARAM_SPACE_DECAY, JB_HW_PARAM_SPACE_DIFFUSION, JB_HW_PARAM_SPACE_DAMPING, JB_HW_PARAM_SPACE_WETDRY, JB_HW_PARAM_NONE },
+    [JB_PAGE_MOD_LFO1] =    { JB_HW_PARAM_LFO_TARGET, JB_HW_PARAM_LFO_SHAPE, JB_HW_PARAM_LFO_RATE, JB_HW_PARAM_LFO_PHASE, JB_HW_PARAM_LFO_MODE, JB_HW_PARAM_LFO_AMOUNT },
+    [JB_PAGE_MOD_LFO2] =    { JB_HW_PARAM_LFO_TARGET, JB_HW_PARAM_LFO_SHAPE, JB_HW_PARAM_LFO_RATE, JB_HW_PARAM_LFO_PHASE, JB_HW_PARAM_LFO_MODE, JB_HW_PARAM_LFO_AMOUNT },
+    [JB_PAGE_VELOCITY] =    { JB_HW_PARAM_VEL_AMOUNT, JB_HW_PARAM_VEL_TARGET, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE },
+    [JB_PAGE_GLOBAL_EDIT] = { JB_HW_PARAM_BANK_SELECT, JB_HW_PARAM_OCTAVE, JB_HW_PARAM_SEMITONE, JB_HW_PARAM_TUNE, JB_HW_PARAM_PARTIALS, JB_HW_PARAM_NONE },
+    [JB_PAGE_RESONATOR_EDIT]={ JB_HW_PARAM_RESONATOR_INDEX, JB_HW_PARAM_RATIO, JB_HW_PARAM_GAIN, JB_HW_PARAM_DECAY, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE },
+    [JB_PAGE_PRESET] =      { JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE }
+};
+
+static const jb_hw_param_spec_t jb_hw_param_specs[] = {
+    [JB_HW_PARAM_NONE]            = { "---",    0.f,   1.f,   0 },
+    [JB_HW_PARAM_MASTER]          = { "MSTR",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_BRIGHTNESS]      = { "BRGT",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_POSITION]        = { "POS",    0.f,   1.f,   0 },
+    [JB_HW_PARAM_PICKUP]          = { "PICK",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_SPACE_WETDRY]    = { "WET",   -1.f,   1.f,   0 },
+    [JB_HW_PARAM_EXC_FADER]       = { "EXC",    0.f,   1.f,   0 },
+    [JB_HW_PARAM_STRETCH]         = { "STR",   -1.f,   1.f,   0 },
+    [JB_HW_PARAM_WARP]            = { "WARP",  -1.f,   1.f,   0 },
+    [JB_HW_PARAM_DISPERSION]      = { "DISP",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_DENSITY]         = { "DENS",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_PARTIALS]        = { "PART",   0.f,  32.f,   1 },
+    [JB_HW_PARAM_BELL_FREQ]       = { "FREQ",  40.f, 12000.f, 0 },
+    [JB_HW_PARAM_BELL_ZETA]       = { "ZETA",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_BELL_NPL]        = { "LPOW",   0.1f,  8.f,   0 },
+    [JB_HW_PARAM_BELL_NPR]        = { "RPOW",   0.1f,  8.f,   0 },
+    [JB_HW_PARAM_BELL_NPM]        = { "MODEL", -1.9f,  8.f,   0 },
+    [JB_HW_PARAM_EXC_ATTACK]      = { "ATK",    0.f, 5000.f,  0 },
+    [JB_HW_PARAM_EXC_DECAY]       = { "DEC",    0.f, 5000.f,  0 },
+    [JB_HW_PARAM_EXC_SUSTAIN]     = { "SUS",    0.f,   1.f,   0 },
+    [JB_HW_PARAM_EXC_RELEASE]     = { "REL",    0.f, 5000.f,  0 },
+    [JB_HW_PARAM_NOISE_COLOR]     = { "NCOL",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_IMPULSE_SHAPE]   = { "IMPL",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_EXC_ATTACK_CURVE]= { "ATKC",  -1.f,   1.f,   0 },
+    [JB_HW_PARAM_EXC_DECAY_CURVE] = { "DECC",  -1.f,   1.f,   0 },
+    [JB_HW_PARAM_EXC_RELEASE_CURVE]={"RELC",  -1.f,   1.f,   0 },
+    [JB_HW_PARAM_SPACE_SIZE]      = { "SIZE",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_SPACE_DECAY]     = { "SDEC",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_SPACE_DIFFUSION] = { "DIFF",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_SPACE_DAMPING]   = { "DAMP",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_LFO_TARGET]      = { "TGT",    0.f,   4.f,   1 },
+    [JB_HW_PARAM_LFO_SHAPE]       = { "SHAPE",  1.f,   5.f,   1 },
+    [JB_HW_PARAM_LFO_RATE]        = { "RATE",   0.f,  20.f,   0 },
+    [JB_HW_PARAM_LFO_PHASE]       = { "PHASE",  0.f,   1.f,   0 },
+    [JB_HW_PARAM_LFO_MODE]        = { "MODE",   1.f,   2.f,   1 },
+    [JB_HW_PARAM_LFO_AMOUNT]      = { "AMT",   -1.f,   1.f,   0 },
+    [JB_HW_PARAM_VEL_AMOUNT]      = { "VELA",  -1.f,   1.f,   0 },
+    [JB_HW_PARAM_VEL_TARGET]      = { "VELT",   0.f,   4.f,   1 },
+    [JB_HW_PARAM_BANK_SELECT]     = { "BANK",   1.f,   2.f,   1 },
+    [JB_HW_PARAM_OCTAVE]          = { "OCTV",  -2.f,   2.f,   1 },
+    [JB_HW_PARAM_SEMITONE]        = { "SEMI", -12.f,  12.f,   1 },
+    [JB_HW_PARAM_TUNE]            = { "TUNE", -100.f,100.f,   0 },
+    [JB_HW_PARAM_RESONATOR_INDEX] = { "RIDX",   1.f,  32.f,   1 },
+    [JB_HW_PARAM_RATIO]           = { "RAT",    0.f,  32.f,   0 },
+    [JB_HW_PARAM_GAIN]            = { "GAIN",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_DECAY]           = { "DECAY",  1.f, 5000.f,  0 }
+};
 
 // Proxy to accept ANY message on target-selection inlets (so message boxes like 'damper_1' work)
 typedef struct _juicy_bank_tilde t_juicy_bank_tilde; // forward
@@ -1107,6 +1241,11 @@ int preset_mode;              // jb_preset_mode_t
 int preset_cursor;            // 0..JB_PRESET_NAME_MAX-1 (naming mode)
 int preset_slot_sel;          // 0..JB_PRESET_SLOTS-1 (slot mode)
 char preset_edit_name[JB_PRESET_NAME_MAX + 1];
+
+    // hardware/workflow transition state
+    jb_workflow_state_t wf;
+    jb_hw_pot_state_t hw_pots[6];
+
    // LFO1/LFO2 targets
     jb_tgtproxy *tgtproxy_lfo1;
     jb_tgtproxy *tgtproxy_lfo2;
@@ -2456,7 +2595,6 @@ float md_amt = jb_clamp(jb_bank_micro_detune(x, bank),0.f,1.f);
         jb_svf_set_params(&md->svfL, gL, R);
         jb_svf_set_params(&md->svfR, gR, R);
     }
-    jb_sync_bank_to_soa(v, bank, n_modes);
 }
 static void jb_update_voice_coeffs(t_juicy_bank_tilde *x, jb_voice_t *v){
     jb_update_voice_coeffs_bank(x, v, 0);
@@ -2743,8 +2881,6 @@ static void jb_voice_reset_states(const t_juicy_bank_tilde *x, jb_voice_t *v, jb
         v->disp_offset2[i]=0.f; v->disp_target2[i]=0.f;
             }
 
-    jb_sync_bank_to_soa(v, 0, x->n_modes);
-    jb_sync_bank_to_soa(v, 1, x->n_modes2);
     jb_mark_voice_dirty(v);
 }
 
@@ -2813,8 +2949,6 @@ static void jb_voice_panic_reset(t_juicy_bank_tilde *x, jb_voice_t *v){
         md->nyq_kill = 0;
         md->render_active = 0;
     }
-    jb_sync_bank_to_soa(v, 0, x->n_modes);
-    jb_sync_bank_to_soa(v, 1, x->n_modes2);
     jb_mark_voice_dirty(v);
 }
 
@@ -3300,46 +3434,45 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 int m=0;
                 for(; m+3 < x->n_modes2; m+=4){
                     // Early skip if all 4 inactive
-                    const int bank = 1;
                     jb_mode_rt_t *md0=&v->m2[m+0];
                     jb_mode_rt_t *md1=&v->m2[m+1];
                     jb_mode_rt_t *md2=&v->m2[m+2];
                     jb_mode_rt_t *md3=&v->m2[m+3];
-                    uint32_t am0 = v->soa_active[bank][m+0] ? 0xFFFFFFFFu : 0u;
-                    uint32_t am1 = v->soa_active[bank][m+1] ? 0xFFFFFFFFu : 0u;
-                    uint32_t am2 = v->soa_active[bank][m+2] ? 0xFFFFFFFFu : 0u;
-                    uint32_t am3 = v->soa_active[bank][m+3] ? 0xFFFFFFFFu : 0u;
+                    uint32_t am0 = (md0->render_active) ? 0xFFFFFFFFu : 0u;
+                    uint32_t am1 = (md1->render_active) ? 0xFFFFFFFFu : 0u;
+                    uint32_t am2 = (md2->render_active) ? 0xFFFFFFFFu : 0u;
+                    uint32_t am3 = (md3->render_active) ? 0xFFFFFFFFu : 0u;
                     if(!(am0|am1|am2|am3)) continue;
                     uint32x4_t activeMask = (uint32x4_t){am0, am1, am2, am3};
                 
                     // Gather SVF params/states (L)
-                    float gL_[4]  = {v->soa_svfL_g[bank][m+0],  v->soa_svfL_g[bank][m+1],  v->soa_svfL_g[bank][m+2],  v->soa_svfL_g[bank][m+3]};
-                    float dL_[4]  = {v->soa_svfL_d[bank][m+0],  v->soa_svfL_d[bank][m+1],  v->soa_svfL_d[bank][m+2],  v->soa_svfL_d[bank][m+3]};
-                    float s1L_[4] = {v->soa_svfL_s1[bank][m+0], v->soa_svfL_s1[bank][m+1], v->soa_svfL_s1[bank][m+2], v->soa_svfL_s1[bank][m+3]};
-                    float s2L_[4] = {v->soa_svfL_s2[bank][m+0], v->soa_svfL_s2[bank][m+1], v->soa_svfL_s2[bank][m+2], v->soa_svfL_s2[bank][m+3]};
+                    float gL_[4]  = {md0->svfL.g,  md1->svfL.g,  md2->svfL.g,  md3->svfL.g};
+                    float dL_[4]  = {md0->svfL.d,  md1->svfL.d,  md2->svfL.d,  md3->svfL.d};
+                    float s1L_[4] = {md0->svfL.s1, md1->svfL.s1, md2->svfL.s1, md3->svfL.s1};
+                    float s2L_[4] = {md0->svfL.s2, md1->svfL.s2, md2->svfL.s2, md3->svfL.s2};
                     float32x4_t gL4  = vld1q_f32(gL_);
                     float32x4_t dL4  = vld1q_f32(dL_);
                     float32x4_t s1L4 = vld1q_f32(s1L_);
                     float32x4_t s2L4 = vld1q_f32(s2L_);
                 
                     // Gather SVF params/states (R)
-                    float gR_[4]  = {v->soa_svfR_g[bank][m+0],  v->soa_svfR_g[bank][m+1],  v->soa_svfR_g[bank][m+2],  v->soa_svfR_g[bank][m+3]};
-                    float dR_[4]  = {v->soa_svfR_d[bank][m+0],  v->soa_svfR_d[bank][m+1],  v->soa_svfR_d[bank][m+2],  v->soa_svfR_d[bank][m+3]};
-                    float s1R_[4] = {v->soa_svfR_s1[bank][m+0], v->soa_svfR_s1[bank][m+1], v->soa_svfR_s1[bank][m+2], v->soa_svfR_s1[bank][m+3]};
-                    float s2R_[4] = {v->soa_svfR_s2[bank][m+0], v->soa_svfR_s2[bank][m+1], v->soa_svfR_s2[bank][m+2], v->soa_svfR_s2[bank][m+3]};
+                    float gR_[4]  = {md0->svfR.g,  md1->svfR.g,  md2->svfR.g,  md3->svfR.g};
+                    float dR_[4]  = {md0->svfR.d,  md1->svfR.d,  md2->svfR.d,  md3->svfR.d};
+                    float s1R_[4] = {md0->svfR.s1, md1->svfR.s1, md2->svfR.s1, md3->svfR.s1};
+                    float s2R_[4] = {md0->svfR.s2, md1->svfR.s2, md2->svfR.s2, md3->svfR.s2};
                     float32x4_t gR4  = vld1q_f32(gR_);
                     float32x4_t dR4  = vld1q_f32(dR_);
                     float32x4_t s1R4 = vld1q_f32(s1R_);
                     float32x4_t s2R4 = vld1q_f32(s2R_);
                 
                     // Drive update + input vectors
-                    float driveL0=v->soa_driveL[bank][m+0], driveL1=v->soa_driveL[bank][m+1], driveL2=v->soa_driveL[bank][m+2], driveL3=v->soa_driveL[bank][m+3];
-                    float driveR0=v->soa_driveR[bank][m+0], driveR1=v->soa_driveR[bank][m+1], driveR2=v->soa_driveR[bank][m+2], driveR3=v->soa_driveR[bank][m+3];
+                    float driveL0=md0->driveL, driveL1=md1->driveL, driveL2=md2->driveL, driveL3=md3->driveL;
+                    float driveR0=md0->driveR, driveR1=md1->driveR, driveR2=md2->driveR, driveR3=md3->driveR;
                     const float att_a = 1.f;
-                    if(am0){ float excL = exL * v->soa_gainL[bank][m+0]; float excR = exR * v->soa_gainR[bank][m+0]; driveL0 += att_a*(excL-driveL0); driveR0 += att_a*(excR-driveR0); }
-                    if(am1){ float excL = exL * v->soa_gainL[bank][m+1]; float excR = exR * v->soa_gainR[bank][m+1]; driveL1 += att_a*(excL-driveL1); driveR1 += att_a*(excR-driveR1); }
-                    if(am2){ float excL = exL * v->soa_gainL[bank][m+2]; float excR = exR * v->soa_gainR[bank][m+2]; driveL2 += att_a*(excL-driveL2); driveR2 += att_a*(excR-driveR2); }
-                    if(am3){ float excL = exL * v->soa_gainL[bank][m+3]; float excR = exR * v->soa_gainR[bank][m+3]; driveL3 += att_a*(excL-driveL3); driveR3 += att_a*(excR-driveR3); }
+                    if(am0){ float excL = exL * md0->gain_nowL; float excR = exR * md0->gain_nowR; driveL0 += att_a*(excL-driveL0); driveR0 += att_a*(excR-driveR0); }
+                    if(am1){ float excL = exL * md1->gain_nowL; float excR = exR * md1->gain_nowR; driveL1 += att_a*(excL-driveL1); driveR1 += att_a*(excR-driveR1); }
+                    if(am2){ float excL = exL * md2->gain_nowL; float excR = exR * md2->gain_nowR; driveL2 += att_a*(excL-driveL2); driveR2 += att_a*(excR-driveR2); }
+                    if(am3){ float excL = exL * md3->gain_nowL; float excR = exR * md3->gain_nowR; driveL3 += att_a*(excL-driveL3); driveR3 += att_a*(excR-driveR3); }
                     float xL_[4] = {driveL0, driveL1, driveL2, driveL3};
                     float xR_[4] = {driveR0, driveR1, driveR2, driveR3};
                     float32x4_t xL4 = vld1q_f32(xL_);
@@ -3362,23 +3495,22 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     vst1q_f32(s1Rlane, s1R4); vst1q_f32(s2Rlane, s2R4);
                 
                     const float e = v->rel_env2;
-                    if(am0){ v->soa_svfL_s1[bank][m+0]=s1Llane[0]; v->soa_svfL_s2[bank][m+0]=s2Llane[0]; v->soa_svfR_s1[bank][m+0]=s1Rlane[0]; v->soa_svfR_s2[bank][m+0]=s2Rlane[0]; v->soa_driveL[bank][m+0]=driveL0; v->soa_driveR[bank][m+0]=driveR0; float y0L=jb_kill_denorm(yLlane[0]); float y0R=jb_kill_denorm(yRlane[0]); v->soa_ylastL[bank][m+0]=y0L; v->soa_ylastR[bank][m+0]=y0R; md0->y_pre_lastL=y0L; md0->y_pre_lastR=y0R; b2OutL=jb_kill_denorm(b2OutL + (y0L*e)*bank_gain2); b2OutR=jb_kill_denorm(b2OutR + (y0R*e)*bank_gain2); }
-                    if(am1){ v->soa_svfL_s1[bank][m+1]=s1Llane[1]; v->soa_svfL_s2[bank][m+1]=s2Llane[1]; v->soa_svfR_s1[bank][m+1]=s1Rlane[1]; v->soa_svfR_s2[bank][m+1]=s2Rlane[1]; v->soa_driveL[bank][m+1]=driveL1; v->soa_driveR[bank][m+1]=driveR1; float y1L=jb_kill_denorm(yLlane[1]); float y1R=jb_kill_denorm(yRlane[1]); v->soa_ylastL[bank][m+1]=y1L; v->soa_ylastR[bank][m+1]=y1R; md1->y_pre_lastL=y1L; md1->y_pre_lastR=y1R; b2OutL=jb_kill_denorm(b2OutL + (y1L*e)*bank_gain2); b2OutR=jb_kill_denorm(b2OutR + (y1R*e)*bank_gain2); }
-                    if(am2){ v->soa_svfL_s1[bank][m+2]=s1Llane[2]; v->soa_svfL_s2[bank][m+2]=s2Llane[2]; v->soa_svfR_s1[bank][m+2]=s1Rlane[2]; v->soa_svfR_s2[bank][m+2]=s2Rlane[2]; v->soa_driveL[bank][m+2]=driveL2; v->soa_driveR[bank][m+2]=driveR2; float y2L=jb_kill_denorm(yLlane[2]); float y2R=jb_kill_denorm(yRlane[2]); v->soa_ylastL[bank][m+2]=y2L; v->soa_ylastR[bank][m+2]=y2R; md2->y_pre_lastL=y2L; md2->y_pre_lastR=y2R; b2OutL=jb_kill_denorm(b2OutL + (y2L*e)*bank_gain2); b2OutR=jb_kill_denorm(b2OutR + (y2R*e)*bank_gain2); }
-                    if(am3){ v->soa_svfL_s1[bank][m+3]=s1Llane[3]; v->soa_svfL_s2[bank][m+3]=s2Llane[3]; v->soa_svfR_s1[bank][m+3]=s1Rlane[3]; v->soa_svfR_s2[bank][m+3]=s2Rlane[3]; v->soa_driveL[bank][m+3]=driveL3; v->soa_driveR[bank][m+3]=driveR3; float y3L=jb_kill_denorm(yLlane[3]); float y3R=jb_kill_denorm(yRlane[3]); v->soa_ylastL[bank][m+3]=y3L; v->soa_ylastR[bank][m+3]=y3R; md3->y_pre_lastL=y3L; md3->y_pre_lastR=y3R; b2OutL=jb_kill_denorm(b2OutL + (y3L*e)*bank_gain2); b2OutR=jb_kill_denorm(b2OutR + (y3R*e)*bank_gain2); }
+                    if(am0){ md0->svfL.s1=s1Llane[0]; md0->svfL.s2=s2Llane[0]; md0->svfR.s1=s1Rlane[0]; md0->svfR.s2=s2Rlane[0]; md0->driveL=driveL0; md0->driveR=driveR0; float y0L=jb_kill_denorm(yLlane[0]); float y0R=jb_kill_denorm(yRlane[0]); md0->y_pre_lastL=y0L; md0->y_pre_lastR=y0R; b2OutL=jb_kill_denorm(b2OutL + (y0L*e)*bank_gain2); b2OutR=jb_kill_denorm(b2OutR + (y0R*e)*bank_gain2); }
+                    if(am1){ md1->svfL.s1=s1Llane[1]; md1->svfL.s2=s2Llane[1]; md1->svfR.s1=s1Rlane[1]; md1->svfR.s2=s2Rlane[1]; md1->driveL=driveL1; md1->driveR=driveR1; float y1L=jb_kill_denorm(yLlane[1]); float y1R=jb_kill_denorm(yRlane[1]); md1->y_pre_lastL=y1L; md1->y_pre_lastR=y1R; b2OutL=jb_kill_denorm(b2OutL + (y1L*e)*bank_gain2); b2OutR=jb_kill_denorm(b2OutR + (y1R*e)*bank_gain2); }
+                    if(am2){ md2->svfL.s1=s1Llane[2]; md2->svfL.s2=s2Llane[2]; md2->svfR.s1=s1Rlane[2]; md2->svfR.s2=s2Rlane[2]; md2->driveL=driveL2; md2->driveR=driveR2; float y2L=jb_kill_denorm(yLlane[2]); float y2R=jb_kill_denorm(yRlane[2]); md2->y_pre_lastL=y2L; md2->y_pre_lastR=y2R; b2OutL=jb_kill_denorm(b2OutL + (y2L*e)*bank_gain2); b2OutR=jb_kill_denorm(b2OutR + (y2R*e)*bank_gain2); }
+                    if(am3){ md3->svfL.s1=s1Llane[3]; md3->svfL.s2=s2Llane[3]; md3->svfR.s1=s1Rlane[3]; md3->svfR.s2=s2Rlane[3]; md3->driveL=driveL3; md3->driveR=driveR3; float y3L=jb_kill_denorm(yLlane[3]); float y3R=jb_kill_denorm(yRlane[3]); md3->y_pre_lastL=y3L; md3->y_pre_lastR=y3R; b2OutL=jb_kill_denorm(b2OutL + (y3L*e)*bank_gain2); b2OutR=jb_kill_denorm(b2OutR + (y3R*e)*bank_gain2); }
                 }
                 // scalar tail
                 for(; m < x->n_modes2; m++){ 
                 
                     if(!base2[m].active) continue;
                     jb_mode_rt_t *md=&v->m2[m];
-                    const int bank = 1;
-                    float gL = v->soa_gainL[bank][m];
-                    float gR = v->soa_gainR[bank][m];
-                    if (!v->soa_active[bank][m]) continue;
+                    float gL = md->gain_nowL;
+                    float gR = md->gain_nowR;
+                    if (!md->render_active) continue;
 
-                    float driveL = v->soa_driveL[bank][m];
-                    float driveR = v->soa_driveR[bank][m];
+                    float driveL = md->driveL;
+                    float driveR = md->driveR;
                     const float att_a = 1.f;
                     float excL = exL * gL;
                     float excR = exR * gR;
@@ -3391,13 +3523,9 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 	                    float y_rawR = jb_svf_bp_tick(&md->svfR, driveR);
 	                    y_rawR = jb_kill_denorm(y_rawR);
 
-                    v->soa_driveL[bank][m] = driveL;
-                    v->soa_driveR[bank][m] = driveR;
                     md->driveL = driveL;
                     md->driveR = driveR;
 	                    // Pre-master, pre-envelope signal snapshot (for meters / hit detection)
-	                    v->soa_ylastL[bank][m] = y_rawL;
-	                    v->soa_ylastR[bank][m] = y_rawR;
 	                    md->y_pre_lastL = y_rawL;
 	                    md->y_pre_lastR = y_rawR;
 
@@ -3411,13 +3539,12 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 
                     if(!base2[m].active) continue;
                     jb_mode_rt_t *md=&v->m2[m];
-                    const int bank = 1;
-                    float gL = v->soa_gainL[bank][m];
-                    float gR = v->soa_gainR[bank][m];
-                    if (!v->soa_active[bank][m]) continue;
+                    float gL = md->gain_nowL;
+                    float gR = md->gain_nowR;
+                    if (!md->render_active) continue;
 
-                    float driveL = v->soa_driveL[bank][m];
-                    float driveR = v->soa_driveR[bank][m];
+                    float driveL = md->driveL;
+                    float driveR = md->driveR;
                     const float att_a = 1.f;
                     float excL = exL * gL;
                     float excR = exR * gR;
@@ -3453,46 +3580,45 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 int m=0;
                 for(; m+3 < x->n_modes; m+=4){
                     // Early skip if all 4 inactive
-                    const int bank = 0;
                     jb_mode_rt_t *md0=&v->m[m+0];
                     jb_mode_rt_t *md1=&v->m[m+1];
                     jb_mode_rt_t *md2=&v->m[m+2];
                     jb_mode_rt_t *md3=&v->m[m+3];
-                    uint32_t am0 = v->soa_active[bank][m+0] ? 0xFFFFFFFFu : 0u;
-                    uint32_t am1 = v->soa_active[bank][m+1] ? 0xFFFFFFFFu : 0u;
-                    uint32_t am2 = v->soa_active[bank][m+2] ? 0xFFFFFFFFu : 0u;
-                    uint32_t am3 = v->soa_active[bank][m+3] ? 0xFFFFFFFFu : 0u;
+                    uint32_t am0 = (md0->render_active) ? 0xFFFFFFFFu : 0u;
+                    uint32_t am1 = (md1->render_active) ? 0xFFFFFFFFu : 0u;
+                    uint32_t am2 = (md2->render_active) ? 0xFFFFFFFFu : 0u;
+                    uint32_t am3 = (md3->render_active) ? 0xFFFFFFFFu : 0u;
                     if(!(am0|am1|am2|am3)) continue;
                     uint32x4_t activeMask = (uint32x4_t){am0, am1, am2, am3};
                 
                     // Gather SVF params/states (L)
-                    float gL_[4]  = {v->soa_svfL_g[bank][m+0],  v->soa_svfL_g[bank][m+1],  v->soa_svfL_g[bank][m+2],  v->soa_svfL_g[bank][m+3]};
-                    float dL_[4]  = {v->soa_svfL_d[bank][m+0],  v->soa_svfL_d[bank][m+1],  v->soa_svfL_d[bank][m+2],  v->soa_svfL_d[bank][m+3]};
-                    float s1L_[4] = {v->soa_svfL_s1[bank][m+0], v->soa_svfL_s1[bank][m+1], v->soa_svfL_s1[bank][m+2], v->soa_svfL_s1[bank][m+3]};
-                    float s2L_[4] = {v->soa_svfL_s2[bank][m+0], v->soa_svfL_s2[bank][m+1], v->soa_svfL_s2[bank][m+2], v->soa_svfL_s2[bank][m+3]};
+                    float gL_[4]  = {md0->svfL.g,  md1->svfL.g,  md2->svfL.g,  md3->svfL.g};
+                    float dL_[4]  = {md0->svfL.d,  md1->svfL.d,  md2->svfL.d,  md3->svfL.d};
+                    float s1L_[4] = {md0->svfL.s1, md1->svfL.s1, md2->svfL.s1, md3->svfL.s1};
+                    float s2L_[4] = {md0->svfL.s2, md1->svfL.s2, md2->svfL.s2, md3->svfL.s2};
                     float32x4_t gL4  = vld1q_f32(gL_);
                     float32x4_t dL4  = vld1q_f32(dL_);
                     float32x4_t s1L4 = vld1q_f32(s1L_);
                     float32x4_t s2L4 = vld1q_f32(s2L_);
                 
                     // Gather SVF params/states (R)
-                    float gR_[4]  = {v->soa_svfR_g[bank][m+0],  v->soa_svfR_g[bank][m+1],  v->soa_svfR_g[bank][m+2],  v->soa_svfR_g[bank][m+3]};
-                    float dR_[4]  = {v->soa_svfR_d[bank][m+0],  v->soa_svfR_d[bank][m+1],  v->soa_svfR_d[bank][m+2],  v->soa_svfR_d[bank][m+3]};
-                    float s1R_[4] = {v->soa_svfR_s1[bank][m+0], v->soa_svfR_s1[bank][m+1], v->soa_svfR_s1[bank][m+2], v->soa_svfR_s1[bank][m+3]};
-                    float s2R_[4] = {v->soa_svfR_s2[bank][m+0], v->soa_svfR_s2[bank][m+1], v->soa_svfR_s2[bank][m+2], v->soa_svfR_s2[bank][m+3]};
+                    float gR_[4]  = {md0->svfR.g,  md1->svfR.g,  md2->svfR.g,  md3->svfR.g};
+                    float dR_[4]  = {md0->svfR.d,  md1->svfR.d,  md2->svfR.d,  md3->svfR.d};
+                    float s1R_[4] = {md0->svfR.s1, md1->svfR.s1, md2->svfR.s1, md3->svfR.s1};
+                    float s2R_[4] = {md0->svfR.s2, md1->svfR.s2, md2->svfR.s2, md3->svfR.s2};
                     float32x4_t gR4  = vld1q_f32(gR_);
                     float32x4_t dR4  = vld1q_f32(dR_);
                     float32x4_t s1R4 = vld1q_f32(s1R_);
                     float32x4_t s2R4 = vld1q_f32(s2R_);
                 
                     // Drive update + input vectors
-                    float driveL0=v->soa_driveL[bank][m+0], driveL1=v->soa_driveL[bank][m+1], driveL2=v->soa_driveL[bank][m+2], driveL3=v->soa_driveL[bank][m+3];
-                    float driveR0=v->soa_driveR[bank][m+0], driveR1=v->soa_driveR[bank][m+1], driveR2=v->soa_driveR[bank][m+2], driveR3=v->soa_driveR[bank][m+3];
+                    float driveL0=md0->driveL, driveL1=md1->driveL, driveL2=md2->driveL, driveL3=md3->driveL;
+                    float driveR0=md0->driveR, driveR1=md1->driveR, driveR2=md2->driveR, driveR3=md3->driveR;
                     const float att_a = 1.f;
-                    if(am0){ float excL = exL * v->soa_gainL[bank][m+0]; float excR = exR * v->soa_gainR[bank][m+0]; driveL0 += att_a*(excL-driveL0); driveR0 += att_a*(excR-driveR0); }
-                    if(am1){ float excL = exL * v->soa_gainL[bank][m+1]; float excR = exR * v->soa_gainR[bank][m+1]; driveL1 += att_a*(excL-driveL1); driveR1 += att_a*(excR-driveR1); }
-                    if(am2){ float excL = exL * v->soa_gainL[bank][m+2]; float excR = exR * v->soa_gainR[bank][m+2]; driveL2 += att_a*(excL-driveL2); driveR2 += att_a*(excR-driveR2); }
-                    if(am3){ float excL = exL * v->soa_gainL[bank][m+3]; float excR = exR * v->soa_gainR[bank][m+3]; driveL3 += att_a*(excL-driveL3); driveR3 += att_a*(excR-driveR3); }
+                    if(am0){ float excL = exL * md0->gain_nowL; float excR = exR * md0->gain_nowR; driveL0 += att_a*(excL-driveL0); driveR0 += att_a*(excR-driveR0); }
+                    if(am1){ float excL = exL * md1->gain_nowL; float excR = exR * md1->gain_nowR; driveL1 += att_a*(excL-driveL1); driveR1 += att_a*(excR-driveR1); }
+                    if(am2){ float excL = exL * md2->gain_nowL; float excR = exR * md2->gain_nowR; driveL2 += att_a*(excL-driveL2); driveR2 += att_a*(excR-driveR2); }
+                    if(am3){ float excL = exL * md3->gain_nowL; float excR = exR * md3->gain_nowR; driveL3 += att_a*(excL-driveL3); driveR3 += att_a*(excR-driveR3); }
                     float xL_[4] = {driveL0, driveL1, driveL2, driveL3};
                     float xR_[4] = {driveR0, driveR1, driveR2, driveR3};
                     float32x4_t xL4 = vld1q_f32(xL_);
@@ -3515,23 +3641,22 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                     vst1q_f32(s1Rlane, s1R4); vst1q_f32(s2Rlane, s2R4);
                 
                     const float e = v->rel_env;
-                    if(am0){ v->soa_svfL_s1[bank][m+0]=s1Llane[0]; v->soa_svfL_s2[bank][m+0]=s2Llane[0]; v->soa_svfR_s1[bank][m+0]=s1Rlane[0]; v->soa_svfR_s2[bank][m+0]=s2Rlane[0]; v->soa_driveL[bank][m+0]=driveL0; v->soa_driveR[bank][m+0]=driveR0; float y0L=jb_kill_denorm(yLlane[0]); float y0R=jb_kill_denorm(yRlane[0]); v->soa_ylastL[bank][m+0]=y0L; v->soa_ylastR[bank][m+0]=y0R; md0->y_pre_lastL=y0L; md0->y_pre_lastR=y0R; b1OutL=jb_kill_denorm(b1OutL + (y0L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y0R*e)*bank_gain1); }
-                    if(am1){ v->soa_svfL_s1[bank][m+1]=s1Llane[1]; v->soa_svfL_s2[bank][m+1]=s2Llane[1]; v->soa_svfR_s1[bank][m+1]=s1Rlane[1]; v->soa_svfR_s2[bank][m+1]=s2Rlane[1]; v->soa_driveL[bank][m+1]=driveL1; v->soa_driveR[bank][m+1]=driveR1; float y1L=jb_kill_denorm(yLlane[1]); float y1R=jb_kill_denorm(yRlane[1]); v->soa_ylastL[bank][m+1]=y1L; v->soa_ylastR[bank][m+1]=y1R; md1->y_pre_lastL=y1L; md1->y_pre_lastR=y1R; b1OutL=jb_kill_denorm(b1OutL + (y1L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y1R*e)*bank_gain1); }
-                    if(am2){ v->soa_svfL_s1[bank][m+2]=s1Llane[2]; v->soa_svfL_s2[bank][m+2]=s2Llane[2]; v->soa_svfR_s1[bank][m+2]=s1Rlane[2]; v->soa_svfR_s2[bank][m+2]=s2Rlane[2]; v->soa_driveL[bank][m+2]=driveL2; v->soa_driveR[bank][m+2]=driveR2; float y2L=jb_kill_denorm(yLlane[2]); float y2R=jb_kill_denorm(yRlane[2]); v->soa_ylastL[bank][m+2]=y2L; v->soa_ylastR[bank][m+2]=y2R; md2->y_pre_lastL=y2L; md2->y_pre_lastR=y2R; b1OutL=jb_kill_denorm(b1OutL + (y2L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y2R*e)*bank_gain1); }
-                    if(am3){ v->soa_svfL_s1[bank][m+3]=s1Llane[3]; v->soa_svfL_s2[bank][m+3]=s2Llane[3]; v->soa_svfR_s1[bank][m+3]=s1Rlane[3]; v->soa_svfR_s2[bank][m+3]=s2Rlane[3]; v->soa_driveL[bank][m+3]=driveL3; v->soa_driveR[bank][m+3]=driveR3; float y3L=jb_kill_denorm(yLlane[3]); float y3R=jb_kill_denorm(yRlane[3]); v->soa_ylastL[bank][m+3]=y3L; v->soa_ylastR[bank][m+3]=y3R; md3->y_pre_lastL=y3L; md3->y_pre_lastR=y3R; b1OutL=jb_kill_denorm(b1OutL + (y3L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y3R*e)*bank_gain1); }
+                    if(am0){ md0->svfL.s1=s1Llane[0]; md0->svfL.s2=s2Llane[0]; md0->svfR.s1=s1Rlane[0]; md0->svfR.s2=s2Rlane[0]; md0->driveL=driveL0; md0->driveR=driveR0; float y0L=jb_kill_denorm(yLlane[0]); float y0R=jb_kill_denorm(yRlane[0]); md0->y_pre_lastL=y0L; md0->y_pre_lastR=y0R; b1OutL=jb_kill_denorm(b1OutL + (y0L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y0R*e)*bank_gain1); }
+                    if(am1){ md1->svfL.s1=s1Llane[1]; md1->svfL.s2=s2Llane[1]; md1->svfR.s1=s1Rlane[1]; md1->svfR.s2=s2Rlane[1]; md1->driveL=driveL1; md1->driveR=driveR1; float y1L=jb_kill_denorm(yLlane[1]); float y1R=jb_kill_denorm(yRlane[1]); md1->y_pre_lastL=y1L; md1->y_pre_lastR=y1R; b1OutL=jb_kill_denorm(b1OutL + (y1L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y1R*e)*bank_gain1); }
+                    if(am2){ md2->svfL.s1=s1Llane[2]; md2->svfL.s2=s2Llane[2]; md2->svfR.s1=s1Rlane[2]; md2->svfR.s2=s2Rlane[2]; md2->driveL=driveL2; md2->driveR=driveR2; float y2L=jb_kill_denorm(yLlane[2]); float y2R=jb_kill_denorm(yRlane[2]); md2->y_pre_lastL=y2L; md2->y_pre_lastR=y2R; b1OutL=jb_kill_denorm(b1OutL + (y2L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y2R*e)*bank_gain1); }
+                    if(am3){ md3->svfL.s1=s1Llane[3]; md3->svfL.s2=s2Llane[3]; md3->svfR.s1=s1Rlane[3]; md3->svfR.s2=s2Rlane[3]; md3->driveL=driveL3; md3->driveR=driveR3; float y3L=jb_kill_denorm(yLlane[3]); float y3R=jb_kill_denorm(yRlane[3]); md3->y_pre_lastL=y3L; md3->y_pre_lastR=y3R; b1OutL=jb_kill_denorm(b1OutL + (y3L*e)*bank_gain1); b1OutR=jb_kill_denorm(b1OutR + (y3R*e)*bank_gain1); }
                 }
                 // scalar tail
                 for(; m < x->n_modes; m++){ 
                 
                     if(!base1[m].active) continue;
                     jb_mode_rt_t *md=&v->m[m];
-                    const int bank = 0;
-                    float gL = v->soa_gainL[bank][m];
-                    float gR = v->soa_gainR[bank][m];
-                    if (!v->soa_active[bank][m]) continue;
+                    float gL = md->gain_nowL;
+                    float gR = md->gain_nowR;
+                    if (!md->render_active) continue;
 
-                    float driveL = v->soa_driveL[bank][m];
-                    float driveR = v->soa_driveR[bank][m];
+                    float driveL = md->driveL;
+                    float driveR = md->driveR;
                     const float att_a = 1.f;
                     float excL = exL * gL;
                     float excR = exR * gR;
@@ -3544,12 +3669,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 	                    float y_rawR = jb_svf_bp_tick(&md->svfR, driveR);
 	                    y_rawR = jb_kill_denorm(y_rawR);
 
-                    v->soa_driveL[bank][m] = driveL;
-                    v->soa_driveR[bank][m] = driveR;
                     md->driveL = driveL;
                     md->driveR = driveR;
-	                    v->soa_ylastL[bank][m] = y_rawL;
-	                    v->soa_ylastR[bank][m] = y_rawR;
 	                    md->y_pre_lastL = y_rawL;
 	                    md->y_pre_lastR = y_rawR;
 
@@ -3563,13 +3684,12 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
                 
                     if(!base1[m].active) continue;
                     jb_mode_rt_t *md=&v->m[m];
-                    const int bank = 0;
-                    float gL = v->soa_gainL[bank][m];
-                    float gR = v->soa_gainR[bank][m];
-                    if (!v->soa_active[bank][m]) continue;
+                    float gL = md->gain_nowL;
+                    float gR = md->gain_nowR;
+                    if (!md->render_active) continue;
 
-                    float driveL = v->soa_driveL[bank][m];
-                    float driveR = v->soa_driveR[bank][m];
+                    float driveL = md->driveL;
+                    float driveR = md->driveR;
                     const float att_a = 1.f;
                     float excL = exL * gL;
                     float excR = exR * gR;
@@ -3582,12 +3702,8 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 	                    float y_rawR = jb_svf_bp_tick(&md->svfR, driveR);
 	                    y_rawR = jb_kill_denorm(y_rawR);
 
-                    v->soa_driveL[bank][m] = driveL;
-                    v->soa_driveR[bank][m] = driveR;
                     md->driveL = driveL;
                     md->driveR = driveR;
-	                    v->soa_ylastL[bank][m] = y_rawL;
-	                    v->soa_ylastR[bank][m] = y_rawR;
 	                    md->y_pre_lastL = y_rawL;
 	                    md->y_pre_lastR = y_rawR;
 
@@ -4770,6 +4886,297 @@ static void jb_apply_default_saw(t_juicy_bank_tilde *x){
     jb_apply_default_saw_bank(x, 0);
 }
 
+static jb_page_t jb_family_default_page(jb_page_family_t fam){
+    switch(fam){
+        case JB_FAMILY_PLAY: return JB_PAGE_PLAY;
+        case JB_FAMILY_BODY: return JB_PAGE_BODY_A;
+        case JB_FAMILY_EXCITER: return JB_PAGE_EXCITER_A;
+        case JB_FAMILY_MOD: return JB_PAGE_MOD_LFO1;
+        case JB_FAMILY_EDIT: return JB_PAGE_RESONATOR_EDIT;
+        case JB_FAMILY_PRESET: return JB_PAGE_PRESET;
+        default: return JB_PAGE_PLAY;
+    }
+}
+
+static void jb_hw_reset_soft_takeover(t_juicy_bank_tilde *x){
+    for(int i=0;i<6;++i) x->hw_pots[i].caught = 0;
+}
+
+static void jb_hw_set_page(t_juicy_bank_tilde *x, jb_page_t page){
+    if(page < 0 || page >= JB_PAGE_COUNT) return;
+    x->wf.current_page = page;
+    jb_page_family_t fam = jb_page_family_map[page];
+    if(fam >= 0 && fam < JB_FAMILY_COUNT) x->wf.last_page_in_family[fam] = page;
+    jb_hw_reset_soft_takeover(x);
+}
+
+static float jb_hw_param_to_norm(float v, jb_hw_param_t pid){
+    const jb_hw_param_spec_t *sp = &jb_hw_param_specs[pid];
+    float den = sp->max_value - sp->min_value;
+    if(den <= 1e-9f) return 0.f;
+    return jb_clamp((v - sp->min_value) / den, 0.f, 1.f);
+}
+
+static float jb_hw_norm_to_param(float n, jb_hw_param_t pid){
+    const jb_hw_param_spec_t *sp = &jb_hw_param_specs[pid];
+    float v = sp->min_value + jb_clamp(n,0.f,1.f) * (sp->max_value - sp->min_value);
+    if(sp->is_integer) v = floorf(v + 0.5f);
+    return v;
+}
+
+static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t pid){
+    int b = x->edit_bank ? 1 : 0;
+    switch(pid){
+        case JB_HW_PARAM_MASTER: return x->bank_master[b];
+        case JB_HW_PARAM_BRIGHTNESS: return b ? x->brightness2 : x->brightness;
+        case JB_HW_PARAM_POSITION: return b ? x->excite_pos2 : x->excite_pos;
+        case JB_HW_PARAM_PICKUP: return b ? x->pickup_pos2 : x->pickup_pos;
+        case JB_HW_PARAM_SPACE_WETDRY: return x->space_wetdry;
+        case JB_HW_PARAM_EXC_FADER: return x->exc_fader;
+        case JB_HW_PARAM_STRETCH: return b ? x->stretch2 : x->stretch;
+        case JB_HW_PARAM_WARP: return b ? x->warp2 : x->warp;
+        case JB_HW_PARAM_DISPERSION: return b ? x->dispersion2 : x->dispersion;
+        case JB_HW_PARAM_DENSITY: return b ? x->density_amt2 : x->density_amt;
+        case JB_HW_PARAM_PARTIALS: return (float)(b ? x->active_modes2 : x->active_modes);
+        case JB_HW_PARAM_BELL_FREQ: return x->bell_peak_hz[b][x->wf.selected_bell];
+        case JB_HW_PARAM_BELL_ZETA: return jb_clamp(x->bell_peak_zeta_param[b][x->wf.selected_bell] < 0.f ? 0.f : x->bell_peak_zeta_param[b][x->wf.selected_bell], 0.f, 1.f);
+        case JB_HW_PARAM_BELL_NPL: return x->bell_npl[b][x->wf.selected_bell];
+        case JB_HW_PARAM_BELL_NPR: return x->bell_npr[b][x->wf.selected_bell];
+        case JB_HW_PARAM_BELL_NPM: return x->bell_npm[b][x->wf.selected_bell];
+        case JB_HW_PARAM_EXC_ATTACK: return x->exc_attack_ms;
+        case JB_HW_PARAM_EXC_DECAY: return x->exc_decay_ms;
+        case JB_HW_PARAM_EXC_SUSTAIN: return x->exc_sustain;
+        case JB_HW_PARAM_EXC_RELEASE: return x->exc_release_ms;
+        case JB_HW_PARAM_NOISE_COLOR: return x->exc_shape;
+        case JB_HW_PARAM_IMPULSE_SHAPE: return x->exc_imp_shape;
+        case JB_HW_PARAM_EXC_ATTACK_CURVE: return x->exc_attack_curve;
+        case JB_HW_PARAM_EXC_DECAY_CURVE: return x->exc_decay_curve;
+        case JB_HW_PARAM_EXC_RELEASE_CURVE: return x->exc_release_curve;
+        case JB_HW_PARAM_SPACE_SIZE: return x->space_size;
+        case JB_HW_PARAM_SPACE_DECAY: return x->space_decay;
+        case JB_HW_PARAM_SPACE_DIFFUSION: return x->space_diffusion;
+        case JB_HW_PARAM_SPACE_DAMPING: return x->space_damping;
+        case JB_HW_PARAM_LFO_SHAPE: return x->lfo_shape_v[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0];
+        case JB_HW_PARAM_LFO_RATE: return x->lfo_rate_v[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0];
+        case JB_HW_PARAM_LFO_PHASE: return x->lfo_phase_v[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0];
+        case JB_HW_PARAM_LFO_MODE: return x->lfo_mode_v[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0];
+        case JB_HW_PARAM_LFO_AMOUNT: return x->lfo_amt_v[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0];
+        case JB_HW_PARAM_VEL_AMOUNT: return x->velmap_amount;
+        case JB_HW_PARAM_BANK_SELECT: return (float)(x->edit_bank + 1);
+        case JB_HW_PARAM_OCTAVE: return (float)x->bank_octave[b];
+        case JB_HW_PARAM_SEMITONE: return (float)x->bank_semitone[b];
+        case JB_HW_PARAM_TUNE: return x->bank_tune_cents[b];
+        case JB_HW_PARAM_RESONATOR_INDEX: return (float)(x->wf.selected_resonator + 1);
+        case JB_HW_PARAM_RATIO: return b ? x->base2[x->wf.selected_resonator].base_ratio : x->base[x->wf.selected_resonator].base_ratio;
+        case JB_HW_PARAM_GAIN: return b ? x->base2[x->wf.selected_resonator].base_gain : x->base[x->wf.selected_resonator].base_gain;
+        case JB_HW_PARAM_DECAY: return b ? x->base2[x->wf.selected_resonator].base_decay_ms : x->base[x->wf.selected_resonator].base_decay_ms;
+        default: return 0.f;
+    }
+}
+
+static void jb_hw_apply_param_value(t_juicy_bank_tilde *x, jb_hw_param_t pid, float value){
+    int lfoi = (x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0;
+    switch(pid){
+        case JB_HW_PARAM_NONE: break;
+        case JB_HW_PARAM_MASTER: juicy_bank_tilde_master(x, value); break;
+        case JB_HW_PARAM_BRIGHTNESS: juicy_bank_tilde_brightness(x, value); break;
+        case JB_HW_PARAM_POSITION: juicy_bank_tilde_position(x, value); break;
+        case JB_HW_PARAM_PICKUP: juicy_bank_tilde_pickup(x, value); break;
+        case JB_HW_PARAM_SPACE_WETDRY: juicy_bank_tilde_space_wetdry(x, value); break;
+        case JB_HW_PARAM_EXC_FADER: x->exc_fader = value; break;
+        case JB_HW_PARAM_STRETCH: juicy_bank_tilde_stretch(x, value); break;
+        case JB_HW_PARAM_WARP: juicy_bank_tilde_warp(x, value); break;
+        case JB_HW_PARAM_DISPERSION: juicy_bank_tilde_dispersion(x, value); break;
+        case JB_HW_PARAM_DENSITY: juicy_bank_tilde_density(x, value); break;
+        case JB_HW_PARAM_PARTIALS: juicy_bank_tilde_partials(x, value); break;
+        case JB_HW_PARAM_BELL_FREQ: juicy_bank_tilde_bell_freq(x, value); break;
+        case JB_HW_PARAM_BELL_ZETA: juicy_bank_tilde_bell_zeta(x, value); break;
+        case JB_HW_PARAM_BELL_NPL: juicy_bank_tilde_bell_npl(x, value); break;
+        case JB_HW_PARAM_BELL_NPR: juicy_bank_tilde_bell_npr(x, value); break;
+        case JB_HW_PARAM_BELL_NPM: juicy_bank_tilde_bell_npm(x, value); break;
+        case JB_HW_PARAM_EXC_ATTACK: x->exc_attack_ms = value; break;
+        case JB_HW_PARAM_EXC_DECAY: x->exc_decay_ms = value; break;
+        case JB_HW_PARAM_EXC_SUSTAIN: x->exc_sustain = value; break;
+        case JB_HW_PARAM_EXC_RELEASE: x->exc_release_ms = value; break;
+        case JB_HW_PARAM_NOISE_COLOR: x->exc_shape = value; break;
+        case JB_HW_PARAM_IMPULSE_SHAPE: x->exc_imp_shape = value; break;
+        case JB_HW_PARAM_EXC_ATTACK_CURVE: x->exc_attack_curve = value; break;
+        case JB_HW_PARAM_EXC_DECAY_CURVE: x->exc_decay_curve = value; break;
+        case JB_HW_PARAM_EXC_RELEASE_CURVE: x->exc_release_curve = value; break;
+        case JB_HW_PARAM_SPACE_SIZE: juicy_bank_tilde_space_size(x, value); break;
+        case JB_HW_PARAM_SPACE_DECAY: juicy_bank_tilde_space_decay(x, value); break;
+        case JB_HW_PARAM_SPACE_DIFFUSION: juicy_bank_tilde_space_diffusion(x, value); break;
+        case JB_HW_PARAM_SPACE_DAMPING: juicy_bank_tilde_space_damping(x, value); break;
+        case JB_HW_PARAM_LFO_SHAPE: x->lfo_index = (float)(lfoi + 1); juicy_bank_tilde_lfo_shape(x, value); break;
+        case JB_HW_PARAM_LFO_RATE: x->lfo_index = (float)(lfoi + 1); juicy_bank_tilde_lfo_rate(x, value); break;
+        case JB_HW_PARAM_LFO_PHASE: x->lfo_index = (float)(lfoi + 1); juicy_bank_tilde_lfo_phase(x, value); break;
+        case JB_HW_PARAM_LFO_MODE: x->lfo_index = (float)(lfoi + 1); juicy_bank_tilde_lfo_mode(x, value); break;
+        case JB_HW_PARAM_LFO_AMOUNT: x->lfo_index = (float)(lfoi + 1); juicy_bank_tilde_lfo_amount(x, value); break;
+        case JB_HW_PARAM_LFO_TARGET: {
+            static t_symbol *targets[5] = { NULL, NULL, NULL, NULL, NULL };
+            if(!targets[0]){
+                targets[0] = jb_sym_none;
+                targets[1] = jb_sym_brightness_1;
+                targets[2] = jb_sym_position_1;
+                targets[3] = jb_sym_pickup_1;
+                targets[4] = jb_sym_master_1;
+            }
+            int idx = (int)jb_clamp(floorf(value + 0.5f), 0.f, 4.f);
+            if(lfoi == 0) juicy_bank_tilde_lfo1_target(x, targets[idx]);
+            else juicy_bank_tilde_lfo2_target(x, targets[idx]);
+        } break;
+        case JB_HW_PARAM_VEL_AMOUNT: juicy_bank_tilde_velmap_amount(x, value); break;
+        case JB_HW_PARAM_VEL_TARGET: break;
+        case JB_HW_PARAM_BANK_SELECT: juicy_bank_tilde_bank(x, value); break;
+        case JB_HW_PARAM_OCTAVE: juicy_bank_tilde_octave(x, value); break;
+        case JB_HW_PARAM_SEMITONE: juicy_bank_tilde_semitone(x, value); break;
+        case JB_HW_PARAM_TUNE: juicy_bank_tilde_tune(x, value); break;
+        case JB_HW_PARAM_RESONATOR_INDEX: juicy_bank_tilde_index(x, value); x->wf.selected_resonator = jb_clamp((int)floorf(value + 0.5f) - 1, 0, JB_MAX_MODES - 1); break;
+        case JB_HW_PARAM_RATIO: juicy_bank_tilde_ratio_i(x, value); break;
+        case JB_HW_PARAM_GAIN: juicy_bank_tilde_gain_i(x, value); break;
+        case JB_HW_PARAM_DECAY: juicy_bank_tilde_decay_i(x, value); break;
+    }
+}
+
+static void juicy_bank_tilde_page(t_juicy_bank_tilde *x, t_floatarg f){
+    int p = (int)floorf(f + 0.5f);
+    if(p < 0) p = 0;
+    if(p >= JB_PAGE_COUNT) p = JB_PAGE_COUNT - 1;
+    jb_hw_set_page(x, (jb_page_t)p);
+}
+
+static void juicy_bank_tilde_pot(t_juicy_bank_tilde *x, t_floatarg pf, t_floatarg vf){
+    int pot = (int)floorf(pf + 0.5f) - 1;
+    float norm = jb_clamp(vf, 0.f, 1.f);
+    if(pot < 0 || pot >= 6) return;
+    x->hw_pots[pot].normalized = norm;
+    jb_hw_param_t pid = jb_page_param_map[x->wf.current_page][pot];
+    if(pid == JB_HW_PARAM_NONE) return;
+
+    float curv = jb_hw_get_current_value(x, pid);
+    float curn = jb_hw_param_to_norm(curv, pid);
+    if(!x->hw_pots[pot].caught){
+        if(fabsf(norm - curn) <= 0.06f) x->hw_pots[pot].caught = 1;
+        else return;
+    }
+
+    x->wf.highlighted_pot = pot;
+    jb_hw_apply_param_value(x, pid, jb_hw_norm_to_param(norm, pid));
+}
+
+static void juicy_bank_tilde_button(t_juicy_bank_tilde *x, t_symbol *s, int argc, t_atom *argv){
+    (void)s;
+    if(argc < 2) return;
+    int button = atom_getint(argv + 0);
+    int state  = atom_getint(argv + 1);
+    if(button < 0 || button >= JB_BTN_COUNT) return;
+
+    if(button == JB_BTN_SHIFT){ x->wf.shift_held = state ? 1 : 0; return; }
+    if(!state) return;
+
+    switch((jb_button_t)button){
+        case JB_BTN_PLAY:    jb_hw_set_page(x, x->wf.shift_held ? JB_PAGE_PLAY_ALT   : x->wf.last_page_in_family[JB_FAMILY_PLAY]); break;
+        case JB_BTN_BODY:    jb_hw_set_page(x, x->wf.shift_held ? JB_PAGE_DAMPERS    : x->wf.last_page_in_family[JB_FAMILY_BODY]); break;
+        case JB_BTN_EXCITER: jb_hw_set_page(x, x->wf.shift_held ? JB_PAGE_SPACE      : x->wf.last_page_in_family[JB_FAMILY_EXCITER]); break;
+        case JB_BTN_MOD:     jb_hw_set_page(x, x->wf.shift_held ? JB_PAGE_GLOBAL_EDIT: x->wf.last_page_in_family[JB_FAMILY_MOD]); break;
+        case JB_BTN_BACK:    jb_hw_set_page(x, x->wf.shift_held ? JB_PAGE_PLAY       : jb_family_default_page(jb_page_family_map[x->wf.current_page])); break;
+        case JB_BTN_SAVE:    x->wf.ui_mode = JB_UI_SAVE_MODE; break;
+        case JB_BTN_PRESET:  jb_hw_set_page(x, JB_PAGE_PRESET); break;
+        default: break;
+    }
+}
+
+static void juicy_bank_tilde_encoder(t_juicy_bank_tilde *x, t_floatarg f){
+    int delta = (f > 0.f) ? 1 : ((f < 0.f) ? -1 : 0);
+    if(!delta) return;
+
+    if(x->wf.ui_mode == JB_UI_SAVE_MODE || x->wf.current_page == JB_PAGE_PRESET){
+        x->preset_slot_sel += delta;
+        if(x->preset_slot_sel < 0) x->preset_slot_sel = 0;
+        if(x->preset_slot_sel >= JB_PRESET_SLOTS) x->preset_slot_sel = JB_PRESET_SLOTS - 1;
+        return;
+    }
+
+    switch(x->wf.current_page){
+        case JB_PAGE_PLAY:
+        case JB_PAGE_PLAY_ALT: jb_hw_set_page(x, x->wf.current_page == JB_PAGE_PLAY ? JB_PAGE_PLAY_ALT : JB_PAGE_PLAY); break;
+        case JB_PAGE_BODY_A: case JB_PAGE_BODY_B: case JB_PAGE_DAMPERS: {
+            jb_page_t seq[3] = { JB_PAGE_BODY_A, JB_PAGE_BODY_B, JB_PAGE_DAMPERS };
+            int idx = (x->wf.current_page == JB_PAGE_BODY_B) ? 1 : (x->wf.current_page == JB_PAGE_DAMPERS ? 2 : 0);
+            idx = (idx + delta + 3) % 3; jb_hw_set_page(x, seq[idx]);
+        } break;
+        case JB_PAGE_EXCITER_A: case JB_PAGE_EXCITER_B: case JB_PAGE_SPACE: {
+            jb_page_t seq[3] = { JB_PAGE_EXCITER_A, JB_PAGE_EXCITER_B, JB_PAGE_SPACE };
+            int idx = (x->wf.current_page == JB_PAGE_EXCITER_B) ? 1 : (x->wf.current_page == JB_PAGE_SPACE ? 2 : 0);
+            idx = (idx + delta + 3) % 3; jb_hw_set_page(x, seq[idx]);
+        } break;
+        case JB_PAGE_MOD_LFO1: case JB_PAGE_MOD_LFO2: case JB_PAGE_VELOCITY: case JB_PAGE_GLOBAL_EDIT: {
+            jb_page_t seq[4] = { JB_PAGE_MOD_LFO1, JB_PAGE_MOD_LFO2, JB_PAGE_VELOCITY, JB_PAGE_GLOBAL_EDIT };
+            int idx = 0; if(x->wf.current_page == JB_PAGE_MOD_LFO2) idx = 1; else if(x->wf.current_page == JB_PAGE_VELOCITY) idx = 2; else if(x->wf.current_page == JB_PAGE_GLOBAL_EDIT) idx = 3;
+            idx = (idx + delta + 4) % 4; jb_hw_set_page(x, seq[idx]);
+        } break;
+        case JB_PAGE_RESONATOR_EDIT: x->wf.selected_resonator = jb_clamp(x->wf.selected_resonator + delta, 0, JB_MAX_MODES - 1); juicy_bank_tilde_index(x, (t_float)(x->wf.selected_resonator + 1)); break;
+        default: break;
+    }
+
+    if(x->wf.current_page == JB_PAGE_DAMPERS){
+        x->wf.selected_bell = jb_clamp(x->wf.selected_bell + delta, 0, JB_N_DAMPERS - 1);
+        juicy_bank_tilde_damper_sel(x, (t_float)(x->wf.selected_bell + 1));
+    }
+}
+
+static void juicy_bank_tilde_encoder_press(t_juicy_bank_tilde *x, t_floatarg f){
+    if(f == 0.f) return;
+    if(x->wf.ui_mode == JB_UI_SAVE_MODE){
+        x->preset_slot_sel = jb_clamp(x->preset_slot_sel, 0, JB_PRESET_SLOTS - 1);
+        jb_preset_store(x, x->preset_slot_sel, x->preset_edit_name[0] ? x->preset_edit_name : NULL);
+        x->wf.ui_mode = JB_UI_NORMAL;
+        return;
+    }
+    if(x->wf.current_page == JB_PAGE_PRESET){
+        juicy_bank_tilde_preset_recall(x);
+    }
+}
+
+static void juicy_bank_tilde_master(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_brightness(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_position(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_pickup(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_space_wetdry(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_stretch(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_warp(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_dispersion(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_density(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_partials(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_bell_freq(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_bell_zeta(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_bell_npl(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_bell_npr(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_bell_npm(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_space_size(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_space_decay(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_space_diffusion(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_space_damping(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_lfo_shape(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_lfo_rate(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_lfo_phase(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_lfo_mode(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_lfo_amount(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_lfo1_target(t_juicy_bank_tilde *x, t_symbol *s);
+static void juicy_bank_tilde_lfo2_target(t_juicy_bank_tilde *x, t_symbol *s);
+static void juicy_bank_tilde_velmap_amount(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_bank(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_octave(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_semitone(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_tune(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_index(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_ratio_i(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_gain_i(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_decay_i(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_preset_recall(t_juicy_bank_tilde *x);
+static void juicy_bank_tilde_damper_sel(t_juicy_bank_tilde *x, t_floatarg f);
+static void jb_preset_store(t_juicy_bank_tilde *x, int slot, const char *name_or_null);
+
 // ---------- new() ----------
 static void *juicy_bank_tilde_new(void){
     t_juicy_bank_tilde *x=(t_juicy_bank_tilde *)pd_new(juicy_bank_tilde_class);
@@ -4932,6 +5339,22 @@ x->excite_pos2    = x->excite_pos;
     x->hp_a=0.f; x->hpL_x1=x->hpL_y1=x->hpR_x1=x->hpR_y1=0.f;
 
     // Two-bank scaffolding (STEP 1): bank 1 selected; bank 2 silent by default
+    x->wf.current_page = JB_PAGE_PLAY;
+    for(int fi = 0; fi < JB_FAMILY_COUNT; ++fi) x->wf.last_page_in_family[fi] = jb_family_default_page((jb_page_family_t)fi);
+    x->wf.last_page_in_family[JB_FAMILY_PLAY] = JB_PAGE_PLAY;
+    x->wf.last_page_in_family[JB_FAMILY_BODY] = JB_PAGE_BODY_A;
+    x->wf.last_page_in_family[JB_FAMILY_EXCITER] = JB_PAGE_EXCITER_A;
+    x->wf.last_page_in_family[JB_FAMILY_MOD] = JB_PAGE_MOD_LFO1;
+    x->wf.last_page_in_family[JB_FAMILY_EDIT] = JB_PAGE_RESONATOR_EDIT;
+    x->wf.last_page_in_family[JB_FAMILY_PRESET] = JB_PAGE_PRESET;
+    x->wf.shift_held = 0;
+    x->wf.ui_mode = JB_UI_NORMAL;
+    x->wf.selected_bell = 0;
+    x->wf.selected_resonator = 0;
+    x->wf.preset_cursor = 0;
+    x->wf.highlighted_pot = -1;
+    for(int pi = 0; pi < 6; ++pi){ x->hw_pots[pi].normalized = 0.f; x->hw_pots[pi].caught = 0; }
+
     x->edit_bank = 0;
     x->edit_damper = 0;
     x->bank_master[0] = 1.f;
@@ -4945,32 +5368,27 @@ x->excite_pos2    = x->excite_pos;
     x->bank_pitch_ratio[0] = 1.f;
     x->bank_pitch_ratio[1] = 1.f;
 
-    // INLETS (Signal → Behavior → Body → Individual)
-    // Signal:
-    // per-voice pairs
-
-    // Behavior (reduced)
-    x->in_release    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("release")); // release 0..1
-
-    // Body (order: bell_freq, bell_zeta, bell_npl, bell_npr, bell_npm, damper_sel, brightness, density, stretch, warp, quantize, odd_skew, even_skew, collision)
-    x->in_bell_peak_hz   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("bell_freq"));
-    x->in_bell_peak_zeta = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("bell_zeta"));
-    x->in_bell_npl       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("bell_npl"));
-    x->in_bell_npr       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("bell_npr"));
-    x->in_bell_npm       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("bell_npm"));
-    x->in_damper_sel    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("damper_sel")); // 1..3
-    x->in_brightness = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("brightness"));
-    x->in_density    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("density"));
-    x->in_stretch    = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("stretch"));
-    x->in_warp       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("warp"));
-    x->in_dispersion = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("quantize"));
-    x->in_odd_skew   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("odd_skew"));
-    x->in_even_skew  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("even_skew"));
-    x->in_collision  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("collision"));
-    // Spatial coupling controls (Mutable-style 1D position/pickup)
-    x->in_position   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("position"));    // excitation position 0..1
-    x->in_pickup     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("pickup"));      // pickup position 0..1
-    x->in_odd_even      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("odd_even"));      // -1..+1 (odd vs even emphasis)
+    // STEP 2 transition: remove legacy per-parameter inlets from construction.
+    // The synth is moving toward a hardware/workflow-driven front end, so all
+    // old parameter inlets are intentionally left null here.
+    x->in_release = NULL;
+    x->in_bell_peak_hz = NULL;
+    x->in_bell_peak_zeta = NULL;
+    x->in_bell_npl = NULL;
+    x->in_bell_npr = NULL;
+    x->in_bell_npm = NULL;
+    x->in_damper_sel = NULL;
+    x->in_brightness = NULL;
+    x->in_density = NULL;
+    x->in_stretch = NULL;
+    x->in_warp = NULL;
+    x->in_dispersion = NULL;
+    x->in_odd_skew = NULL;
+    x->in_even_skew = NULL;
+    x->in_collision = NULL;
+    x->in_position = NULL;
+    x->in_pickup = NULL;
+    x->in_odd_even = NULL;
 
 // Individual
 
@@ -4995,49 +5413,40 @@ x->excite_pos2    = x->excite_pos;
         }
     }
 
-    x->in_partials   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("partials"));
-    x->in_master     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("master"));
-    x->in_octave     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("octave"));
-    x->in_semitone   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("semitone"));
-    x->in_tune       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("tune"));
-    x->in_bank       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("bank"));
-    x->in_space_size      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("space_size"));
-    x->in_space_decay     = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("space_decay"));
-    x->in_space_diffusion = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("space_diffusion"));
-    x->in_space_damping   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("space_damping"));
-    x->in_space_wetdry   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("space_wetdry"));
-    x->in_index      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("index"));
-    x->in_ratio      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("ratio"));
-    x->in_gain       = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("gain"));
-    x->in_decay      = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("decay"));   // alias of decay
-// Internal EXCITER params (12 inlets, left->right like juicy_exciter~ v2.3)
-    // NOTE: These are simple float inlets bound directly to x->exc_* fields.
-    x->in_exc_fader         = floatinlet_new(&x->x_obj, &x->exc_fader);
+    x->in_partials = NULL;
+    x->in_master = NULL;
+    x->in_octave = NULL;
+    x->in_semitone = NULL;
+    x->in_tune = NULL;
+    x->in_bank = NULL;
+    x->in_space_size = NULL;
+    x->in_space_decay = NULL;
+    x->in_space_diffusion = NULL;
+    x->in_space_damping = NULL;
+    x->in_space_wetdry = NULL;
+    x->in_index = NULL;
+    x->in_ratio = NULL;
+    x->in_gain = NULL;
+    x->in_decay = NULL;
+    // Internal EXCITER parameter inlets removed in hardware transition step 2.
+    x->in_exc_fader = NULL;
+    x->in_exc_attack = NULL;
+    x->in_exc_attack_curve = NULL;
+    x->in_exc_decay = NULL;
+    x->in_exc_decay_curve = NULL;
+    x->in_exc_sustain = NULL;
+    x->in_exc_release = NULL;
+    x->in_exc_release_curve = NULL;
+    x->in_exc_imp_shape = NULL;
+    x->in_exc_shape = NULL;
 
-    x->in_exc_attack        = floatinlet_new(&x->x_obj, &x->exc_attack_ms);
-    x->in_exc_attack_curve  = floatinlet_new(&x->x_obj, &x->exc_attack_curve);
-
-    x->in_exc_decay         = floatinlet_new(&x->x_obj, &x->exc_decay_ms);
-    x->in_exc_decay_curve   = floatinlet_new(&x->x_obj, &x->exc_decay_curve);
-
-    x->in_exc_sustain       = floatinlet_new(&x->x_obj, &x->exc_sustain);
-
-    x->in_exc_release       = floatinlet_new(&x->x_obj, &x->exc_release_ms);
-    x->in_exc_release_curve = floatinlet_new(&x->x_obj, &x->exc_release_curve);
-
-    x->in_exc_imp_shape    = floatinlet_new(&x->x_obj, &x->exc_imp_shape);
-    x->in_exc_shape         = floatinlet_new(&x->x_obj, &x->exc_shape);
-
-    // Feedback AGC inlets (placed AFTER timbre/color, BEFORE LFO index)
-
-    // LFO inlets
-    // --- MOD SECTION (starts after exciter controls) ---
-    x->in_lfo_index  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_index"));
-    x->in_lfo_shape  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_shape"));
-    x->in_lfo_rate   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_rate"));
-    x->in_lfo_phase  = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_phase"));
-    x->in_lfo_mode   = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_mode"));
-    x->in_lfo_amount = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("lfo_amount"));
+    // LFO parameter inlets removed in hardware transition step 2.
+    x->in_lfo_index = NULL;
+    x->in_lfo_shape = NULL;
+    x->in_lfo_rate = NULL;
+    x->in_lfo_phase = NULL;
+    x->in_lfo_mode = NULL;
+    x->in_lfo_amount = NULL;
 
     // Target selector inlets must accept bare selectors (e.g. a message box containing "damper_1"),
     // so we route them through proxies that implement an 'anything' handler.
@@ -5052,9 +5461,9 @@ x->excite_pos2    = x->excite_pos;
     x->in_lfo1_target = inlet_new(&x->x_obj, x->tgtproxy_lfo1 ? &x->tgtproxy_lfo1->p_pd : &x->x_obj.ob_pd, 0, 0);
     x->in_lfo2_target = inlet_new(&x->x_obj, x->tgtproxy_lfo2 ? &x->tgtproxy_lfo2->p_pd : &x->x_obj.ob_pd, 0, 0);
 
-    // Velocity mapping inlets (placed after LFO2 target)
-    x->in_velmap_amount = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float, gensym("velmap_amount"));
-    x->in_velmap_target = inlet_new(&x->x_obj, x->tgtproxy_velmap ? &x->tgtproxy_velmap->p_pd : &x->x_obj.ob_pd, 0, 0);
+    // Velocity mapping amount inlet removed; symbolic target proxy kept for now only if needed later.
+    x->in_velmap_amount = NULL;
+    x->in_velmap_target = NULL;
 // Preset system inlets (placed after velocity mapping)
     x->presetproxy = (jb_presetproxy*)pd_new(jb_presetproxy_class);
     if (x->presetproxy) x->presetproxy->owner = x;
@@ -5759,6 +6168,11 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_preset_char, 
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_preset_recall, gensym("recall"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_INIT, gensym("INIT"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_init_alias, gensym("init"), 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_page, gensym("page"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pot, gensym("pot"), A_DEFFLOAT, A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_button, gensym("button"), A_GIMME, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_encoder, gensym("encoder"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_encoder_press, gensym("encoder_press"), A_DEFFLOAT, 0);
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_partials, gensym("partials"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_master,   gensym("master"),   A_DEFFLOAT, 0);
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_octave,   gensym("octave"),   A_DEFFLOAT, 0);
