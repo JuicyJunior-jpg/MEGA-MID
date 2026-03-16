@@ -1022,6 +1022,101 @@ static const jb_hw_param_spec_t jb_hw_param_specs[] = {
     [JB_HW_PARAM_DECAY]           = { "DECAY",  1.f, 5000.f,  0 }
 };
 
+static int jb_hw_button_from_atom(const t_atom *a){
+    if(!a) return -1;
+    if(a->a_type == A_FLOAT) return (int)atom_getfloat(a);
+    if(a->a_type == A_SYMBOL){
+        const char *n = atom_getsymbol(a)->s_name;
+        if(!strcmp(n, "play")) return JB_BTN_PLAY;
+        if(!strcmp(n, "body")) return JB_BTN_BODY;
+        if(!strcmp(n, "exciter")) return JB_BTN_EXCITER;
+        if(!strcmp(n, "mod")) return JB_BTN_MOD;
+        if(!strcmp(n, "shift")) return JB_BTN_SHIFT;
+        if(!strcmp(n, "back")) return JB_BTN_BACK;
+        if(!strcmp(n, "save")) return JB_BTN_SAVE;
+        if(!strcmp(n, "preset")) return JB_BTN_PRESET;
+    }
+    return -1;
+}
+
+static t_symbol *jb_hw_lfo_target_from_index(int lfoi, int idx){
+    idx = (int)jb_clamp((float)idx, 0.f, 4.f);
+    if(lfoi == 0){
+        switch(idx){
+            default:
+            case 0: return jb_sym_none;
+            case 1: return jb_sym_brightness_1;
+            case 2: return jb_sym_position_1;
+            case 3: return jb_sym_pickup_1;
+            case 4: return jb_sym_master_1;
+        }
+    } else {
+        switch(idx){
+            default:
+            case 0: return jb_sym_none;
+            case 1: return jb_sym_brightness_2;
+            case 2: return jb_sym_position_2;
+            case 3: return jb_sym_pickup_2;
+            case 4: return jb_sym_master_2;
+        }
+    }
+}
+
+static int jb_hw_lfo_target_to_index(const t_symbol *s, int lfoi){
+    if(!s || !strcmp(s->s_name, "none")) return 0;
+    if(lfoi == 0){
+        if(s == jb_sym_brightness_1) return 1;
+        if(s == jb_sym_position_1)   return 2;
+        if(s == jb_sym_pickup_1)     return 3;
+        if(s == jb_sym_master_1)     return 4;
+    } else {
+        if(s == jb_sym_brightness_2) return 1;
+        if(s == jb_sym_position_2)   return 2;
+        if(s == jb_sym_pickup_2)     return 3;
+        if(s == jb_sym_master_2)     return 4;
+    }
+    return 0;
+}
+
+static t_symbol *jb_hw_vel_target_from_index(int bank, int idx){
+    idx = (int)jb_clamp((float)idx, 0.f, 4.f);
+    if(bank == 0){
+        switch(idx){
+            default:
+            case 0: return jb_sym_none;
+            case 1: return gensym("brightness_1");
+            case 2: return gensym("position_1");
+            case 3: return gensym("pickup_1");
+            case 4: return gensym("master_1");
+        }
+    } else {
+        switch(idx){
+            default:
+            case 0: return jb_sym_none;
+            case 1: return gensym("brightness_2");
+            case 2: return gensym("position_2");
+            case 3: return gensym("pickup_2");
+            case 4: return gensym("master_2");
+        }
+    }
+}
+
+static int jb_hw_vel_target_to_index(const t_symbol *s, int bank){
+    if(!s || !strcmp(s->s_name, "none")) return 0;
+    if(bank == 0){
+        if(!strcmp(s->s_name, "brightness_1")) return 1;
+        if(!strcmp(s->s_name, "position_1"))   return 2;
+        if(!strcmp(s->s_name, "pickup_1"))     return 3;
+        if(!strcmp(s->s_name, "master_1"))     return 4;
+    } else {
+        if(!strcmp(s->s_name, "brightness_2")) return 1;
+        if(!strcmp(s->s_name, "position_2"))   return 2;
+        if(!strcmp(s->s_name, "pickup_2"))     return 3;
+        if(!strcmp(s->s_name, "master_2"))     return 4;
+    }
+    return 0;
+}
+
 // Proxy to accept ANY message on target-selection inlets (so message boxes like 'damper_1' work)
 typedef struct _juicy_bank_tilde t_juicy_bank_tilde; // forward
 typedef struct _jb_tgtproxy{
@@ -4907,6 +5002,13 @@ static void jb_hw_set_page(t_juicy_bank_tilde *x, jb_page_t page){
     x->wf.current_page = page;
     jb_page_family_t fam = jb_page_family_map[page];
     if(fam >= 0 && fam < JB_FAMILY_COUNT) x->wf.last_page_in_family[fam] = page;
+
+    /* page-driven context defaults */
+    if(page == JB_PAGE_BODY_A) x->edit_bank = 0;
+    else if(page == JB_PAGE_BODY_B) x->edit_bank = 1;
+    else if(page == JB_PAGE_MOD_LFO1) x->lfo_index = 1.f;
+    else if(page == JB_PAGE_MOD_LFO2) x->lfo_index = 2.f;
+
     jb_hw_reset_soft_takeover(x);
 }
 
@@ -4966,12 +5068,14 @@ static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t 
         case JB_HW_PARAM_SPACE_DECAY: return x->space_decay;
         case JB_HW_PARAM_SPACE_DIFFUSION: return x->space_diffusion;
         case JB_HW_PARAM_SPACE_DAMPING: return x->space_damping;
+        case JB_HW_PARAM_LFO_TARGET: return (float)jb_hw_lfo_target_to_index(x->lfo_target[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0], (x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0);
         case JB_HW_PARAM_LFO_SHAPE: return x->lfo_shape_v[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0];
         case JB_HW_PARAM_LFO_RATE: return x->lfo_rate_v[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0];
         case JB_HW_PARAM_LFO_PHASE: return x->lfo_phase_v[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0];
         case JB_HW_PARAM_LFO_MODE: return x->lfo_mode_v[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0];
         case JB_HW_PARAM_LFO_AMOUNT: return x->lfo_amt_v[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0];
         case JB_HW_PARAM_VEL_AMOUNT: return x->velmap_amount;
+        case JB_HW_PARAM_VEL_TARGET: return (float)jb_hw_vel_target_to_index(x->velmap_target, b);
         case JB_HW_PARAM_BANK_SELECT: return (float)(x->edit_bank + 1);
         case JB_HW_PARAM_OCTAVE: return (float)x->bank_octave[b];
         case JB_HW_PARAM_SEMITONE: return (float)x->bank_semitone[b];
@@ -5023,20 +5127,16 @@ static void jb_hw_apply_param_value(t_juicy_bank_tilde *x, jb_hw_param_t pid, fl
         case JB_HW_PARAM_LFO_MODE: x->lfo_index = (float)(lfoi + 1); juicy_bank_tilde_lfo_mode(x, value); break;
         case JB_HW_PARAM_LFO_AMOUNT: x->lfo_index = (float)(lfoi + 1); juicy_bank_tilde_lfo_amount(x, value); break;
         case JB_HW_PARAM_LFO_TARGET: {
-            static t_symbol *targets[5] = { NULL, NULL, NULL, NULL, NULL };
-            if(!targets[0]){
-                targets[0] = jb_sym_none;
-                targets[1] = jb_sym_brightness_1;
-                targets[2] = jb_sym_position_1;
-                targets[3] = jb_sym_pickup_1;
-                targets[4] = jb_sym_master_1;
-            }
             int idx = (int)jb_clamp(floorf(value + 0.5f), 0.f, 4.f);
-            if(lfoi == 0) juicy_bank_tilde_lfo1_target(x, targets[idx]);
-            else juicy_bank_tilde_lfo2_target(x, targets[idx]);
+            t_symbol *tgt = jb_hw_lfo_target_from_index(lfoi, idx);
+            if(lfoi == 0) juicy_bank_tilde_lfo1_target(x, tgt);
+            else juicy_bank_tilde_lfo2_target(x, tgt);
         } break;
         case JB_HW_PARAM_VEL_AMOUNT: juicy_bank_tilde_velmap_amount(x, value); break;
-        case JB_HW_PARAM_VEL_TARGET: break;
+        case JB_HW_PARAM_VEL_TARGET: {
+            int idx = (int)jb_clamp(floorf(value + 0.5f), 0.f, 4.f);
+            juicy_bank_tilde_velmap_target(x, jb_hw_vel_target_from_index(x->edit_bank ? 1 : 0, idx));
+        } break;
         case JB_HW_PARAM_BANK_SELECT: juicy_bank_tilde_bank(x, value); break;
         case JB_HW_PARAM_OCTAVE: juicy_bank_tilde_octave(x, value); break;
         case JB_HW_PARAM_SEMITONE: juicy_bank_tilde_semitone(x, value); break;
@@ -5056,7 +5156,10 @@ static void juicy_bank_tilde_page(t_juicy_bank_tilde *x, t_floatarg f){
 }
 
 static void juicy_bank_tilde_pot(t_juicy_bank_tilde *x, t_floatarg pf, t_floatarg vf){
-    int pot = (int)floorf(pf + 0.5f) - 1;
+    int pot_raw = (int)floorf(pf + 0.5f);
+    int pot = pot_raw;
+    /* accept either 0..5 or legacy 1..6 numbering */
+    if(pot_raw >= 1 && pot_raw <= 6) pot = pot_raw - 1;
     float norm = jb_clamp(vf, 0.f, 1.f);
     if(pot < 0 || pot >= 6) return;
     x->hw_pots[pot].normalized = norm;
@@ -5077,7 +5180,7 @@ static void juicy_bank_tilde_pot(t_juicy_bank_tilde *x, t_floatarg pf, t_floatar
 static void juicy_bank_tilde_button(t_juicy_bank_tilde *x, t_symbol *s, int argc, t_atom *argv){
     (void)s;
     if(argc < 2) return;
-    int button = atom_getint(argv + 0);
+    int button = jb_hw_button_from_atom(argv + 0);
     int state  = atom_getint(argv + 1);
     if(button < 0 || button >= JB_BTN_COUNT) return;
 
@@ -5085,13 +5188,52 @@ static void juicy_bank_tilde_button(t_juicy_bank_tilde *x, t_symbol *s, int argc
     if(!state) return;
 
     switch((jb_button_t)button){
-        case JB_BTN_PLAY:    jb_hw_set_page(x, x->wf.shift_held ? JB_PAGE_PLAY_ALT   : x->wf.last_page_in_family[JB_FAMILY_PLAY]); break;
-        case JB_BTN_BODY:    jb_hw_set_page(x, x->wf.shift_held ? JB_PAGE_DAMPERS    : x->wf.last_page_in_family[JB_FAMILY_BODY]); break;
-        case JB_BTN_EXCITER: jb_hw_set_page(x, x->wf.shift_held ? JB_PAGE_SPACE      : x->wf.last_page_in_family[JB_FAMILY_EXCITER]); break;
-        case JB_BTN_MOD:     jb_hw_set_page(x, x->wf.shift_held ? JB_PAGE_GLOBAL_EDIT: x->wf.last_page_in_family[JB_FAMILY_MOD]); break;
-        case JB_BTN_BACK:    jb_hw_set_page(x, x->wf.shift_held ? JB_PAGE_PLAY       : jb_family_default_page(jb_page_family_map[x->wf.current_page])); break;
-        case JB_BTN_SAVE:    x->wf.ui_mode = JB_UI_SAVE_MODE; break;
-        case JB_BTN_PRESET:  jb_hw_set_page(x, JB_PAGE_PRESET); break;
+        case JB_BTN_PLAY:
+            jb_hw_set_page(x, x->wf.shift_held ? JB_PAGE_PLAY_ALT : x->wf.last_page_in_family[JB_FAMILY_PLAY]);
+            break;
+        case JB_BTN_BODY:
+            jb_hw_set_page(x, x->wf.shift_held ? JB_PAGE_DAMPERS : x->wf.last_page_in_family[JB_FAMILY_BODY]);
+            break;
+        case JB_BTN_EXCITER:
+            jb_hw_set_page(x, x->wf.shift_held ? JB_PAGE_SPACE : x->wf.last_page_in_family[JB_FAMILY_EXCITER]);
+            break;
+        case JB_BTN_MOD:
+            jb_hw_set_page(x, x->wf.shift_held ? JB_PAGE_GLOBAL_EDIT : x->wf.last_page_in_family[JB_FAMILY_MOD]);
+            break;
+        case JB_BTN_BACK:
+            if(x->preset_mode != JB_PRESET_MODE_NORMAL){
+                juicy_bank_tilde_preset_cmd(x, gensym("INIT"));
+            }
+            x->wf.ui_mode = JB_UI_NORMAL;
+            jb_hw_set_page(x, x->wf.shift_held ? JB_PAGE_PLAY : jb_family_default_page(jb_page_family_map[x->wf.current_page]));
+            break;
+        case JB_BTN_SAVE:
+            if(x->wf.shift_held){
+                char tmpname[JB_PRESET_NAME_MAX + 1];
+                const char *nm = NULL;
+                if(x->preset_slot_sel >= 0 && x->preset_slot_sel < JB_PRESET_SLOTS && x->presets[x->preset_slot_sel].used && x->presets[x->preset_slot_sel].name[0]){
+                    nm = x->presets[x->preset_slot_sel].name;
+                } else {
+                    snprintf(tmpname, sizeof(tmpname), "P%02d", x->preset_slot_sel + 1);
+                    nm = tmpname;
+                }
+                jb_preset_store(x, x->preset_slot_sel, nm);
+                x->wf.ui_mode = JB_UI_NORMAL;
+                jb_hw_set_page(x, JB_PAGE_PRESET);
+            } else {
+                x->wf.ui_mode = JB_UI_SAVE_MODE;
+                x->preset_mode = JB_PRESET_MODE_NORMAL;
+                jb_hw_set_page(x, JB_PAGE_PRESET);
+            }
+            break;
+        case JB_BTN_PRESET:
+            jb_hw_set_page(x, JB_PAGE_PRESET);
+            x->wf.ui_mode = JB_UI_NORMAL;
+            if(x->wf.shift_held){
+                x->preset_mode = JB_PRESET_MODE_NORMAL;
+                juicy_bank_tilde_preset_cmd(x, gensym("SAVE"));
+            }
+            break;
         default: break;
     }
 }
@@ -5100,7 +5242,13 @@ static void juicy_bank_tilde_encoder(t_juicy_bank_tilde *x, t_floatarg f){
     int delta = (f > 0.f) ? 1 : ((f < 0.f) ? -1 : 0);
     if(!delta) return;
 
-    if(x->wf.ui_mode == JB_UI_SAVE_MODE || x->wf.current_page == JB_PAGE_PRESET){
+    if(x->preset_mode == JB_PRESET_MODE_NAMING){
+        x->preset_cursor += delta;
+        if(x->preset_cursor < 0) x->preset_cursor = 0;
+        if(x->preset_cursor >= JB_PRESET_NAME_MAX) x->preset_cursor = JB_PRESET_NAME_MAX - 1;
+        return;
+    }
+    if(x->wf.ui_mode == JB_UI_SAVE_MODE || x->wf.current_page == JB_PAGE_PRESET || x->preset_mode == JB_PRESET_MODE_SLOT){
         x->preset_slot_sel += delta;
         if(x->preset_slot_sel < 0) x->preset_slot_sel = 0;
         if(x->preset_slot_sel >= JB_PRESET_SLOTS) x->preset_slot_sel = JB_PRESET_SLOTS - 1;
@@ -5138,13 +5286,25 @@ static void juicy_bank_tilde_encoder(t_juicy_bank_tilde *x, t_floatarg f){
 static void juicy_bank_tilde_encoder_press(t_juicy_bank_tilde *x, t_floatarg f){
     if(f == 0.f) return;
     if(x->wf.ui_mode == JB_UI_SAVE_MODE){
+        char tmpname[JB_PRESET_NAME_MAX + 1];
+        const char *nm = NULL;
         x->preset_slot_sel = jb_clamp(x->preset_slot_sel, 0, JB_PRESET_SLOTS - 1);
-        jb_preset_store(x, x->preset_slot_sel, x->preset_edit_name[0] ? x->preset_edit_name : NULL);
+        if(x->presets[x->preset_slot_sel].used && x->presets[x->preset_slot_sel].name[0]) nm = x->presets[x->preset_slot_sel].name;
+        else { snprintf(tmpname, sizeof(tmpname), "P%02d", x->preset_slot_sel + 1); nm = tmpname; }
+        jb_preset_store(x, x->preset_slot_sel, nm);
         x->wf.ui_mode = JB_UI_NORMAL;
         return;
     }
+    if(x->wf.current_page == JB_PAGE_GLOBAL_EDIT){
+        jb_hw_set_page(x, JB_PAGE_RESONATOR_EDIT);
+        return;
+    }
     if(x->wf.current_page == JB_PAGE_PRESET){
-        juicy_bank_tilde_preset_recall(x);
+        if(x->preset_mode == JB_PRESET_MODE_NAMING || x->preset_mode == JB_PRESET_MODE_SLOT){
+            juicy_bank_tilde_preset_cmd(x, gensym("SAVE"));
+        } else {
+            juicy_bank_tilde_preset_recall(x);
+        }
     }
 }
 
