@@ -5690,28 +5690,19 @@ x->excite_pos2    = x->excite_pos;
     x->in_lfo_mode = NULL;
     x->in_lfo_amount = NULL;
 
-    // Target selector inlets must accept bare selectors (e.g. a message box containing "damper_1"),
-    // so we route them through proxies that implement an 'anything' handler.
-    x->tgtproxy_lfo1 = (jb_tgtproxy *)pd_new(jb_tgtproxy_class);
-    x->tgtproxy_lfo2 = (jb_tgtproxy *)pd_new(jb_tgtproxy_class);
-    x->tgtproxy_velmap = (jb_tgtproxy *)pd_new(jb_tgtproxy_class);
+    // All remaining target/preset side inlets removed for the final hardware workflow.
+    x->tgtproxy_lfo1 = NULL;
+    x->tgtproxy_lfo2 = NULL;
+    x->tgtproxy_velmap = NULL;
+    x->in_lfo1_target = NULL;
+    x->in_lfo2_target = NULL;
 
-    if (x->tgtproxy_lfo1){ x->tgtproxy_lfo1->owner = x; x->tgtproxy_lfo1->lane = 0; }
-    if (x->tgtproxy_lfo2){ x->tgtproxy_lfo2->owner = x; x->tgtproxy_lfo2->lane = 1; }
-    if (x->tgtproxy_velmap){ x->tgtproxy_velmap->owner = x; x->tgtproxy_velmap->lane = 2; }
-
-    x->in_lfo1_target = inlet_new(&x->x_obj, x->tgtproxy_lfo1 ? &x->tgtproxy_lfo1->p_pd : &x->x_obj.ob_pd, 0, 0);
-    x->in_lfo2_target = inlet_new(&x->x_obj, x->tgtproxy_lfo2 ? &x->tgtproxy_lfo2->p_pd : &x->x_obj.ob_pd, 0, 0);
-
-    // Velocity mapping amount inlet removed; symbolic target proxy kept for now only if needed later.
     x->in_velmap_amount = NULL;
     x->in_velmap_target = NULL;
-// Preset system inlets (placed after velocity mapping)
-    x->presetproxy = (jb_presetproxy*)pd_new(jb_presetproxy_class);
-    if (x->presetproxy) x->presetproxy->owner = x;
-    // Use a proxy so bare message boxes like [FORWARD( work (they arrive as 'anything' selectors).
-    x->in_preset_cmd  = inlet_new(&x->x_obj, x->presetproxy ? &x->presetproxy->p_pd : &x->x_obj.ob_pd, 0, 0);
-    x->in_preset_char = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_float,  gensym("preset_char"));
+
+    x->presetproxy = NULL;
+    x->in_preset_cmd  = NULL;
+    x->in_preset_char = NULL;
 
 
 
