@@ -5029,6 +5029,13 @@ static void juicy_bank_tilde_octave(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_semitone(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_tune(t_juicy_bank_tilde *x, t_floatarg f);
 static void jb_preset_store(t_juicy_bank_tilde *x, int slot, const char *name_or_null);
+static void juicy_bank_tilde_encoder_press(t_juicy_bank_tilde *x, t_floatarg f);
+static void jb_hw_vel_target_set_exact(t_juicy_bank_tilde *x, t_symbol *s);
+static void jb_hw_preset_begin_naming(t_juicy_bank_tilde *x);
+static inline int jb_preset_index_from_char(char c);
+static inline char jb_preset_char_from_index(int idx);
+static void jb_hw_global_action(t_juicy_bank_tilde *x, int action);
+static void jb_preset_emit_ui(t_juicy_bank_tilde *x);
 
 static float jb_hw_norm_to_param(float n, jb_hw_param_t pid){
     const jb_hw_param_spec_t *sp = &jb_hw_param_specs[pid];
@@ -5779,12 +5786,12 @@ static void jb_hw_preset_begin_naming(t_juicy_bank_tilde *x){
     x->preset_cursor = 0;
     if (x->preset_slot_sel >= 0 && x->preset_slot_sel < JB_PRESET_SLOTS && x->presets[x->preset_slot_sel].used && x->presets[x->preset_slot_sel].name[0]){
         memset(x->preset_edit_name, ' ', JB_PRESET_NAME_MAX);
-        x->preset_edit_name[JB_PRESET_NAME_MAX] = ' ';
+        x->preset_edit_name[JB_PRESET_NAME_MAX] = '\0';
         strncpy(x->preset_edit_name, x->presets[x->preset_slot_sel].name, JB_PRESET_NAME_MAX);
-        x->preset_edit_name[JB_PRESET_NAME_MAX] = ' ';
+        x->preset_edit_name[JB_PRESET_NAME_MAX] = '\0';
     } else {
         memset(x->preset_edit_name, ' ', JB_PRESET_NAME_MAX);
-        x->preset_edit_name[JB_PRESET_NAME_MAX] = ' ';
+        x->preset_edit_name[JB_PRESET_NAME_MAX] = '\0';
     }
     jb_preset_emit_ui(x);
 }
