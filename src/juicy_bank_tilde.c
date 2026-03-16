@@ -4917,6 +4917,16 @@ static float jb_hw_param_to_norm(float v, jb_hw_param_t pid){
     return jb_clamp((v - sp->min_value) / den, 0.f, 1.f);
 }
 
+// Forward declarations for existing parameter/preset functions used by the
+// hardware-workflow scaffold before their full definitions appear later.
+static void juicy_bank_tilde_master(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_partials(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_bank(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_octave(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_semitone(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_tune(t_juicy_bank_tilde *x, t_floatarg f);
+static void jb_preset_store(t_juicy_bank_tilde *x, int slot, const char *name_or_null);
+
 static float jb_hw_norm_to_param(float n, jb_hw_param_t pid){
     const jb_hw_param_spec_t *sp = &jb_hw_param_specs[pid];
     float v = sp->min_value + jb_clamp(n,0.f,1.f) * (sp->max_value - sp->min_value);
@@ -5138,7 +5148,6 @@ static void juicy_bank_tilde_encoder_press(t_juicy_bank_tilde *x, t_floatarg f){
     }
 }
 
-static void juicy_bank_tilde_master(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_brightness(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_position(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_pickup(t_juicy_bank_tilde *x, t_floatarg f);
@@ -5147,7 +5156,6 @@ static void juicy_bank_tilde_stretch(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_warp(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_dispersion(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_density(t_juicy_bank_tilde *x, t_floatarg f);
-static void juicy_bank_tilde_partials(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_bell_freq(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_bell_zeta(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_bell_npl(t_juicy_bank_tilde *x, t_floatarg f);
@@ -5165,17 +5173,12 @@ static void juicy_bank_tilde_lfo_amount(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_lfo1_target(t_juicy_bank_tilde *x, t_symbol *s);
 static void juicy_bank_tilde_lfo2_target(t_juicy_bank_tilde *x, t_symbol *s);
 static void juicy_bank_tilde_velmap_amount(t_juicy_bank_tilde *x, t_floatarg f);
-static void juicy_bank_tilde_bank(t_juicy_bank_tilde *x, t_floatarg f);
-static void juicy_bank_tilde_octave(t_juicy_bank_tilde *x, t_floatarg f);
-static void juicy_bank_tilde_semitone(t_juicy_bank_tilde *x, t_floatarg f);
-static void juicy_bank_tilde_tune(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_index(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_ratio_i(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_gain_i(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_decay_i(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_preset_recall(t_juicy_bank_tilde *x);
 static void juicy_bank_tilde_damper_sel(t_juicy_bank_tilde *x, t_floatarg f);
-static void jb_preset_store(t_juicy_bank_tilde *x, int slot, const char *name_or_null);
 
 // ---------- new() ----------
 static void *juicy_bank_tilde_new(void){
@@ -5624,6 +5627,22 @@ static void jb_preset_snapshot(const t_juicy_bank_tilde *x, jb_preset_t *p){
     p->velmap_amount = x->velmap_amount;
     for (int ti = 0; ti < JB_VELMAP_N_TARGETS; ++ti){
         p->velmap_on[ti] = x->velmap_on[ti];
+    }
+}
+
+static void jb_preset_store(t_juicy_bank_tilde *x, int slot, const char *name_or_null){
+    if (!x) return;
+    if (slot < 0) slot = 0;
+    if (slot >= JB_PRESET_SLOTS) slot = JB_PRESET_SLOTS - 1;
+
+    jb_preset_t *p = &x->presets[slot];
+    jb_preset_snapshot(x, p);
+    p->used = 1;
+
+    if (name_or_null && name_or_null[0]){
+        strncpy(p->name, name_or_null, JB_PRESET_NAME_MAX);
+        p->name[JB_PRESET_NAME_MAX] = '\0';
+        jb_preset_trim_name(p->name);
     }
 }
 
