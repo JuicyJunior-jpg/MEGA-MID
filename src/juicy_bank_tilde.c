@@ -1341,6 +1341,7 @@ char preset_edit_name[JB_PRESET_NAME_MAX + 1];
     // hardware/workflow transition state
     jb_workflow_state_t wf;
     jb_hw_pot_state_t hw_pots[6];
+    float hw_pressure;
 
    // LFO1/LFO2 targets
     jb_tgtproxy *tgtproxy_lfo1;
@@ -5030,6 +5031,9 @@ static void juicy_bank_tilde_semitone(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_tune(t_juicy_bank_tilde *x, t_floatarg f);
 static void jb_preset_store(t_juicy_bank_tilde *x, int slot, const char *name_or_null);
 static void juicy_bank_tilde_encoder_press(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_encoder_left(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_encoder_right(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_pressure(t_juicy_bank_tilde *x, t_floatarg f);
 static void jb_hw_vel_target_set_exact(t_juicy_bank_tilde *x, t_symbol *s);
 static void jb_hw_preset_begin_naming(t_juicy_bank_tilde *x);
 static inline int jb_preset_index_from_char(char c);
@@ -5354,6 +5358,20 @@ static void juicy_bank_tilde_encoder(t_juicy_bank_tilde *x, t_floatarg f){
     }
 }
 
+static void juicy_bank_tilde_encoder_left(t_juicy_bank_tilde *x, t_floatarg f){
+    if(f == 0.f) return;
+    juicy_bank_tilde_encoder(x, -1.f);
+}
+
+static void juicy_bank_tilde_encoder_right(t_juicy_bank_tilde *x, t_floatarg f){
+    if(f == 0.f) return;
+    juicy_bank_tilde_encoder(x, 1.f);
+}
+
+static void juicy_bank_tilde_pressure(t_juicy_bank_tilde *x, t_floatarg f){
+    x->hw_pressure = jb_clamp(f, 0.f, 1.f);
+}
+
 static void juicy_bank_tilde_encoder_press(t_juicy_bank_tilde *x, t_floatarg f){
     if(f == 0.f) return;
     if(x->wf.ui_mode == JB_UI_SAVE_MODE){
@@ -5595,6 +5613,7 @@ x->excite_pos2    = x->excite_pos;
     x->wf.preset_cursor = 0;
     x->wf.global_edit_cursor = 0;
     x->wf.highlighted_pot = -1;
+    x->hw_pressure = 0.f;
     for(int pi = 0; pi < 6; ++pi){ x->hw_pots[pi].normalized = 0.f; x->hw_pots[pi].caught = 0; }
 
     x->edit_bank = 0;
@@ -6482,7 +6501,10 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_preset_char, 
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pot, gensym("pot"), A_DEFFLOAT, A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_button, gensym("button"), A_GIMME, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_encoder, gensym("encoder"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_encoder_left, gensym("encoder_left"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_encoder_right, gensym("encoder_right"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_encoder_press, gensym("encoder_press"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pressure, gensym("pressure"), A_DEFFLOAT, 0);
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_partials, gensym("partials"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_master,   gensym("master"),   A_DEFFLOAT, 0);
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_octave,   gensym("octave"),   A_DEFFLOAT, 0);
