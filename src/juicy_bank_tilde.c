@@ -1256,6 +1256,7 @@ float density_amt; jb_density_mode density_mode;
     // per-voice exciter inputs (optional)
 
     t_outlet *outL, *outR;
+    t_outlet *out_ui;        // UI/state outlet -> patch to [s bela_screen]
 
     // INLET pointers
     // Behavior (reduced)
@@ -4999,6 +5000,96 @@ static void jb_hw_reset_soft_takeover(t_juicy_bank_tilde *x){
     for(int i=0;i<6;++i) x->hw_pots[i].caught = 0;
 }
 
+static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t pid);
+
+static const char *jb_screen_page_name(jb_page_t page){
+    switch(page){
+        case JB_PAGE_PLAY: return "PLAY";
+        case JB_PAGE_PLAY_ALT: return "PLAY";
+        case JB_PAGE_BODY_A: return "BODY";
+        case JB_PAGE_BODY_B: return "BODY";
+        case JB_PAGE_DAMPERS: return "BODY";
+        case JB_PAGE_EXCITER_A: return "EXC";
+        case JB_PAGE_EXCITER_B: return "EXC";
+        case JB_PAGE_SPACE: return "EXC";
+        case JB_PAGE_MOD_LFO1: return "MOD";
+        case JB_PAGE_MOD_LFO2: return "MOD";
+        case JB_PAGE_VELOCITY: return "MOD";
+        case JB_PAGE_GLOBAL_EDIT: return "EDIT";
+        case JB_PAGE_RESONATOR_EDIT: return "EDIT";
+        case JB_PAGE_PRESET: return "PRESET";
+        default: return "PLAY";
+    }
+}
+
+static const char *jb_screen_subpage_name(const t_juicy_bank_tilde *x){
+    switch(x->wf.current_page){
+        case JB_PAGE_PLAY: return "MAIN";
+        case JB_PAGE_PLAY_ALT: return "ALT";
+        case JB_PAGE_BODY_A: return x->edit_bank ? "B2" : "B1";
+        case JB_PAGE_BODY_B: return x->edit_bank ? "B2" : "B1";
+        case JB_PAGE_DAMPERS: return (x->wf.selected_bell == 0) ? "D1" : ((x->wf.selected_bell == 1) ? "D2" : "D3");
+        case JB_PAGE_EXCITER_A: return "A";
+        case JB_PAGE_EXCITER_B: return "B";
+        case JB_PAGE_SPACE: return "SPACE";
+        case JB_PAGE_MOD_LFO1: return "LFO1";
+        case JB_PAGE_MOD_LFO2: return "LFO2";
+        case JB_PAGE_VELOCITY: return "VEL";
+        case JB_PAGE_GLOBAL_EDIT: return "GLOBAL";
+        case JB_PAGE_RESONATOR_EDIT: return "RES";
+        case JB_PAGE_PRESET: return (x->wf.ui_mode == JB_UI_SAVE_MODE || x->preset_mode != JB_PRESET_MODE_NORMAL) ? "SAVE" : "LOAD";
+        default: return "";
+    }
+}
+
+static void jb_screen_get_preset_name(const t_juicy_bank_tilde *x, char *dst, size_t n){
+    if(!dst || n == 0) return;
+    dst[0] = '\0';
+    if(x->preset_mode == JB_PRESET_MODE_NAMING && x->preset_edit_name[0]){
+        snprintf(dst, n, "%s", x->preset_edit_name);
+        return;
+    }
+    if(x->preset_slot_sel >= 0 && x->preset_slot_sel < JB_PRESET_SLOTS && x->presets[x->preset_slot_sel].used && x->presets[x->preset_slot_sel].name[0]){
+        snprintf(dst, n, "%s", x->presets[x->preset_slot_sel].name);
+        return;
+    }
+    snprintf(dst, n, "P%02d", x->preset_slot_sel + 1);
+}
+
+static void jb_screen_emit_full(t_juicy_bank_tilde *x){
+    if(!x || !x->out_ui) return;
+    t_atom a[2];
+    char preset_name[JB_PRESET_NAME_MAX + 8];
+
+    SETSYMBOL(&a[0], gensym(jb_screen_page_name(x->wf.current_page)));
+    outlet_anything(x->out_ui, gensym("page"), 1, a);
+
+    SETSYMBOL(&a[0], gensym(jb_screen_subpage_name(x)));
+    outlet_anything(x->out_ui, gensym("subpage"), 1, a);
+
+    jb_screen_get_preset_name(x, preset_name, sizeof(preset_name));
+    SETSYMBOL(&a[0], gensym(preset_name));
+    outlet_anything(x->out_ui, gensym("preset"), 1, a);
+
+    for(int i = 0; i < 6; ++i){
+        jb_hw_param_t pid = jb_page_param_map[x->wf.current_page][i];
+        const char *label = (pid >= 0 && pid < (int)(sizeof(jb_hw_param_specs)/sizeof(jb_hw_param_specs[0]))) ? jb_hw_param_specs[pid].label : "---";
+        SETFLOAT(&a[0], (t_float)i);
+        SETSYMBOL(&a[1], gensym(label));
+        outlet_anything(x->out_ui, gensym("param_label"), 2, a);
+
+        SETFLOAT(&a[0], (t_float)i);
+        SETFLOAT(&a[1], jb_hw_get_current_value(x, pid));
+        outlet_anything(x->out_ui, gensym("param_value"), 2, a);
+    }
+
+    SETFLOAT(&a[0], (t_float)((x->wf.highlighted_pot >= 0 && x->wf.highlighted_pot < 6) ? x->wf.highlighted_pot : 0));
+    outlet_anything(x->out_ui, gensym("selected"), 1, a);
+
+    SETFLOAT(&a[0], 1.f);
+    outlet_anything(x->out_ui, gensym("dirty"), 1, a);
+}
+
 static void jb_hw_set_page(t_juicy_bank_tilde *x, jb_page_t page){
     if(page < 0 || page >= JB_PAGE_COUNT) return;
     x->wf.current_page = page;
@@ -5012,6 +5103,7 @@ static void jb_hw_set_page(t_juicy_bank_tilde *x, jb_page_t page){
     else if(page == JB_PAGE_MOD_LFO2) x->lfo_index = 2.f;
 
     jb_hw_reset_soft_takeover(x);
+    jb_screen_emit_full(x);
 }
 
 static float jb_hw_param_to_norm(float v, jb_hw_param_t pid){
@@ -5040,6 +5132,8 @@ static inline int jb_preset_index_from_char(char c);
 static inline char jb_preset_char_from_index(int idx);
 static void jb_hw_global_action(t_juicy_bank_tilde *x, int action);
 static void jb_preset_emit_ui(t_juicy_bank_tilde *x);
+static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t pid);
+static void jb_screen_emit_full(t_juicy_bank_tilde *x);
 
 static float jb_hw_norm_to_param(float n, jb_hw_param_t pid){
     const jb_hw_param_spec_t *sp = &jb_hw_param_specs[pid];
@@ -5187,6 +5281,7 @@ static void juicy_bank_tilde_pot(t_juicy_bank_tilde *x, t_floatarg pf, t_floatar
 
     x->wf.highlighted_pot = pot;
     jb_hw_apply_param_value(x, pid, jb_hw_norm_to_param(norm, pid));
+    jb_screen_emit_full(x);
 }
 
 static void juicy_bank_tilde_button(t_juicy_bank_tilde *x, t_symbol *s, int argc, t_atom *argv){
@@ -5356,6 +5451,7 @@ static void juicy_bank_tilde_encoder(t_juicy_bank_tilde *x, t_floatarg f){
         default:
             break;
     }
+    jb_screen_emit_full(x);
 }
 
 static void juicy_bank_tilde_encoder_left(t_juicy_bank_tilde *x, t_floatarg f){
@@ -5731,6 +5827,7 @@ x->excite_pos2    = x->excite_pos;
     // Outs
     x->outL = outlet_new(&x->x_obj, &s_signal);
     x->outR = outlet_new(&x->x_obj, &s_signal);
+    x->out_ui = outlet_new(&x->x_obj, &s_list); // compact UI/state messages for [s bela_screen]
 // checkpoint revert init
 
     
@@ -5846,6 +5943,8 @@ static void jb_preset_emit_ui(t_juicy_bank_tilde *x){
     // cursor (useful in naming mode)
     SETFLOAT(&a[0], (t_float)x->preset_cursor);
     outlet_anything(x->out_preset, gensym("edit_cursor"), 1, a);
+
+    jb_screen_emit_full(x);
 }
 
 static int jb_preset_find_next_used(const t_juicy_bank_tilde *x, int start, int dir){
