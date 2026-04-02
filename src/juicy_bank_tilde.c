@@ -5058,36 +5058,38 @@ static void jb_screen_get_preset_name(const t_juicy_bank_tilde *x, char *dst, si
 
 static void jb_screen_emit_full(t_juicy_bank_tilde *x){
     if(!x || !x->out_ui) return;
-    t_atom a[2];
-    char preset_name[JB_PRESET_NAME_MAX + 8];
+    t_atom a[1];
 
-    SETSYMBOL(&a[0], gensym(jb_screen_page_name(x->wf.current_page)));
+    /* Float-only screen protocol for BelaLibpd render.cpp.
+       Route this single outlet in Pd with:
+       [route page selected preset_slot param0 param1 param2 param3 param4 param5]
+       then send each outlet to the matching [s bela_screen_*]. */
+
+    SETFLOAT(&a[0], (t_float)x->wf.current_page);
     outlet_anything(x->out_ui, gensym("page"), 1, a);
-
-    SETSYMBOL(&a[0], gensym(jb_screen_subpage_name(x)));
-    outlet_anything(x->out_ui, gensym("subpage"), 1, a);
-
-    jb_screen_get_preset_name(x, preset_name, sizeof(preset_name));
-    SETSYMBOL(&a[0], gensym(preset_name));
-    outlet_anything(x->out_ui, gensym("preset"), 1, a);
-
-    for(int i = 0; i < 6; ++i){
-        jb_hw_param_t pid = jb_page_param_map[x->wf.current_page][i];
-        const char *label = (pid >= 0 && pid < (int)(sizeof(jb_hw_param_specs)/sizeof(jb_hw_param_specs[0]))) ? jb_hw_param_specs[pid].label : "---";
-        SETFLOAT(&a[0], (t_float)i);
-        SETSYMBOL(&a[1], gensym(label));
-        outlet_anything(x->out_ui, gensym("param_label"), 2, a);
-
-        SETFLOAT(&a[0], (t_float)i);
-        SETFLOAT(&a[1], jb_hw_get_current_value(x, pid));
-        outlet_anything(x->out_ui, gensym("param_value"), 2, a);
-    }
 
     SETFLOAT(&a[0], (t_float)((x->wf.highlighted_pot >= 0 && x->wf.highlighted_pot < 6) ? x->wf.highlighted_pot : 0));
     outlet_anything(x->out_ui, gensym("selected"), 1, a);
 
-    SETFLOAT(&a[0], 1.f);
-    outlet_anything(x->out_ui, gensym("dirty"), 1, a);
+    SETFLOAT(&a[0], (t_float)(x->preset_slot_sel + 1));
+    outlet_anything(x->out_ui, gensym("preset_slot"), 1, a);
+
+    for(int i = 0; i < 6; ++i){
+        jb_hw_param_t pid = jb_page_param_map[x->wf.current_page][i];
+        SETFLOAT(&a[0], jb_hw_get_current_value(x, pid));
+        switch(i){
+            case 0: outlet_anything(x->out_ui, gensym("param0"), 1, a); break;
+            case 1: outlet_anything(x->out_ui, gensym("param1"), 1, a); break;
+            case 2: outlet_anything(x->out_ui, gensym("param2"), 1, a); break;
+            case 3: outlet_anything(x->out_ui, gensym("param3"), 1, a); break;
+            case 4: outlet_anything(x->out_ui, gensym("param4"), 1, a); break;
+            default: outlet_anything(x->out_ui, gensym("param5"), 1, a); break;
+        }
+    }
+}
+
+static void juicy_bank_tilde_screen_refresh(t_juicy_bank_tilde *x){
+    jb_screen_emit_full(x);
 }
 
 static void jb_hw_set_page(t_juicy_bank_tilde *x, jb_page_t page){
@@ -5132,6 +5134,7 @@ static inline int jb_preset_index_from_char(char c);
 static inline char jb_preset_char_from_index(int idx);
 static void jb_hw_global_action(t_juicy_bank_tilde *x, int action);
 static void jb_preset_emit_ui(t_juicy_bank_tilde *x);
+static void juicy_bank_tilde_screen_refresh(t_juicy_bank_tilde *x);
 static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t pid);
 static void jb_screen_emit_full(t_juicy_bank_tilde *x);
 
@@ -5827,7 +5830,7 @@ x->excite_pos2    = x->excite_pos;
     // Outs
     x->outL = outlet_new(&x->x_obj, &s_signal);
     x->outR = outlet_new(&x->x_obj, &s_signal);
-    x->out_ui = outlet_new(&x->x_obj, &s_list); // compact UI/state messages for [s bela_screen]
+    x->out_ui = outlet_new(&x->x_obj, &s_list); // single UI outlet; route in Pd to [s bela_screen_*] receivers
 // checkpoint revert init
 
     
@@ -6603,6 +6606,7 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_preset_char, 
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_encoder_left, gensym("encoder_left"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_encoder_right, gensym("encoder_right"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_encoder_press, gensym("encoder_press"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_screen_refresh, gensym("screen_refresh"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pressure, gensym("pressure"), A_DEFFLOAT, 0);
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_partials, gensym("partials"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_master,   gensym("master"),   A_DEFFLOAT, 0);
