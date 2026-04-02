@@ -5092,6 +5092,17 @@ static void juicy_bank_tilde_screen_refresh(t_juicy_bank_tilde *x){
     jb_screen_emit_full(x);
 }
 
+static void juicy_bank_tilde_ui_test(t_juicy_bank_tilde *x){
+    if(!x || !x->out_ui) return;
+    t_atom a[1];
+    SETFLOAT(&a[0], 123.f);
+    outlet_anything(x->out_ui, gensym("param0"), 1, a);
+    SETFLOAT(&a[0], 4.f);
+    outlet_anything(x->out_ui, gensym("page"), 1, a);
+    SETFLOAT(&a[0], 2.f);
+    outlet_anything(x->out_ui, gensym("selected"), 1, a);
+}
+
 static void jb_hw_set_page(t_juicy_bank_tilde *x, jb_page_t page){
     if(page < 0 || page >= JB_PAGE_COUNT) return;
     x->wf.current_page = page;
@@ -5828,19 +5839,28 @@ x->excite_pos2    = x->excite_pos;
 
 
     // Outs
+    // Keep only three outlets total:
+    //   1) audio left
+    //   2) audio right
+    //   3) UI/control outlet for the screen protocol
     x->outL = outlet_new(&x->x_obj, &s_signal);
     x->outR = outlet_new(&x->x_obj, &s_signal);
-    x->out_ui = outlet_new(&x->x_obj, &s_list); // single UI outlet; route in Pd to [s bela_screen_*] receivers
-// checkpoint revert init
+    x->out_ui = outlet_new(&x->x_obj, &s_list); // route in Pd to [s bela_screen_*]
 
-    
-x->out_preset_f = outlet_new(&x->x_obj, &s_float);  // preset mode as float (0/1/2)
-    x->out_preset   = outlet_new(&x->x_obj, &s_symbol); // preset feedback outlet (symbols/lists)
-x->out_index   = outlet_new(&x->x_obj, &s_float); // 1-based index reporter
+    // Legacy auxiliary outlets removed from the object interface.
+    // Keep pointers NULL so any old helper code safely no-ops.
+    x->out_preset_f = NULL;
+    x->out_preset   = NULL;
+    x->out_index    = NULL;
     return (void *)x;
 }
 
 
+
+
+static void juicy_bank_tilde_bang(t_juicy_bank_tilde *x){
+    jb_screen_emit_full(x);
+}
 
 static void juicy_bank_tilde_INIT(t_juicy_bank_tilde *x);
 // -------------------- PRESET HELPERS --------------------
@@ -6607,6 +6627,8 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_preset_char, 
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_encoder_right, gensym("encoder_right"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_encoder_press, gensym("encoder_press"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_screen_refresh, gensym("screen_refresh"), 0);
+    class_addbang(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bang);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_ui_test, gensym("ui_test"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pressure, gensym("pressure"), A_DEFFLOAT, 0);
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_partials, gensym("partials"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_master,   gensym("master"),   A_DEFFLOAT, 0);
