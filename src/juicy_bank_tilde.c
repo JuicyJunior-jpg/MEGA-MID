@@ -1343,6 +1343,7 @@ char preset_edit_name[JB_PRESET_NAME_MAX + 1];
     jb_workflow_state_t wf;
     jb_hw_pot_state_t hw_pots[6];
     float hw_pressure;
+    t_clock *ui_clock;
 
    // LFO1/LFO2 targets
     jb_tgtproxy *tgtproxy_lfo1;
@@ -4876,6 +4877,7 @@ static void juicy_bank_tilde_renderclear(t_juicy_bank_tilde *x){
 }
 
 static void juicy_bank_tilde_free(t_juicy_bank_tilde *x){
+    if (x->ui_clock) { clock_unset(x->ui_clock); clock_free(x->ui_clock); x->ui_clock = NULL; }
     inlet_free(x->in_release);
 
     inlet_free(x->in_bell_peak_hz); inlet_free(x->in_bell_peak_zeta); inlet_free(x->in_bell_npl); inlet_free(x->in_bell_npr); inlet_free(x->in_bell_npm); inlet_free(x->in_damper_sel); inlet_free(x->in_brightness); inlet_free(x->in_density);
@@ -5088,6 +5090,12 @@ static void jb_screen_emit_full(t_juicy_bank_tilde *x){
     }
 }
 
+static void jb_ui_clock_tick(t_juicy_bank_tilde *x){
+    if(!x) return;
+    jb_screen_emit_full(x);
+    if(x->ui_clock) clock_delay(x->ui_clock, 50);
+}
+
 static void juicy_bank_tilde_screen_refresh(t_juicy_bank_tilde *x){
     jb_screen_emit_full(x);
 }
@@ -5154,6 +5162,7 @@ static void jb_preset_emit_ui(t_juicy_bank_tilde *x);
 static void juicy_bank_tilde_screen_refresh(t_juicy_bank_tilde *x);
 static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t pid);
 static void jb_screen_emit_full(t_juicy_bank_tilde *x);
+static void jb_ui_clock_tick(t_juicy_bank_tilde *x);
 
 static float jb_hw_norm_to_param(float n, jb_hw_param_t pid){
     const jb_hw_param_spec_t *sp = &jb_hw_param_specs[pid];
@@ -5858,6 +5867,8 @@ x->excite_pos2    = x->excite_pos;
     x->out_preset_f = NULL;
     x->out_preset   = NULL;
     x->out_index    = NULL;
+    x->ui_clock = clock_new(x, (t_method)jb_ui_clock_tick);
+    if (x->ui_clock) clock_delay(x->ui_clock, 100);
     return (void *)x;
 }
 
