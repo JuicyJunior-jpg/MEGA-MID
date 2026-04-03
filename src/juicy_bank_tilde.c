@@ -1194,6 +1194,31 @@ static int jb_hw_vel_target_to_index(const t_symbol *s, int bank){
     return 0;
 }
 
+// Forward declarations for existing parameter/preset/workflow functions used by the
+// hardware-workflow scaffold before their full definitions appear later.
+static void juicy_bank_tilde_master(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_partials(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_bank(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_octave(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_semitone(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_tune(t_juicy_bank_tilde *x, t_floatarg f);
+static void jb_preset_store(t_juicy_bank_tilde *x, int slot, const char *name_or_null);
+static void juicy_bank_tilde_encoder_press(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_encoder_left(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_encoder_right(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_pressure(t_juicy_bank_tilde *x, t_floatarg f);
+static void jb_hw_vel_target_set_exact(t_juicy_bank_tilde *x, t_symbol *s);
+static void jb_hw_preset_begin_naming(t_juicy_bank_tilde *x);
+static inline int jb_preset_index_from_char(char c);
+static inline char jb_preset_char_from_index(int idx);
+static void jb_hw_global_action(t_juicy_bank_tilde *x, int action);
+static void jb_preset_emit_ui(t_juicy_bank_tilde *x);
+static void juicy_bank_tilde_screen_refresh(t_juicy_bank_tilde *x);
+static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t pid);
+static void jb_screen_emit_full(t_juicy_bank_tilde *x);
+static void jb_ui_clock_tick(t_juicy_bank_tilde *x);
+
+
 // Proxy to accept ANY message on target-selection inlets (so message boxes like 'damper_1' work)
 typedef struct _juicy_bank_tilde t_juicy_bank_tilde; // forward
 typedef struct _jb_tgtproxy{
@@ -2844,7 +2869,6 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
     const float pickupL = jb_clamp(pickup - pickup_off, 0.f, 1.f);
     const float pickupR = jb_clamp(pickup + pickup_off, 0.f, 1.f);
 
-    const float PI = (float)M_PI;
     float energy_posL = 0.f;
     float energy_posR = 0.f;
     for (int i = 0; i < n_modes; ++i){
