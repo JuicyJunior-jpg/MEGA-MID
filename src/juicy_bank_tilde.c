@@ -5095,12 +5095,18 @@ static void juicy_bank_tilde_screen_refresh(t_juicy_bank_tilde *x){
 static void juicy_bank_tilde_ui_test(t_juicy_bank_tilde *x){
     if(!x || !x->out_ui) return;
     t_atom a[1];
-    SETFLOAT(&a[0], 123.f);
-    outlet_anything(x->out_ui, gensym("param0"), 1, a);
     SETFLOAT(&a[0], 4.f);
     outlet_anything(x->out_ui, gensym("page"), 1, a);
     SETFLOAT(&a[0], 2.f);
     outlet_anything(x->out_ui, gensym("selected"), 1, a);
+    SETFLOAT(&a[0], 7.f);
+    outlet_anything(x->out_ui, gensym("preset_slot"), 1, a);
+    SETFLOAT(&a[0], 0.11f); outlet_anything(x->out_ui, gensym("param0"), 1, a);
+    SETFLOAT(&a[0], 0.22f); outlet_anything(x->out_ui, gensym("param1"), 1, a);
+    SETFLOAT(&a[0], 0.33f); outlet_anything(x->out_ui, gensym("param2"), 1, a);
+    SETFLOAT(&a[0], 0.44f); outlet_anything(x->out_ui, gensym("param3"), 1, a);
+    SETFLOAT(&a[0], 0.55f); outlet_anything(x->out_ui, gensym("param4"), 1, a);
+    SETFLOAT(&a[0], 0.66f); outlet_anything(x->out_ui, gensym("param5"), 1, a);
 }
 
 static void jb_hw_set_page(t_juicy_bank_tilde *x, jb_page_t page){
@@ -5845,7 +5851,7 @@ x->excite_pos2    = x->excite_pos;
     //   3) UI/control outlet for the screen protocol
     x->outL = outlet_new(&x->x_obj, &s_signal);
     x->outR = outlet_new(&x->x_obj, &s_signal);
-    x->out_ui = outlet_new(&x->x_obj, &s_list); // route in Pd to [s bela_screen_*]
+    x->out_ui = outlet_new(&x->x_obj, &s_list); // only non-audio outlet; connect to [route page selected preset_slot param0 param1 param2 param3 param4 param5]
 
     // Legacy auxiliary outlets removed from the object interface.
     // Keep pointers NULL so any old helper code safely no-ops.
@@ -5945,28 +5951,9 @@ static inline void jb_preset_trim_name(char *s){
 }
 
 static void jb_preset_emit_ui(t_juicy_bank_tilde *x){
-    if (!x || !x->out_preset) return;
-
-    t_atom a[2];
-
-    // mode
-    SETFLOAT(&a[0], (t_float)x->preset_mode);
-    outlet_anything(x->out_preset, gensym("preset_mode"), 1, a);
-
-    if (x->out_preset_f) outlet_float(x->out_preset_f, (t_float)x->preset_mode);
-
-    // slot (1-based)
-    SETFLOAT(&a[0], (t_float)(x->preset_slot_sel + 1));
-    outlet_anything(x->out_preset, gensym("preset_slot"), 1, a);
-
-    // name (full string)
-    SETSYMBOL(&a[0], gensym(x->preset_edit_name));
-    outlet_anything(x->out_preset, gensym("preset_name"), 1, a);
-
-    // cursor (useful in naming mode)
-    SETFLOAT(&a[0], (t_float)x->preset_cursor);
-    outlet_anything(x->out_preset, gensym("edit_cursor"), 1, a);
-
+    /* Legacy preset UI outlets removed.
+       Screen state is now exported only through x->out_ui via jb_screen_emit_full(). */
+    if (!x) return;
     jb_screen_emit_full(x);
 }
 
@@ -6388,7 +6375,7 @@ static void juicy_bank_tilde_index_forward(t_juicy_bank_tilde *x){
     int *edit_idx_p = x->edit_bank ? &x->edit_idx2     : &x->edit_idx;
     int K = (*active_p > 0) ? *active_p : 1;
     *edit_idx_p = (*edit_idx_p + 1) % K;
-    if (x->out_index) outlet_float(x->out_index, (t_float)(*edit_idx_p + 1));
+    /* legacy out_index outlet removed */
 }
 
 static void juicy_bank_tilde_index_backward(t_juicy_bank_tilde *x){
@@ -6396,7 +6383,7 @@ static void juicy_bank_tilde_index_backward(t_juicy_bank_tilde *x){
     int *edit_idx_p = x->edit_bank ? &x->edit_idx2     : &x->edit_idx;
     int K = (*active_p > 0) ? *active_p : 1;
     *edit_idx_p = (*edit_idx_p - 1 + K) % K;
-    if (x->out_index) outlet_float(x->out_index, (t_float)(*edit_idx_p + 1));
+    /* legacy out_index outlet removed */
 }
 
 // ---------- CHECKPOINT: revert checkpoint for base gains/decays (does NOT bake damping) ----------
