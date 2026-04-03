@@ -127,6 +127,12 @@ static void jb_screen_symbols_init(void){
 #define JB_TAN_LUT_SIZE        4096
 #define JB_PARAM_EPS           1.0e-5f
 
+/* Hardware control conditioning.
+   These values are tuned for noisy 0..1 analog controls on Bela/embedded ADCs. */
+#define JB_HW_POT_DEADBAND_NORM 0.0025f   /* ignore tiny idle ADC drift */
+#define JB_HW_POT_SMOOTH_ALPHA  0.22f     /* one-pole smoothing amount */
+#define JB_HW_POT_SEND_HYST     0.0012f   /* do not re-apply microscopic changes */
+
 // ---------- utils ----------
 static inline float jb_clamp(float x, float lo, float hi){ return (x<lo)?lo:((x>hi)?hi:x); }
 
@@ -142,6 +148,36 @@ static inline float jb_expmap01(float t, float lo, float hi){
     if (t >= 1.f) return hi;
     if (lo <= 0.f) return lo + t*(hi-lo);
     return lo * powf(hi/lo, t);
+}
+
+static inline float jb_norm_from_exp(float v, float lo, float hi){
+    if (hi <= lo) return 0.f;
+    if (v <= lo) return 0.f;
+    if (v >= hi) return 1.f;
+    if (lo <= 0.f) return jb_clamp((v - lo) / (hi - lo), 0.f, 1.f);
+    return jb_clamp(logf(v / lo) / logf(hi / lo), 0.f, 1.f);
+}
+static inline float jb_scurve(float t){
+    t = jb_clamp(t, 0.f, 1.f);
+    return t * t * (3.f - 2.f * t); /* smoothstep */
+}
+static inline float jb_unscurve(float y){
+    /* inverse smoothstep approximation by a few Newton steps */
+    y = jb_clamp(y, 0.f, 1.f);
+    float t = y;
+    for(int i = 0; i < 3; ++i){
+        float f = t * t * (3.f - 2.f * t) - y;
+        float df = 6.f * t * (1.f - t);
+        if (fabsf(df) < 1.0e-6f) break;
+        t = jb_clamp(t - f / df, 0.f, 1.f);
+    }
+    return t;
+}
+static inline float jb_ctrl_bipolar_from_knob_or_direct(float f){
+    /* For bipolar parameters, 0..1 from a hardware knob should span -1..+1.
+       Values outside 0..1 are treated as already-direct. */
+    if (f >= 0.f && f <= 1.f) return jb_clamp(2.f * f - 1.f, -1.f, 1.f);
+    return jb_clamp(f, -1.f, 1.f);
 }
 static inline float jb_slope_to_powerlaw(float slope01){
     float s = jb_clamp(slope01, 0.f, 1.f);
@@ -293,7 +329,9 @@ typedef enum {
 } jb_hw_param_t;
 
 typedef struct {
-    float normalized;
+    float normalized;   /* latest accepted raw pot value */
+    float filtered;     /* smoothed pot value used for parameter mapping */
+    float last_sent;    /* last mapped normalized value actually applied */
     int caught;
 } jb_hw_pot_state_t;
 
@@ -1015,7 +1053,7 @@ static const jb_hw_param_t jb_page_param_map[JB_PAGE_COUNT][6] = {
 static const jb_hw_param_spec_t jb_hw_param_specs[] = {
     [JB_HW_PARAM_NONE]            = { "---",    0.f,   1.f,   0 },
     [JB_HW_PARAM_MASTER]          = { "MSTR",   0.f,   1.f,   0 },
-    [JB_HW_PARAM_BRIGHTNESS]      = { "BRGT",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_BRIGHTNESS]      = { "BRGT",  -1.f,   1.f,   0 },
     [JB_HW_PARAM_POSITION]        = { "POS",    0.f,   1.f,   0 },
     [JB_HW_PARAM_PICKUP]          = { "PICK",   0.f,   1.f,   0 },
     [JB_HW_PARAM_SPACE_WETDRY]    = { "WET",   -1.f,   1.f,   0 },
@@ -4277,8 +4315,9 @@ static void juicy_bank_tilde_damper_sel(t_juicy_bank_tilde *x, t_floatarg f){
 
 
 static void juicy_bank_tilde_brightness(t_juicy_bank_tilde *x, t_floatarg f){
-    if (x->edit_bank) x->brightness2 = jb_clamp(f, -1.f, 1.f);
-    else              x->brightness  = jb_clamp(f, -1.f, 1.f);
+    float v = jb_ctrl_bipolar_from_knob_or_direct((float)f);
+    if (x->edit_bank) x->brightness2 = v;
+    else              x->brightness  = v;
     jb_mark_all_voices_bank_gain_dirty(x, x->edit_bank ? 1 : 0);
 }
 static void juicy_bank_tilde_density(t_juicy_bank_tilde *x, t_floatarg f){
@@ -4626,14 +4665,14 @@ static void jb_presetproxy_anything(jb_presetproxy *p, t_symbol *s, int argc, t_
 
 
 static void juicy_bank_tilde_odd_skew(t_juicy_bank_tilde *x, t_floatarg f){
-    float v = jb_clamp(f, -1.f, 1.f);
+    float v = jb_ctrl_bipolar_from_knob_or_direct((float)f);
     if (x->edit_bank) x->odd_skew2 = v;
     else              x->odd_skew  = v;
     jb_mark_all_voices_bank_dirty(x, x->edit_bank ? 1 : 0);
 }
 
 static void juicy_bank_tilde_even_skew(t_juicy_bank_tilde *x, t_floatarg f){
-    float v = jb_clamp(f, -1.f, 1.f);
+    float v = jb_ctrl_bipolar_from_knob_or_direct((float)f);
     if (x->edit_bank) x->even_skew2 = v;
     else              x->even_skew  = v;
     jb_mark_all_voices_bank_dirty(x, x->edit_bank ? 1 : 0);
@@ -5161,36 +5200,85 @@ static float jb_hw_param_to_norm(float v, jb_hw_param_t pid){
     const jb_hw_param_spec_t *sp = &jb_hw_param_specs[pid];
     float den = sp->max_value - sp->min_value;
     if(den <= 1e-9f) return 0.f;
-    return jb_clamp((v - sp->min_value) / den, 0.f, 1.f);
-}
 
-// Forward declarations for existing parameter/preset functions used by the
-// hardware-workflow scaffold before their full definitions appear later.
-static void juicy_bank_tilde_master(t_juicy_bank_tilde *x, t_floatarg f);
-static void juicy_bank_tilde_partials(t_juicy_bank_tilde *x, t_floatarg f);
-static void juicy_bank_tilde_bank(t_juicy_bank_tilde *x, t_floatarg f);
-static void juicy_bank_tilde_octave(t_juicy_bank_tilde *x, t_floatarg f);
-static void juicy_bank_tilde_semitone(t_juicy_bank_tilde *x, t_floatarg f);
-static void juicy_bank_tilde_tune(t_juicy_bank_tilde *x, t_floatarg f);
-static void jb_preset_store(t_juicy_bank_tilde *x, int slot, const char *name_or_null);
-static void juicy_bank_tilde_encoder_press(t_juicy_bank_tilde *x, t_floatarg f);
-static void juicy_bank_tilde_encoder_left(t_juicy_bank_tilde *x, t_floatarg f);
-static void juicy_bank_tilde_encoder_right(t_juicy_bank_tilde *x, t_floatarg f);
-static void juicy_bank_tilde_pressure(t_juicy_bank_tilde *x, t_floatarg f);
-static void jb_hw_vel_target_set_exact(t_juicy_bank_tilde *x, t_symbol *s);
-static void jb_hw_preset_begin_naming(t_juicy_bank_tilde *x);
-static inline int jb_preset_index_from_char(char c);
-static inline char jb_preset_char_from_index(int idx);
-static void jb_hw_global_action(t_juicy_bank_tilde *x, int action);
-static void jb_preset_emit_ui(t_juicy_bank_tilde *x);
-static void juicy_bank_tilde_screen_refresh(t_juicy_bank_tilde *x);
-static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t pid);
-static void jb_screen_emit_full(t_juicy_bank_tilde *x);
-static void jb_ui_clock_tick(t_juicy_bank_tilde *x);
+    switch(pid){
+        case JB_HW_PARAM_BELL_FREQ:
+            return jb_norm_from_exp(v, 40.f, 12000.f);
+        case JB_HW_PARAM_BELL_NPL:
+        case JB_HW_PARAM_BELL_NPR:
+            return jb_norm_from_exp(v, 0.1f, 8.f);
+        case JB_HW_PARAM_EXC_ATTACK:
+        case JB_HW_PARAM_EXC_DECAY:
+        case JB_HW_PARAM_EXC_RELEASE:
+        case JB_HW_PARAM_DECAY:
+            if(v <= 0.f) return 0.f;
+            return jb_norm_from_exp(v, 1.f, 5000.f);
+        case JB_HW_PARAM_LFO_RATE:
+            if(v <= 0.f) return 0.f;
+            return jb_norm_from_exp(v, 0.05f, 20.f);
+        case JB_HW_PARAM_DENSITY:
+        case JB_HW_PARAM_DISPERSION:
+        case JB_HW_PARAM_SPACE_SIZE:
+        case JB_HW_PARAM_SPACE_DECAY:
+        case JB_HW_PARAM_SPACE_DIFFUSION:
+        case JB_HW_PARAM_SPACE_DAMPING:
+        case JB_HW_PARAM_NOISE_COLOR:
+        case JB_HW_PARAM_IMPULSE_SHAPE:
+        case JB_HW_PARAM_EXC_FADER:
+        case JB_HW_PARAM_EXC_SUSTAIN:
+        case JB_HW_PARAM_MASTER:
+        case JB_HW_PARAM_GAIN:
+        case JB_HW_PARAM_POSITION:
+        case JB_HW_PARAM_PICKUP:
+            return jb_unscurve((v - sp->min_value) / den);
+        default:
+            return jb_clamp((v - sp->min_value) / den, 0.f, 1.f);
+    }
+}
 
 static float jb_hw_norm_to_param(float n, jb_hw_param_t pid){
     const jb_hw_param_spec_t *sp = &jb_hw_param_specs[pid];
-    float v = sp->min_value + jb_clamp(n,0.f,1.f) * (sp->max_value - sp->min_value);
+    n = jb_clamp(n, 0.f, 1.f);
+
+    float v = 0.f;
+    switch(pid){
+        case JB_HW_PARAM_BELL_FREQ:
+            v = jb_expmap01(n, 40.f, 12000.f);
+            break;
+        case JB_HW_PARAM_BELL_NPL:
+        case JB_HW_PARAM_BELL_NPR:
+            v = jb_expmap01(n, 0.1f, 8.f);
+            break;
+        case JB_HW_PARAM_EXC_ATTACK:
+        case JB_HW_PARAM_EXC_DECAY:
+        case JB_HW_PARAM_EXC_RELEASE:
+        case JB_HW_PARAM_DECAY:
+            v = (n <= 0.f) ? 0.f : jb_expmap01(n, 1.f, 5000.f);
+            break;
+        case JB_HW_PARAM_LFO_RATE:
+            v = (n <= 0.f) ? 0.f : jb_expmap01(n, 0.05f, 20.f);
+            break;
+        case JB_HW_PARAM_DENSITY:
+        case JB_HW_PARAM_DISPERSION:
+        case JB_HW_PARAM_SPACE_SIZE:
+        case JB_HW_PARAM_SPACE_DECAY:
+        case JB_HW_PARAM_SPACE_DIFFUSION:
+        case JB_HW_PARAM_SPACE_DAMPING:
+        case JB_HW_PARAM_NOISE_COLOR:
+        case JB_HW_PARAM_IMPULSE_SHAPE:
+        case JB_HW_PARAM_EXC_FADER:
+        case JB_HW_PARAM_EXC_SUSTAIN:
+        case JB_HW_PARAM_MASTER:
+        case JB_HW_PARAM_GAIN:
+        case JB_HW_PARAM_POSITION:
+        case JB_HW_PARAM_PICKUP:
+            v = sp->min_value + jb_scurve(n) * (sp->max_value - sp->min_value);
+            break;
+        default:
+            v = sp->min_value + n * (sp->max_value - sp->min_value);
+            break;
+    }
+
     if(sp->is_integer) v = floorf(v + 0.5f);
     return v;
 }
@@ -5315,17 +5403,31 @@ static void juicy_bank_tilde_page(t_juicy_bank_tilde *x, t_floatarg f){
 }
 
 static void juicy_bank_tilde_pot(t_juicy_bank_tilde *x, t_floatarg pf, t_floatarg vf){
-    /* Hardware contract for this build:
-       pot indices are STRICTLY 0..5.
-       This removes the old 0..5 vs 1..6 ambiguity that could offset the
-       selected/highlighted pot and apply values to the wrong slot. */
+    /* Hardware contract:
+       pot indices are STRICTLY 0..5 and values are 0..1.
+       We condition the input here so analog jitter does not leak into the synth. */
     int pot = (int)floorf(pf + 0.5f);
-    float norm = jb_clamp(vf, 0.f, 1.f);
+    float raw = jb_clamp(vf, 0.f, 1.f);
 
     if(pot < 0 || pot >= 6) return;
 
-    x->hw_pots[pot].normalized = norm;
-    x->hw_pots[pot].caught = 1; /* disable soft takeover for the screen/hardware workflow */
+    jb_hw_pot_state_t *ps = &x->hw_pots[pot];
+
+    /* tiny idle jitter guard */
+    if(fabsf(raw - ps->normalized) < JB_HW_POT_DEADBAND_NORM)
+        raw = ps->normalized;
+    else
+        ps->normalized = raw;
+
+    /* one-pole smoothing */
+    if(!ps->caught){
+        ps->filtered = raw;
+        ps->last_sent = raw;
+        ps->caught = 1;
+    }else{
+        ps->filtered += JB_HW_POT_SMOOTH_ALPHA * (raw - ps->filtered);
+    }
+
     x->wf.highlighted_pot = pot;
 
     jb_hw_param_t pid = jb_page_param_map[x->wf.current_page][pot];
@@ -5334,7 +5436,14 @@ static void juicy_bank_tilde_pot(t_juicy_bank_tilde *x, t_floatarg pf, t_floatar
         return;
     }
 
-    jb_hw_apply_param_value(x, pid, jb_hw_norm_to_param(norm, pid));
+    /* do not spam tiny control updates that would only create zipper/jitter */
+    if(fabsf(ps->filtered - ps->last_sent) < JB_HW_POT_SEND_HYST){
+        jb_screen_emit_full(x);
+        return;
+    }
+    ps->last_sent = ps->filtered;
+
+    jb_hw_apply_param_value(x, pid, jb_hw_norm_to_param(ps->filtered, pid));
     jb_screen_emit_full(x);
 }
 
