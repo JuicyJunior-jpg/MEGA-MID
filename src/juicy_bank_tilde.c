@@ -1,6 +1,11 @@
 // juicy_bank~ — modal resonator bank (V5.0)
 // 6-voice poly, true stereo banks, Behavior + Body + Individual inlets.
 // NEW (V5.0):
+//   • PATCHED for hardware screen workflow:
+//     - pot numbering is now strict 0..5
+//     - soft takeover is disabled in juicy_bank_tilde_pot()
+//     - highlighted pot follows the actual incoming pot index directly
+
 //   • **Spacing** inlet (after dispersion, before anisotropy): nudges each mode toward the *next* harmonic
 //     ratio (ceil or +1 if already integer). 0 = no shift, 1 = fully at next ratio.
 //   • **32 modes by default**: startup ratios 1..32, gain=1.0, decay=1000 ms, attack=0, curve=0 (linear).
@@ -5291,24 +5296,25 @@ static void juicy_bank_tilde_page(t_juicy_bank_tilde *x, t_floatarg f){
 }
 
 static void juicy_bank_tilde_pot(t_juicy_bank_tilde *x, t_floatarg pf, t_floatarg vf){
-    int pot_raw = (int)floorf(pf + 0.5f);
-    int pot = pot_raw;
-    /* accept either 0..5 or legacy 1..6 numbering */
-    if(pot_raw >= 1 && pot_raw <= 6) pot = pot_raw - 1;
+    /* Hardware contract for this build:
+       pot indices are STRICTLY 0..5.
+       This removes the old 0..5 vs 1..6 ambiguity that could offset the
+       selected/highlighted pot and apply values to the wrong slot. */
+    int pot = (int)floorf(pf + 0.5f);
     float norm = jb_clamp(vf, 0.f, 1.f);
-    if(pot < 0 || pot >= 6) return;
-    x->hw_pots[pot].normalized = norm;
-    jb_hw_param_t pid = jb_page_param_map[x->wf.current_page][pot];
-    if(pid == JB_HW_PARAM_NONE) return;
 
-    float curv = jb_hw_get_current_value(x, pid);
-    float curn = jb_hw_param_to_norm(curv, pid);
-    if(!x->hw_pots[pot].caught){
-        if(fabsf(norm - curn) <= 0.06f) x->hw_pots[pot].caught = 1;
-        else return;
+    if(pot < 0 || pot >= 6) return;
+
+    x->hw_pots[pot].normalized = norm;
+    x->hw_pots[pot].caught = 1; /* disable soft takeover for the screen/hardware workflow */
+    x->wf.highlighted_pot = pot;
+
+    jb_hw_param_t pid = jb_page_param_map[x->wf.current_page][pot];
+    if(pid == JB_HW_PARAM_NONE){
+        jb_screen_emit_full(x);
+        return;
     }
 
-    x->wf.highlighted_pot = pot;
     jb_hw_apply_param_value(x, pid, jb_hw_norm_to_param(norm, pid));
     jb_screen_emit_full(x);
 }
