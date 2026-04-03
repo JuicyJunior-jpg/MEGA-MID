@@ -1194,6 +1194,8 @@ static int jb_hw_vel_target_to_index(const t_symbol *s, int bank){
     return 0;
 }
 
+typedef struct _juicy_bank_tilde t_juicy_bank_tilde; // forward
+
 // Forward declarations for existing parameter/preset/workflow functions used by the
 // hardware-workflow scaffold before their full definitions appear later.
 static void juicy_bank_tilde_master(t_juicy_bank_tilde *x, t_floatarg f);
@@ -1220,7 +1222,6 @@ static void jb_ui_clock_tick(t_juicy_bank_tilde *x);
 
 
 // Proxy to accept ANY message on target-selection inlets (so message boxes like 'damper_1' work)
-typedef struct _juicy_bank_tilde t_juicy_bank_tilde; // forward
 typedef struct _jb_tgtproxy{
     t_pd p_pd;
     t_juicy_bank_tilde *owner;
@@ -5103,7 +5104,6 @@ static void jb_hw_reset_soft_takeover(t_juicy_bank_tilde *x){
     for(int i=0;i<6;++i) x->hw_pots[i].caught = 0;
 }
 
-static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t pid);
 
 static const char *jb_screen_page_name(jb_page_t page){
     switch(page){
