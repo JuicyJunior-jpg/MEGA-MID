@@ -5,7 +5,7 @@
 //     - pot numbering is now strict 0..5
 //     - soft takeover is disabled in juicy_bank_tilde_pot()
 //     - highlighted pot follows the actual incoming pot index directly
-//     - screen communication uses an optional internal bridge, with UI outlet fallback
+//     - screen communication uses direct internal sends to bela_screen_* receivers
 
 //   • **Spacing** inlet (after dispersion, before anisotropy): nudges each mode toward the *next* harmonic
 //     ratio (ceil or +1 if already integer). 0 = no shift, 1 = fully at next ratio.
@@ -40,36 +40,36 @@
 #include <stdio.h>
 #include <stdint.h>
 
-/* -------------------------------------------------------------------------
-   OPTIONAL INTERNAL SCREEN BRIDGE
-   IMPORTANT:
-   - On Bela builds that also provide jb_screen_bridge_push(), the synth can
-     push UI state directly to the OLED render side.
-   - In PlugData/Pd standalone builds, that symbol does NOT exist, so the
-     synth must still load without it.
-   ------------------------------------------------------------------------- */
-#ifdef __cplusplus
-extern "C" {
-#endif
-#if defined(__APPLE__)
-extern void jb_screen_bridge_push(int page, int selected, int presetSlot,
-                                  float p0, float p1, float p2,
-                                  float p3, float p4, float p5) __attribute__((weak_import));
-#elif defined(__GNUC__)
-extern void jb_screen_bridge_push(int page, int selected, int presetSlot,
-                                  float p0, float p1, float p2,
-                                  float p3, float p4, float p5) __attribute__((weak));
-#else
-extern void jb_screen_bridge_push(int page, int selected, int presetSlot,
-                                  float p0, float p1, float p2,
-                                  float p3, float p4, float p5);
-#endif
-#ifdef __cplusplus
-}
-#endif
 
-static int jb_screen_bridge_available(void){
-    return jb_screen_bridge_push != 0;
+/* -------------------------------------------------------------------------
+   INTERNAL SCREEN STATE SEND
+   The synth talks to the OLED path internally by sending floats directly to
+   the named Bela/libpd receivers. This removes the Pd UI outlet/router path.
+   If a receiver is not bound, sending is a safe no-op.
+   ------------------------------------------------------------------------- */
+static t_symbol *jb_sym_screen_page = NULL;
+static t_symbol *jb_sym_screen_selected = NULL;
+static t_symbol *jb_sym_screen_preset_slot = NULL;
+static t_symbol *jb_sym_screen_param[6] = {NULL, NULL, NULL, NULL, NULL, NULL};
+
+static inline void jb_screen_send_float(t_symbol *sym, t_float f){
+    if(sym && sym->s_thing){
+        pd_float(sym->s_thing, f);
+    }
+}
+
+static void jb_screen_symbols_init(void){
+    if(!jb_sym_screen_page){
+        jb_sym_screen_page = gensym("bela_screen_page");
+        jb_sym_screen_selected = gensym("bela_screen_selected");
+        jb_sym_screen_preset_slot = gensym("bela_screen_preset_slot");
+        jb_sym_screen_param[0] = gensym("bela_screen_param0");
+        jb_sym_screen_param[1] = gensym("bela_screen_param1");
+        jb_sym_screen_param[2] = gensym("bela_screen_param2");
+        jb_sym_screen_param[3] = gensym("bela_screen_param3");
+        jb_sym_screen_param[4] = gensym("bela_screen_param4");
+        jb_sym_screen_param[5] = gensym("bela_screen_param5");
+    }
 }
 
 // ---------- Optional ARM NEON SIMD (ARMv7) ----------
@@ -1294,7 +1294,7 @@ float density_amt; jb_density_mode density_mode;
     // per-voice exciter inputs (optional)
 
     t_outlet *outL, *outR;
-    t_outlet *out_ui;        // optional UI/state outlet fallback for PlugData/Pd routing
+    /* no UI/control outlet: screen communication is internal via bela_screen_* receivers */
 
     // INLET pointers
     // Behavior (reduced)
@@ -5096,8 +5096,10 @@ static void jb_screen_get_preset_name(const t_juicy_bank_tilde *x, char *dst, si
     snprintf(dst, n, "P%02d", x->preset_slot_sel + 1);
 }
 
+
 static void jb_screen_emit_full(t_juicy_bank_tilde *x){
     if(!x) return;
+    jb_screen_symbols_init();
 
     float vals[6];
     for(int i = 0; i < 6; ++i){
@@ -5105,39 +5107,12 @@ static void jb_screen_emit_full(t_juicy_bank_tilde *x){
         vals[i] = (pid == JB_HW_PARAM_NONE) ? 0.f : jb_hw_get_current_value(x, pid);
     }
 
-    if(jb_screen_bridge_available()){
-        jb_screen_bridge_push(
-            (int)x->wf.current_page,
-            (int)jb_clamp((float)x->wf.highlighted_pot, 0.f, 5.f),
-            (int)x->preset_slot_sel,
-            vals[0], vals[1], vals[2], vals[3], vals[4], vals[5]
-        );
-        return;
-    }
+    jb_screen_send_float(jb_sym_screen_page, (t_float)x->wf.current_page);
+    jb_screen_send_float(jb_sym_screen_selected, (t_float)jb_clamp((float)x->wf.highlighted_pot, 0.f, 5.f));
+    jb_screen_send_float(jb_sym_screen_preset_slot, (t_float)x->preset_slot_sel);
 
-    if(x->out_ui){
-        t_atom a[1];
-        SETFLOAT(&a[0], (t_float)x->wf.current_page);
-        outlet_anything(x->out_ui, gensym("page"), 1, a);
-
-        SETFLOAT(&a[0], (t_float)jb_clamp((float)x->wf.highlighted_pot, 0.f, 5.f));
-        outlet_anything(x->out_ui, gensym("selected"), 1, a);
-
-        SETFLOAT(&a[0], (t_float)x->preset_slot_sel);
-        outlet_anything(x->out_ui, gensym("preset_slot"), 1, a);
-
-        for(int i = 0; i < 6; ++i){
-            t_atom av[1];
-            SETFLOAT(&av[0], vals[i]);
-            switch(i){
-                case 0: outlet_anything(x->out_ui, gensym("param0"), 1, av); break;
-                case 1: outlet_anything(x->out_ui, gensym("param1"), 1, av); break;
-                case 2: outlet_anything(x->out_ui, gensym("param2"), 1, av); break;
-                case 3: outlet_anything(x->out_ui, gensym("param3"), 1, av); break;
-                case 4: outlet_anything(x->out_ui, gensym("param4"), 1, av); break;
-                case 5: outlet_anything(x->out_ui, gensym("param5"), 1, av); break;
-            }
-        }
+    for(int i = 0; i < 6; ++i){
+        jb_screen_send_float(jb_sym_screen_param[i], (t_float)vals[i]);
     }
 }
 
@@ -5151,26 +5126,19 @@ static void juicy_bank_tilde_screen_refresh(t_juicy_bank_tilde *x){
     jb_screen_emit_full(x);
 }
 
+
 static void juicy_bank_tilde_ui_test(t_juicy_bank_tilde *x){
     if(!x) return;
-
-    if(jb_screen_bridge_available()){
-        jb_screen_bridge_push(4, 2, 7, 0.11f, 0.22f, 0.33f, 0.44f, 0.55f, 0.66f);
-        return;
-    }
-
-    if(x->out_ui){
-        t_atom a[1];
-        SETFLOAT(&a[0], 4); outlet_anything(x->out_ui, gensym("page"), 1, a);
-        SETFLOAT(&a[0], 2); outlet_anything(x->out_ui, gensym("selected"), 1, a);
-        SETFLOAT(&a[0], 7); outlet_anything(x->out_ui, gensym("preset_slot"), 1, a);
-        SETFLOAT(&a[0], 0.11f); outlet_anything(x->out_ui, gensym("param0"), 1, a);
-        SETFLOAT(&a[0], 0.22f); outlet_anything(x->out_ui, gensym("param1"), 1, a);
-        SETFLOAT(&a[0], 0.33f); outlet_anything(x->out_ui, gensym("param2"), 1, a);
-        SETFLOAT(&a[0], 0.44f); outlet_anything(x->out_ui, gensym("param3"), 1, a);
-        SETFLOAT(&a[0], 0.55f); outlet_anything(x->out_ui, gensym("param4"), 1, a);
-        SETFLOAT(&a[0], 0.66f); outlet_anything(x->out_ui, gensym("param5"), 1, a);
-    }
+    jb_screen_symbols_init();
+    jb_screen_send_float(jb_sym_screen_page, 4.f);
+    jb_screen_send_float(jb_sym_screen_selected, 2.f);
+    jb_screen_send_float(jb_sym_screen_preset_slot, 7.f);
+    jb_screen_send_float(jb_sym_screen_param[0], 0.11f);
+    jb_screen_send_float(jb_sym_screen_param[1], 0.22f);
+    jb_screen_send_float(jb_sym_screen_param[2], 0.33f);
+    jb_screen_send_float(jb_sym_screen_param[3], 0.44f);
+    jb_screen_send_float(jb_sym_screen_param[4], 0.55f);
+    jb_screen_send_float(jb_sym_screen_param[5], 0.66f);
 }
 
 static void jb_hw_set_page(t_juicy_bank_tilde *x, jb_page_t page){
@@ -5911,13 +5879,11 @@ x->excite_pos2    = x->excite_pos;
 
 
     // Outs
-    // Keep only three outlets total:
+    // Keep only two outlets total:
     //   1) audio left
     //   2) audio right
-    //   3) UI/control outlet for the screen protocol
     x->outL = outlet_new(&x->x_obj, &s_signal);
     x->outR = outlet_new(&x->x_obj, &s_signal);
-    x->out_ui = outlet_new(&x->x_obj, &s_list);
 
     // Legacy auxiliary outlets removed from the object interface.
     // Keep pointers NULL so any old helper code safely no-ops.
@@ -5925,6 +5891,7 @@ x->excite_pos2    = x->excite_pos;
     x->out_preset   = NULL;
     x->out_index    = NULL;
     x->ui_clock = clock_new(x, (t_method)jb_ui_clock_tick);
+    jb_screen_symbols_init();
     return (void *)x;
 }
 
