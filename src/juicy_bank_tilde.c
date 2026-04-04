@@ -129,13 +129,12 @@ static void jb_screen_symbols_init(void){
 
 /* Hardware control conditioning.
    These values are tuned for noisy 0..1 analog controls on Bela/embedded ADCs. */
-#define JB_HW_POT_DEADBAND_NORM 0.0020f   /* ignore tiny idle ADC drift */
-#define JB_HW_POT_SMOOTH_ALPHA  0.32f     /* one-pole smoothing amount: faster, still stable */
-#define JB_HW_POT_SEND_HYST     0.0010f   /* do not re-apply microscopic changes */
+#define JB_HW_POT_DEADBAND_NORM 0.0025f   /* ignore tiny idle ADC drift */
+#define JB_HW_POT_SMOOTH_ALPHA  0.22f     /* one-pole smoothing amount */
+#define JB_HW_POT_SEND_HYST     0.0012f   /* do not re-apply microscopic changes */
 
 // ---------- utils ----------
 static inline float jb_clamp(float x, float lo, float hi){ return (x<lo)?lo:((x>hi)?hi:x); }
-static inline float jb_safe_finite(float x, float fallback){ return isfinite(x) ? x : fallback; }
 
 static inline float jb_wrap01(float x){
     x = x - floorf(x);
@@ -2355,7 +2354,7 @@ static void jb_apply_stretch_generic(int n_modes, const jb_mode_base_t *base, fl
 }
 
 static void jb_apply_odd_even_skew_generic(int n_modes, const jb_mode_base_t *base, float odd_skew, float even_skew, jb_mode_rt_t *m){
-    const float intensity = 0.35f; // gentler skew to avoid unstable jumps / overload
+    const float intensity = 1.0f; // max skew in octaves when skew=±1
     float os = jb_clamp(odd_skew,  -1.f, 1.f);
     float es = jb_clamp(even_skew, -1.f, 1.f);
     if (os == 0.f && es == 0.f) return;
@@ -5186,13 +5185,7 @@ static void jb_screen_emit_full(t_juicy_bank_tilde *x){
     float vals[6];
     for(int i = 0; i < 6; ++i){
         jb_hw_param_t pid = jb_page_param_map[x->wf.current_page][i];
-        float v = (pid == JB_HW_PARAM_NONE) ? 0.f : jb_hw_get_current_value(x, pid);
-        if(pid != JB_HW_PARAM_NONE){
-            const jb_hw_param_spec_t *sp = &jb_hw_param_specs[pid];
-            v = jb_safe_finite(v, 0.f);
-            if(sp->max_value > sp->min_value) v = jb_clamp(v, sp->min_value, sp->max_value);
-        }
-        vals[i] = v;
+        vals[i] = (pid == JB_HW_PARAM_NONE) ? 0.f : jb_hw_get_current_value(x, pid);
     }
 
     jb_screen_send_float(jb_sym_screen_page, (t_float)x->wf.current_page);
@@ -5286,7 +5279,6 @@ static float jb_hw_param_to_norm(float v, jb_hw_param_t pid){
 }
 
 static float jb_hw_norm_to_param(float n, jb_hw_param_t pid){
-    n = jb_clamp(jb_safe_finite(n, 0.f), 0.f, 1.f);
     const jb_hw_param_spec_t *sp = &jb_hw_param_specs[pid];
     n = jb_clamp(n, 0.f, 1.f);
 
@@ -5391,18 +5383,11 @@ static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t 
 }
 
 static void jb_hw_apply_param_value(t_juicy_bank_tilde *x, jb_hw_param_t pid, float value){
-    value = jb_safe_finite(value, 0.f);
     int lfoi = (x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0;
-    int bank = x->edit_bank ? 1 : 0;
     switch(pid){
         case JB_HW_PARAM_NONE: break;
         case JB_HW_PARAM_MASTER: juicy_bank_tilde_master(x, value); break;
-        case JB_HW_PARAM_BRIGHTNESS: {
-            float v = jb_clamp(value, -1.f, 1.f);
-            if(bank) x->brightness2 = v;
-            else     x->brightness  = v;
-            jb_mark_all_voices_bank_gain_dirty(x, bank);
-        } break;
+        case JB_HW_PARAM_BRIGHTNESS: juicy_bank_tilde_brightness(x, value); break;
         case JB_HW_PARAM_POSITION: juicy_bank_tilde_position(x, value); break;
         case JB_HW_PARAM_PICKUP: juicy_bank_tilde_pickup(x, value); break;
         case JB_HW_PARAM_SPACE_WETDRY: juicy_bank_tilde_space_wetdry(x, value); break;
@@ -5411,26 +5396,11 @@ static void jb_hw_apply_param_value(t_juicy_bank_tilde *x, jb_hw_param_t pid, fl
         case JB_HW_PARAM_WARP: juicy_bank_tilde_warp(x, value); break;
         case JB_HW_PARAM_DISPERSION: juicy_bank_tilde_dispersion(x, value); break;
         case JB_HW_PARAM_DENSITY: juicy_bank_tilde_density(x, value); break;
-        case JB_HW_PARAM_ODD_SKEW: {
-            float v = jb_clamp(value, -1.f, 1.f);
-            if(bank) x->odd_skew2 = v;
-            else     x->odd_skew  = v;
-            jb_mark_all_voices_bank_dirty(x, bank);
-        } break;
-        case JB_HW_PARAM_EVEN_SKEW: {
-            float v = jb_clamp(value, -1.f, 1.f);
-            if(bank) x->even_skew2 = v;
-            else     x->even_skew  = v;
-            jb_mark_all_voices_bank_dirty(x, bank);
-        } break;
+        case JB_HW_PARAM_ODD_SKEW: juicy_bank_tilde_odd_skew(x, value); break;
+        case JB_HW_PARAM_EVEN_SKEW: juicy_bank_tilde_even_skew(x, value); break;
         case JB_HW_PARAM_COLLISION: juicy_bank_tilde_collision(x, value); break;
         case JB_HW_PARAM_RELEASE_AMT: juicy_bank_tilde_release(x, value); break;
-        case JB_HW_PARAM_ODD_EVEN_BIAS: {
-            float v = jb_clamp(value, -1.f, 1.f);
-            if(bank) x->odd_even_bias2 = v;
-            else     x->odd_even_bias  = v;
-            jb_mark_all_voices_bank_gain_dirty(x, bank);
-        } break;
+        case JB_HW_PARAM_ODD_EVEN_BIAS: juicy_bank_tilde_odd_even(x, value); break;
         case JB_HW_PARAM_PARTIALS: juicy_bank_tilde_partials(x, value); break;
         case JB_HW_PARAM_BELL_FREQ: juicy_bank_tilde_bell_freq(x, value); break;
         case JB_HW_PARAM_BELL_ZETA: juicy_bank_tilde_bell_zeta(x, value); break;
@@ -5804,8 +5774,6 @@ for (int pi = 0; pi < JB_PRESET_SLOTS; ++pi){
     // body defaults
     x->brightness=0.f; x->density_amt=0.f; x->density_mode=DENSITY_PIVOT;
     x->dispersion=0.f; x->dispersion_last=-1.f;
-    x->release_amt = 1.f;
-    x->release_amt2 = 1.f;
 
     // Type-4 bell damping defaults (stackable 3x; damper 1 active, others off)
     for (int d = 0; d < JB_N_DAMPERS; ++d){
