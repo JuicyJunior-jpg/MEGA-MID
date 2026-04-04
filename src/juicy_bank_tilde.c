@@ -2007,9 +2007,7 @@ static void jb_apply_density(const t_juicy_bank_tilde *x, jb_voice_t *v){
     //  • Negative side is clamped to -1, positive side is unbounded.
     //
     // 1. Collect keytracked modes, keep absolute-Hz modes unchanged.
-    float dens = x->density_amt;
-    if (dens < -1.f)
-        dens = -1.f;
+    float dens = jb_density_ui_to_legacy(x->density_amt);
 
     int idxs[JB_MAX_MODES];
     int count = 0;
