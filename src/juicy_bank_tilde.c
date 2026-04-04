@@ -129,9 +129,9 @@ static void jb_screen_symbols_init(void){
 
 /* Hardware control conditioning.
    These values are tuned for noisy 0..1 analog controls on Bela/embedded ADCs. */
-#define JB_HW_POT_DEADBAND_NORM 0.0025f   /* ignore tiny idle ADC drift */
-#define JB_HW_POT_SMOOTH_ALPHA  0.22f     /* one-pole smoothing amount */
-#define JB_HW_POT_SEND_HYST     0.0012f   /* do not re-apply microscopic changes */
+#define JB_HW_POT_DEADBAND_NORM 0.0020f   /* ignore tiny idle ADC drift */
+#define JB_HW_POT_SMOOTH_ALPHA  0.32f     /* one-pole smoothing amount: faster, still stable */
+#define JB_HW_POT_SEND_HYST     0.0010f   /* do not re-apply microscopic changes */
 
 // ---------- utils ----------
 static inline float jb_clamp(float x, float lo, float hi){ return (x<lo)?lo:((x>hi)?hi:x); }
@@ -5384,10 +5384,16 @@ static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t 
 
 static void jb_hw_apply_param_value(t_juicy_bank_tilde *x, jb_hw_param_t pid, float value){
     int lfoi = (x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0;
+    int bank = x->edit_bank ? 1 : 0;
     switch(pid){
         case JB_HW_PARAM_NONE: break;
         case JB_HW_PARAM_MASTER: juicy_bank_tilde_master(x, value); break;
-        case JB_HW_PARAM_BRIGHTNESS: juicy_bank_tilde_brightness(x, value); break;
+        case JB_HW_PARAM_BRIGHTNESS: {
+            float v = jb_clamp(value, -1.f, 1.f);
+            if(bank) x->brightness2 = v;
+            else     x->brightness  = v;
+            jb_mark_all_voices_bank_gain_dirty(x, bank);
+        } break;
         case JB_HW_PARAM_POSITION: juicy_bank_tilde_position(x, value); break;
         case JB_HW_PARAM_PICKUP: juicy_bank_tilde_pickup(x, value); break;
         case JB_HW_PARAM_SPACE_WETDRY: juicy_bank_tilde_space_wetdry(x, value); break;
@@ -5396,11 +5402,26 @@ static void jb_hw_apply_param_value(t_juicy_bank_tilde *x, jb_hw_param_t pid, fl
         case JB_HW_PARAM_WARP: juicy_bank_tilde_warp(x, value); break;
         case JB_HW_PARAM_DISPERSION: juicy_bank_tilde_dispersion(x, value); break;
         case JB_HW_PARAM_DENSITY: juicy_bank_tilde_density(x, value); break;
-        case JB_HW_PARAM_ODD_SKEW: juicy_bank_tilde_odd_skew(x, value); break;
-        case JB_HW_PARAM_EVEN_SKEW: juicy_bank_tilde_even_skew(x, value); break;
+        case JB_HW_PARAM_ODD_SKEW: {
+            float v = jb_clamp(value, -1.f, 1.f);
+            if(bank) x->odd_skew2 = v;
+            else     x->odd_skew  = v;
+            jb_mark_all_voices_bank_dirty(x, bank);
+        } break;
+        case JB_HW_PARAM_EVEN_SKEW: {
+            float v = jb_clamp(value, -1.f, 1.f);
+            if(bank) x->even_skew2 = v;
+            else     x->even_skew  = v;
+            jb_mark_all_voices_bank_dirty(x, bank);
+        } break;
         case JB_HW_PARAM_COLLISION: juicy_bank_tilde_collision(x, value); break;
         case JB_HW_PARAM_RELEASE_AMT: juicy_bank_tilde_release(x, value); break;
-        case JB_HW_PARAM_ODD_EVEN_BIAS: juicy_bank_tilde_odd_even(x, value); break;
+        case JB_HW_PARAM_ODD_EVEN_BIAS: {
+            float v = jb_clamp(value, -1.f, 1.f);
+            if(bank) x->odd_even_bias2 = v;
+            else     x->odd_even_bias  = v;
+            jb_mark_all_voices_bank_gain_dirty(x, bank);
+        } break;
         case JB_HW_PARAM_PARTIALS: juicy_bank_tilde_partials(x, value); break;
         case JB_HW_PARAM_BELL_FREQ: juicy_bank_tilde_bell_freq(x, value); break;
         case JB_HW_PARAM_BELL_ZETA: juicy_bank_tilde_bell_zeta(x, value); break;
