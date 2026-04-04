@@ -129,9 +129,9 @@ static void jb_screen_symbols_init(void){
 
 /* Hardware control conditioning.
    These values are tuned for noisy 0..1 analog controls on Bela/embedded ADCs. */
-#define JB_HW_POT_DEADBAND_NORM 0.0015f   /* ignore tiny idle ADC drift */
-#define JB_HW_POT_SMOOTH_ALPHA  0.40f     /* one-pole smoothing amount */
-#define JB_HW_POT_SEND_HYST     0.0008f   /* do not re-apply microscopic changes */
+#define JB_HW_POT_DEADBAND_NORM 0.0025f   /* ignore tiny idle ADC drift */
+#define JB_HW_POT_SMOOTH_ALPHA  0.22f     /* one-pole smoothing amount */
+#define JB_HW_POT_SEND_HYST     0.0012f   /* do not re-apply microscopic changes */
 
 // ---------- utils ----------
 static inline float jb_clamp(float x, float lo, float hi){ return (x<lo)?lo:((x>hi)?hi:x); }
@@ -180,18 +180,20 @@ static inline float jb_ctrl_bipolar_from_knob_or_direct(float f){
     return jb_clamp(f, -1.f, 1.f);
 }
 static inline float jb_density_ui_to_legacy(float ui){
-    /* UI range is -1..+1 with 0 at center. Internally density keeps the
-       older behavior where the positive side extends up to +5. */
+    /* UI/hardware density is centred at 0 with a visible range of -1..+1.
+       Legacy DSP density kept a wider positive side (up to +5), so remap the
+       positive half back into that older behaviour while keeping the negative
+       half as-is. Values already outside the UI range are treated as direct. */
     ui = jb_clamp(ui, -1.f, 1.f);
     if (ui <= 0.f) return ui;
     return ui * 5.f;
 }
 
-static inline float jb_density_legacy_to_ui(float dens){
-    /* Inverse of jb_density_ui_to_legacy() for screen + hardware feedback. */
-    if (dens <= 0.f) return jb_clamp(dens, -1.f, 0.f);
-    return jb_clamp(dens / 5.f, 0.f, 1.f);
+static inline float jb_density_legacy_to_ui(float legacy){
+    if (legacy <= 0.f) return jb_clamp(legacy, -1.f, 0.f);
+    return jb_clamp(legacy * 0.2f, 0.f, 1.f);
 }
+
 static inline float jb_slope_to_powerlaw(float slope01){
     float s = jb_clamp(slope01, 0.f, 1.f);
     // Anchor points:
@@ -1083,7 +1085,7 @@ static const jb_hw_param_spec_t jb_hw_param_specs[] = {
     [JB_HW_PARAM_STRETCH]         = { "STR",   -1.f,   1.f,   0 },
     [JB_HW_PARAM_WARP]            = { "WARP",  -1.f,   1.f,   0 },
     [JB_HW_PARAM_DISPERSION]      = { "DISP",   0.f,   1.f,   0 },
-    [JB_HW_PARAM_DENSITY]         = { "DENS",  -1.f,   1.f,   0 },
+    [JB_HW_PARAM_DENSITY]         = { "DENS",   0.f,   1.f,   0 },
     [JB_HW_PARAM_ODD_SKEW]        = { "ODDSK", -1.f,   1.f,   0 },
     [JB_HW_PARAM_EVEN_SKEW]       = { "EVNSK", -1.f,   1.f,   0 },
     [JB_HW_PARAM_COLLISION]       = { "COLL",   0.f,   1.f,   0 },
@@ -2491,14 +2493,12 @@ static void juicy_bank_tilde_stretch(t_juicy_bank_tilde *x, t_floatarg f){
     float v = jb_clamp(f, -1.f, 1.f);
     if (x->edit_bank) x->stretch2 = v;
     else              x->stretch  = v;
-    jb_mark_all_voices_bank_dirty(x, x->edit_bank ? 1 : 0);
 }
 
 static void juicy_bank_tilde_warp(t_juicy_bank_tilde *x, t_floatarg f){
     float v = jb_clamp(f, -1.f, 1.f);
     if (x->edit_bank) x->warp2 = v;
     else              x->warp  = v;
-    jb_mark_all_voices_bank_dirty(x, x->edit_bank ? 1 : 0);
 }
 static void jb_apply_stretch(const t_juicy_bank_tilde *x, jb_voice_t *v){
     // Legacy wrapper (bank1 only). The actual synthesis path uses jb_apply_stretch_generic()
@@ -4367,19 +4367,14 @@ static void juicy_bank_tilde_damper_sel(t_juicy_bank_tilde *x, t_floatarg f){
 
 
 static void juicy_bank_tilde_brightness(t_juicy_bank_tilde *x, t_floatarg f){
-    float v = jb_clamp((float)f, -1.f, 1.f);
+    float v = jb_ctrl_bipolar_from_knob_or_direct((float)f);
     if (x->edit_bank) x->brightness2 = v;
     else              x->brightness  = v;
     jb_mark_all_voices_bank_gain_dirty(x, x->edit_bank ? 1 : 0);
 }
 static void juicy_bank_tilde_density(t_juicy_bank_tilde *x, t_floatarg f){
     float v = (float)f;
-    /* Accept the new UI range (-1..+1) while preserving the legacy internal
-       positive span up to +5. Values already above +1 are treated as direct
-       legacy density for backwards compatibility. */
-    if (v >= -1.f && v <= 1.f) v = jb_density_ui_to_legacy(v);
     if (v < -1.f) v = -1.f;
-    if (v > 5.f)  v = 5.f;
     if (x->edit_bank) x->density_amt2 = v;
     else              x->density_amt  = v;
     jb_mark_all_voices_bank_dirty(x, x->edit_bank ? 1 : 0);
@@ -4425,7 +4420,7 @@ static void juicy_bank_tilde_pickup(t_juicy_bank_tilde *x, t_floatarg f){
 static void juicy_bank_tilde_odd_even(t_juicy_bank_tilde *x, t_floatarg f){
     // Odd vs Even emphasis bias: -1..+1
     // -1 => silence even modes, 0 => neutral, +1 => silence odd modes
-    float v = jb_clamp((float)f, -1.f, 1.f);
+    float v = jb_ctrl_bipolar_from_knob_or_direct((float)f);
     if (x->edit_bank) x->odd_even_bias2 = v;
     else              x->odd_even_bias  = v;
     jb_mark_all_voices_bank_gain_dirty(x, x->edit_bank ? 1 : 0);
@@ -4722,14 +4717,14 @@ static void jb_presetproxy_anything(jb_presetproxy *p, t_symbol *s, int argc, t_
 
 
 static void juicy_bank_tilde_odd_skew(t_juicy_bank_tilde *x, t_floatarg f){
-    float v = jb_clamp((float)f, -1.f, 1.f);
+    float v = jb_ctrl_bipolar_from_knob_or_direct((float)f);
     if (x->edit_bank) x->odd_skew2 = v;
     else              x->odd_skew  = v;
     jb_mark_all_voices_bank_dirty(x, x->edit_bank ? 1 : 0);
 }
 
 static void juicy_bank_tilde_even_skew(t_juicy_bank_tilde *x, t_floatarg f){
-    float v = jb_clamp((float)f, -1.f, 1.f);
+    float v = jb_ctrl_bipolar_from_knob_or_direct((float)f);
     if (x->edit_bank) x->even_skew2 = v;
     else              x->even_skew  = v;
     jb_mark_all_voices_bank_dirty(x, x->edit_bank ? 1 : 0);
@@ -5276,6 +5271,7 @@ static float jb_hw_param_to_norm(float v, jb_hw_param_t pid){
         case JB_HW_PARAM_LFO_RATE:
             if(v <= 0.f) return 0.f;
             return jb_norm_from_exp(v, 0.05f, 20.f);
+        case JB_HW_PARAM_DENSITY:
         case JB_HW_PARAM_DISPERSION:
         case JB_HW_PARAM_SPACE_SIZE:
         case JB_HW_PARAM_SPACE_DECAY:
@@ -5317,6 +5313,7 @@ static float jb_hw_norm_to_param(float n, jb_hw_param_t pid){
         case JB_HW_PARAM_LFO_RATE:
             v = (n <= 0.f) ? 0.f : jb_expmap01(n, 0.05f, 20.f);
             break;
+        case JB_HW_PARAM_DENSITY:
         case JB_HW_PARAM_DISPERSION:
         case JB_HW_PARAM_SPACE_SIZE:
         case JB_HW_PARAM_SPACE_DECAY:
@@ -5353,7 +5350,7 @@ static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t 
         case JB_HW_PARAM_STRETCH: return b ? x->stretch2 : x->stretch;
         case JB_HW_PARAM_WARP: return b ? x->warp2 : x->warp;
         case JB_HW_PARAM_DISPERSION: return b ? x->dispersion2 : x->dispersion;
-        case JB_HW_PARAM_DENSITY: return jb_density_legacy_to_ui(b ? x->density_amt2 : x->density_amt);
+        case JB_HW_PARAM_DENSITY: return b ? x->density_amt2 : x->density_amt;
         case JB_HW_PARAM_ODD_SKEW: return b ? x->odd_skew2 : x->odd_skew;
         case JB_HW_PARAM_EVEN_SKEW: return b ? x->even_skew2 : x->even_skew;
         case JB_HW_PARAM_COLLISION: return b ? x->collision_amt2 : x->collision_amt;
