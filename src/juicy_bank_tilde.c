@@ -239,6 +239,7 @@ typedef enum {
     JB_PAGE_PLAY_ALT,
     JB_PAGE_BODY_A,
     JB_PAGE_BODY_B,
+    JB_PAGE_BODY_C,
     JB_PAGE_DAMPERS,
     JB_PAGE_EXCITER_A,
     JB_PAGE_EXCITER_B,
@@ -291,6 +292,11 @@ typedef enum {
     JB_HW_PARAM_WARP,
     JB_HW_PARAM_DISPERSION,
     JB_HW_PARAM_DENSITY,
+    JB_HW_PARAM_ODD_SKEW,
+    JB_HW_PARAM_EVEN_SKEW,
+    JB_HW_PARAM_COLLISION,
+    JB_HW_PARAM_RELEASE_AMT,
+    JB_HW_PARAM_ODD_EVEN_BIAS,
     JB_HW_PARAM_PARTIALS,
     JB_HW_PARAM_BELL_FREQ,
     JB_HW_PARAM_BELL_ZETA,
@@ -1026,7 +1032,7 @@ static t_symbol *jb_sym_none         = NULL;
 
 static const jb_page_family_t jb_page_family_map[JB_PAGE_COUNT] = {
     JB_FAMILY_PLAY, JB_FAMILY_PLAY,
-    JB_FAMILY_BODY, JB_FAMILY_BODY, JB_FAMILY_BODY,
+    JB_FAMILY_BODY, JB_FAMILY_BODY, JB_FAMILY_BODY, JB_FAMILY_BODY,
     JB_FAMILY_EXCITER, JB_FAMILY_EXCITER, JB_FAMILY_EXCITER,
     JB_FAMILY_MOD, JB_FAMILY_MOD, JB_FAMILY_MOD, JB_FAMILY_MOD,
     JB_FAMILY_EDIT,
@@ -1038,6 +1044,7 @@ static const jb_hw_param_t jb_page_param_map[JB_PAGE_COUNT][6] = {
     [JB_PAGE_PLAY_ALT] =    { JB_HW_PARAM_PARTIALS, JB_HW_PARAM_DENSITY, JB_HW_PARAM_STRETCH, JB_HW_PARAM_WARP, JB_HW_PARAM_DISPERSION, JB_HW_PARAM_NONE },
     [JB_PAGE_BODY_A] =      { JB_HW_PARAM_DENSITY, JB_HW_PARAM_STRETCH, JB_HW_PARAM_WARP, JB_HW_PARAM_DISPERSION, JB_HW_PARAM_BRIGHTNESS, JB_HW_PARAM_PARTIALS },
     [JB_PAGE_BODY_B] =      { JB_HW_PARAM_DENSITY, JB_HW_PARAM_STRETCH, JB_HW_PARAM_WARP, JB_HW_PARAM_DISPERSION, JB_HW_PARAM_BRIGHTNESS, JB_HW_PARAM_PARTIALS },
+    [JB_PAGE_BODY_C] =      { JB_HW_PARAM_ODD_SKEW, JB_HW_PARAM_EVEN_SKEW, JB_HW_PARAM_COLLISION, JB_HW_PARAM_RELEASE_AMT, JB_HW_PARAM_ODD_EVEN_BIAS, JB_HW_PARAM_NONE },
     [JB_PAGE_DAMPERS] =     { JB_HW_PARAM_BELL_FREQ, JB_HW_PARAM_BELL_ZETA, JB_HW_PARAM_BELL_NPL, JB_HW_PARAM_BELL_NPR, JB_HW_PARAM_BELL_NPM, JB_HW_PARAM_NONE },
     [JB_PAGE_EXCITER_A] =   { JB_HW_PARAM_EXC_FADER, JB_HW_PARAM_EXC_ATTACK, JB_HW_PARAM_EXC_DECAY, JB_HW_PARAM_EXC_SUSTAIN, JB_HW_PARAM_EXC_RELEASE, JB_HW_PARAM_NOISE_COLOR },
     [JB_PAGE_EXCITER_B] =   { JB_HW_PARAM_IMPULSE_SHAPE, JB_HW_PARAM_EXC_ATTACK_CURVE, JB_HW_PARAM_EXC_DECAY_CURVE, JB_HW_PARAM_EXC_RELEASE_CURVE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE },
@@ -1062,6 +1069,11 @@ static const jb_hw_param_spec_t jb_hw_param_specs[] = {
     [JB_HW_PARAM_WARP]            = { "WARP",  -1.f,   1.f,   0 },
     [JB_HW_PARAM_DISPERSION]      = { "DISP",   0.f,   1.f,   0 },
     [JB_HW_PARAM_DENSITY]         = { "DENS",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_ODD_SKEW]        = { "ODDSK", -1.f,   1.f,   0 },
+    [JB_HW_PARAM_EVEN_SKEW]       = { "EVNSK", -1.f,   1.f,   0 },
+    [JB_HW_PARAM_COLLISION]       = { "COLL",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_RELEASE_AMT]     = { "RELAM",  0.f,   1.f,   0 },
+    [JB_HW_PARAM_ODD_EVEN_BIAS]   = { "OEBIA", -1.f,   1.f,   0 },
     [JB_HW_PARAM_PARTIALS]        = { "PART",   0.f,  32.f,   1 },
     [JB_HW_PARAM_BELL_FREQ]       = { "FREQ",  40.f, 12000.f, 0 },
     [JB_HW_PARAM_BELL_ZETA]       = { "ZETA",   0.f,   1.f,   0 },
@@ -4393,7 +4405,7 @@ static void juicy_bank_tilde_pickup(t_juicy_bank_tilde *x, t_floatarg f){
 static void juicy_bank_tilde_odd_even(t_juicy_bank_tilde *x, t_floatarg f){
     // Odd vs Even emphasis bias: -1..+1
     // -1 => silence even modes, 0 => neutral, +1 => silence odd modes
-    float v = jb_clamp(f, -1.f, 1.f);
+    float v = jb_ctrl_bipolar_from_knob_or_direct((float)f);
     if (x->edit_bank) x->odd_even_bias2 = v;
     else              x->odd_even_bias  = v;
     jb_mark_all_voices_bank_gain_dirty(x, x->edit_bank ? 1 : 0);
@@ -5111,6 +5123,7 @@ static const char *jb_screen_page_name(jb_page_t page){
         case JB_PAGE_PLAY_ALT: return "PLAY";
         case JB_PAGE_BODY_A: return "BODY";
         case JB_PAGE_BODY_B: return "BODY";
+        case JB_PAGE_BODY_C: return "BODY";
         case JB_PAGE_DAMPERS: return "BODY";
         case JB_PAGE_EXCITER_A: return "EXC";
         case JB_PAGE_EXCITER_B: return "EXC";
@@ -5129,8 +5142,9 @@ static const char *jb_screen_subpage_name(const t_juicy_bank_tilde *x){
     switch(x->wf.current_page){
         case JB_PAGE_PLAY: return "MAIN";
         case JB_PAGE_PLAY_ALT: return "ALT";
-        case JB_PAGE_BODY_A: return x->edit_bank ? "B2" : "B1";
-        case JB_PAGE_BODY_B: return x->edit_bank ? "B2" : "B1";
+        case JB_PAGE_BODY_A: return "A";
+        case JB_PAGE_BODY_B: return "B";
+        case JB_PAGE_BODY_C: return x->edit_bank ? "B2C" : "B1C";
         case JB_PAGE_DAMPERS: return (x->wf.selected_bell == 0) ? "D1" : ((x->wf.selected_bell == 1) ? "D2" : "D3");
         case JB_PAGE_EXCITER_A: return "A";
         case JB_PAGE_EXCITER_B: return "B";
@@ -5320,6 +5334,11 @@ static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t 
         case JB_HW_PARAM_WARP: return b ? x->warp2 : x->warp;
         case JB_HW_PARAM_DISPERSION: return b ? x->dispersion2 : x->dispersion;
         case JB_HW_PARAM_DENSITY: return b ? x->density_amt2 : x->density_amt;
+        case JB_HW_PARAM_ODD_SKEW: return b ? x->odd_skew2 : x->odd_skew;
+        case JB_HW_PARAM_EVEN_SKEW: return b ? x->even_skew2 : x->even_skew;
+        case JB_HW_PARAM_COLLISION: return b ? x->collision_amt2 : x->collision_amt;
+        case JB_HW_PARAM_RELEASE_AMT: return b ? x->release_amt2 : x->release_amt;
+        case JB_HW_PARAM_ODD_EVEN_BIAS: return b ? x->odd_even_bias2 : x->odd_even_bias;
         case JB_HW_PARAM_PARTIALS: return (float)(b ? x->active_modes2 : x->active_modes);
         case JB_HW_PARAM_BELL_FREQ: return x->bell_peak_hz[b][x->wf.selected_bell];
         case JB_HW_PARAM_BELL_ZETA: return jb_clamp(x->bell_peak_zeta_param[b][x->wf.selected_bell] < 0.f ? 0.f : x->bell_peak_zeta_param[b][x->wf.selected_bell], 0.f, 1.f);
@@ -5373,6 +5392,11 @@ static void jb_hw_apply_param_value(t_juicy_bank_tilde *x, jb_hw_param_t pid, fl
         case JB_HW_PARAM_WARP: juicy_bank_tilde_warp(x, value); break;
         case JB_HW_PARAM_DISPERSION: juicy_bank_tilde_dispersion(x, value); break;
         case JB_HW_PARAM_DENSITY: juicy_bank_tilde_density(x, value); break;
+        case JB_HW_PARAM_ODD_SKEW: juicy_bank_tilde_odd_skew(x, value); break;
+        case JB_HW_PARAM_EVEN_SKEW: juicy_bank_tilde_even_skew(x, value); break;
+        case JB_HW_PARAM_COLLISION: juicy_bank_tilde_collision(x, value); break;
+        case JB_HW_PARAM_RELEASE_AMT: juicy_bank_tilde_release(x, value); break;
+        case JB_HW_PARAM_ODD_EVEN_BIAS: juicy_bank_tilde_odd_even(x, value); break;
         case JB_HW_PARAM_PARTIALS: juicy_bank_tilde_partials(x, value); break;
         case JB_HW_PARAM_BELL_FREQ: juicy_bank_tilde_bell_freq(x, value); break;
         case JB_HW_PARAM_BELL_ZETA: juicy_bank_tilde_bell_zeta(x, value); break;
@@ -5603,10 +5627,13 @@ static void juicy_bank_tilde_encoder(t_juicy_bank_tilde *x, t_floatarg f){
         case JB_PAGE_PLAY_ALT:
             jb_hw_set_page(x, x->wf.current_page == JB_PAGE_PLAY ? JB_PAGE_PLAY_ALT : JB_PAGE_PLAY);
             break;
-        case JB_PAGE_BODY_A: case JB_PAGE_BODY_B: {
-            jb_page_t seq[3] = { JB_PAGE_BODY_A, JB_PAGE_BODY_B, JB_PAGE_DAMPERS };
-            int idx = (x->wf.current_page == JB_PAGE_BODY_B) ? 1 : 0;
-            idx = (idx + delta + 3) % 3; jb_hw_set_page(x, seq[idx]);
+        case JB_PAGE_BODY_A: case JB_PAGE_BODY_B: case JB_PAGE_BODY_C: {
+            jb_page_t seq[4] = { JB_PAGE_BODY_A, JB_PAGE_BODY_B, JB_PAGE_BODY_C, JB_PAGE_DAMPERS };
+            int idx = (x->wf.current_page == JB_PAGE_BODY_A) ? 0 :
+                      (x->wf.current_page == JB_PAGE_BODY_B) ? 1 :
+                      (x->wf.current_page == JB_PAGE_BODY_C) ? 2 : 0;
+            idx = (idx + delta + 4) % 4;
+            jb_hw_set_page(x, seq[idx]);
         } break;
         case JB_PAGE_DAMPERS:
             x->wf.selected_bell += delta;
