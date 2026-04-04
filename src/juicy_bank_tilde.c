@@ -237,9 +237,10 @@ typedef enum {
 typedef enum {
     JB_PAGE_PLAY = 0,
     JB_PAGE_PLAY_ALT,
-    JB_PAGE_BODY_A,
-    JB_PAGE_BODY_B,
-    JB_PAGE_BODY_C,
+    JB_PAGE_BODY_A1,
+    JB_PAGE_BODY_A2,
+    JB_PAGE_BODY_B1,
+    JB_PAGE_BODY_B2,
     JB_PAGE_DAMPERS,
     JB_PAGE_EXCITER_A,
     JB_PAGE_EXCITER_B,
@@ -1032,7 +1033,7 @@ static t_symbol *jb_sym_none         = NULL;
 
 static const jb_page_family_t jb_page_family_map[JB_PAGE_COUNT] = {
     JB_FAMILY_PLAY, JB_FAMILY_PLAY,
-    JB_FAMILY_BODY, JB_FAMILY_BODY, JB_FAMILY_BODY, JB_FAMILY_BODY,
+    JB_FAMILY_BODY, JB_FAMILY_BODY, JB_FAMILY_BODY, JB_FAMILY_BODY, JB_FAMILY_BODY,
     JB_FAMILY_EXCITER, JB_FAMILY_EXCITER, JB_FAMILY_EXCITER,
     JB_FAMILY_MOD, JB_FAMILY_MOD, JB_FAMILY_MOD, JB_FAMILY_MOD,
     JB_FAMILY_EDIT,
@@ -1042,9 +1043,10 @@ static const jb_page_family_t jb_page_family_map[JB_PAGE_COUNT] = {
 static const jb_hw_param_t jb_page_param_map[JB_PAGE_COUNT][6] = {
     [JB_PAGE_PLAY] =        { JB_HW_PARAM_MASTER, JB_HW_PARAM_EXC_FADER, JB_HW_PARAM_BRIGHTNESS, JB_HW_PARAM_POSITION, JB_HW_PARAM_PICKUP, JB_HW_PARAM_SPACE_WETDRY },
     [JB_PAGE_PLAY_ALT] =    { JB_HW_PARAM_PARTIALS, JB_HW_PARAM_DENSITY, JB_HW_PARAM_STRETCH, JB_HW_PARAM_WARP, JB_HW_PARAM_DISPERSION, JB_HW_PARAM_NONE },
-    [JB_PAGE_BODY_A] =      { JB_HW_PARAM_DENSITY, JB_HW_PARAM_STRETCH, JB_HW_PARAM_WARP, JB_HW_PARAM_DISPERSION, JB_HW_PARAM_BRIGHTNESS, JB_HW_PARAM_PARTIALS },
-    [JB_PAGE_BODY_B] =      { JB_HW_PARAM_DENSITY, JB_HW_PARAM_STRETCH, JB_HW_PARAM_WARP, JB_HW_PARAM_DISPERSION, JB_HW_PARAM_BRIGHTNESS, JB_HW_PARAM_PARTIALS },
-    [JB_PAGE_BODY_C] =      { JB_HW_PARAM_ODD_SKEW, JB_HW_PARAM_EVEN_SKEW, JB_HW_PARAM_COLLISION, JB_HW_PARAM_RELEASE_AMT, JB_HW_PARAM_ODD_EVEN_BIAS, JB_HW_PARAM_NONE },
+    [JB_PAGE_BODY_A1] =     { JB_HW_PARAM_DENSITY, JB_HW_PARAM_STRETCH, JB_HW_PARAM_WARP, JB_HW_PARAM_DISPERSION, JB_HW_PARAM_BRIGHTNESS, JB_HW_PARAM_PARTIALS },
+    [JB_PAGE_BODY_A2] =     { JB_HW_PARAM_ODD_SKEW, JB_HW_PARAM_EVEN_SKEW, JB_HW_PARAM_COLLISION, JB_HW_PARAM_RELEASE_AMT, JB_HW_PARAM_ODD_EVEN_BIAS, JB_HW_PARAM_NONE },
+    [JB_PAGE_BODY_B1] =     { JB_HW_PARAM_DENSITY, JB_HW_PARAM_STRETCH, JB_HW_PARAM_WARP, JB_HW_PARAM_DISPERSION, JB_HW_PARAM_BRIGHTNESS, JB_HW_PARAM_PARTIALS },
+    [JB_PAGE_BODY_B2] =     { JB_HW_PARAM_ODD_SKEW, JB_HW_PARAM_EVEN_SKEW, JB_HW_PARAM_COLLISION, JB_HW_PARAM_RELEASE_AMT, JB_HW_PARAM_ODD_EVEN_BIAS, JB_HW_PARAM_NONE },
     [JB_PAGE_DAMPERS] =     { JB_HW_PARAM_BELL_FREQ, JB_HW_PARAM_BELL_ZETA, JB_HW_PARAM_BELL_NPL, JB_HW_PARAM_BELL_NPR, JB_HW_PARAM_BELL_NPM, JB_HW_PARAM_NONE },
     [JB_PAGE_EXCITER_A] =   { JB_HW_PARAM_EXC_FADER, JB_HW_PARAM_EXC_ATTACK, JB_HW_PARAM_EXC_DECAY, JB_HW_PARAM_EXC_SUSTAIN, JB_HW_PARAM_EXC_RELEASE, JB_HW_PARAM_NOISE_COLOR },
     [JB_PAGE_EXCITER_B] =   { JB_HW_PARAM_IMPULSE_SHAPE, JB_HW_PARAM_EXC_ATTACK_CURVE, JB_HW_PARAM_EXC_DECAY_CURVE, JB_HW_PARAM_EXC_RELEASE_CURVE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE },
@@ -5103,7 +5105,7 @@ static void jb_apply_default_saw(t_juicy_bank_tilde *x){
 static jb_page_t jb_family_default_page(jb_page_family_t fam){
     switch(fam){
         case JB_FAMILY_PLAY: return JB_PAGE_PLAY;
-        case JB_FAMILY_BODY: return JB_PAGE_BODY_A;
+        case JB_FAMILY_BODY: return JB_PAGE_BODY_A1;
         case JB_FAMILY_EXCITER: return JB_PAGE_EXCITER_A;
         case JB_FAMILY_MOD: return JB_PAGE_MOD_LFO1;
         case JB_FAMILY_EDIT: return JB_PAGE_RESONATOR_EDIT;
@@ -5121,9 +5123,10 @@ static const char *jb_screen_page_name(jb_page_t page){
     switch(page){
         case JB_PAGE_PLAY: return "PLAY";
         case JB_PAGE_PLAY_ALT: return "PLAY";
-        case JB_PAGE_BODY_A: return "BODY";
-        case JB_PAGE_BODY_B: return "BODY";
-        case JB_PAGE_BODY_C: return "BODY";
+        case JB_PAGE_BODY_A1: return "BODY A";
+        case JB_PAGE_BODY_A2: return "BODY A";
+        case JB_PAGE_BODY_B1: return "BODY B";
+        case JB_PAGE_BODY_B2: return "BODY B";
         case JB_PAGE_DAMPERS: return "BODY";
         case JB_PAGE_EXCITER_A: return "EXC";
         case JB_PAGE_EXCITER_B: return "EXC";
@@ -5142,9 +5145,10 @@ static const char *jb_screen_subpage_name(const t_juicy_bank_tilde *x){
     switch(x->wf.current_page){
         case JB_PAGE_PLAY: return "MAIN";
         case JB_PAGE_PLAY_ALT: return "ALT";
-        case JB_PAGE_BODY_A: return "A";
-        case JB_PAGE_BODY_B: return "B";
-        case JB_PAGE_BODY_C: return x->edit_bank ? "B2C" : "B1C";
+        case JB_PAGE_BODY_A1: return "A1";
+        case JB_PAGE_BODY_B1: return "B1";
+        case JB_PAGE_BODY_A2: return "A2";
+        case JB_PAGE_BODY_B2: return "B2";
         case JB_PAGE_DAMPERS: return (x->wf.selected_bell == 0) ? "D1" : ((x->wf.selected_bell == 1) ? "D2" : "D3");
         case JB_PAGE_EXCITER_A: return "A";
         case JB_PAGE_EXCITER_B: return "B";
@@ -5225,8 +5229,8 @@ static void jb_hw_set_page(t_juicy_bank_tilde *x, jb_page_t page){
     if(fam >= 0 && fam < JB_FAMILY_COUNT) x->wf.last_page_in_family[fam] = page;
 
     /* page-driven context defaults */
-    if(page == JB_PAGE_BODY_A) x->edit_bank = 0;
-    else if(page == JB_PAGE_BODY_B) x->edit_bank = 1;
+    if(page == JB_PAGE_BODY_A1 || page == JB_PAGE_BODY_A2) x->edit_bank = 0;
+    else if(page == JB_PAGE_BODY_B1 || page == JB_PAGE_BODY_B2) x->edit_bank = 1;
     else if(page == JB_PAGE_MOD_LFO1) x->lfo_index = 1.f;
     else if(page == JB_PAGE_MOD_LFO2) x->lfo_index = 2.f;
 
@@ -5627,12 +5631,13 @@ static void juicy_bank_tilde_encoder(t_juicy_bank_tilde *x, t_floatarg f){
         case JB_PAGE_PLAY_ALT:
             jb_hw_set_page(x, x->wf.current_page == JB_PAGE_PLAY ? JB_PAGE_PLAY_ALT : JB_PAGE_PLAY);
             break;
-        case JB_PAGE_BODY_A: case JB_PAGE_BODY_B: case JB_PAGE_BODY_C: {
-            jb_page_t seq[4] = { JB_PAGE_BODY_A, JB_PAGE_BODY_B, JB_PAGE_BODY_C, JB_PAGE_DAMPERS };
-            int idx = (x->wf.current_page == JB_PAGE_BODY_A) ? 0 :
-                      (x->wf.current_page == JB_PAGE_BODY_B) ? 1 :
-                      (x->wf.current_page == JB_PAGE_BODY_C) ? 2 : 0;
-            idx = (idx + delta + 4) % 4;
+        case JB_PAGE_BODY_A1: case JB_PAGE_BODY_A2: case JB_PAGE_BODY_B1: case JB_PAGE_BODY_B2: {
+            jb_page_t seq[5] = { JB_PAGE_BODY_A1, JB_PAGE_BODY_A2, JB_PAGE_BODY_B1, JB_PAGE_BODY_B2, JB_PAGE_DAMPERS };
+            int idx = (x->wf.current_page == JB_PAGE_BODY_A1) ? 0 :
+                      (x->wf.current_page == JB_PAGE_BODY_A2) ? 1 :
+                      (x->wf.current_page == JB_PAGE_BODY_B1) ? 2 :
+                      (x->wf.current_page == JB_PAGE_BODY_B2) ? 3 : 0;
+            idx = (idx + delta + 5) % 5;
             jb_hw_set_page(x, seq[idx]);
         } break;
         case JB_PAGE_DAMPERS:
@@ -5911,7 +5916,7 @@ x->excite_pos2    = x->excite_pos;
     x->wf.current_page = JB_PAGE_PLAY;
     for(int fi = 0; fi < JB_FAMILY_COUNT; ++fi) x->wf.last_page_in_family[fi] = jb_family_default_page((jb_page_family_t)fi);
     x->wf.last_page_in_family[JB_FAMILY_PLAY] = JB_PAGE_PLAY;
-    x->wf.last_page_in_family[JB_FAMILY_BODY] = JB_PAGE_BODY_A;
+    x->wf.last_page_in_family[JB_FAMILY_BODY] = JB_PAGE_BODY_A1;
     x->wf.last_page_in_family[JB_FAMILY_EXCITER] = JB_PAGE_EXCITER_A;
     x->wf.last_page_in_family[JB_FAMILY_MOD] = JB_PAGE_MOD_LFO1;
     x->wf.last_page_in_family[JB_FAMILY_EDIT] = JB_PAGE_RESONATOR_EDIT;
