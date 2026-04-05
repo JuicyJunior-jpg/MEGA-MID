@@ -1250,6 +1250,11 @@ static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t 
 static void jb_screen_emit_full(t_juicy_bank_tilde *x);
 static void jb_ui_clock_tick(t_juicy_bank_tilde *x);
 
+/* Dirty-flag helpers are defined later, but several setters call them earlier. */
+static inline void jb_mark_all_voices_dirty(t_juicy_bank_tilde *x);
+static inline void jb_mark_all_voices_bank_dirty(t_juicy_bank_tilde *x, int bank);
+static inline void jb_mark_all_voices_bank_gain_dirty(t_juicy_bank_tilde *x, int bank);
+
 
 // Proxy to accept ANY message on target-selection inlets (so message boxes like 'damper_1' work)
 typedef struct _jb_tgtproxy{
