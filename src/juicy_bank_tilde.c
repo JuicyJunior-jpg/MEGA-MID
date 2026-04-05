@@ -129,9 +129,10 @@ static void jb_screen_symbols_init(void){
 
 /* Hardware control conditioning.
    These values are tuned for noisy 0..1 analog controls on Bela/embedded ADCs. */
-#define JB_HW_POT_DEADBAND_NORM 0.0025f   /* ignore tiny idle ADC drift */
-#define JB_HW_POT_SMOOTH_ALPHA  0.22f     /* one-pole smoothing amount */
-#define JB_HW_POT_SEND_HYST     0.0012f   /* do not re-apply microscopic changes */
+#define JB_HW_POT_DEADBAND_NORM   0.0012f   /* ignore tiny idle ADC drift */
+#define JB_HW_POT_SMOOTH_ALPHA   0.30f     /* base one-pole smoothing amount */
+#define JB_HW_POT_SMOOTH_FAST    0.85f     /* faster tracking for larger knob moves */
+#define JB_HW_POT_SEND_HYST      0.00045f  /* do not re-apply microscopic changes */
 
 // ---------- utils ----------
 static inline float jb_clamp(float x, float lo, float hi){ return (x<lo)?lo:((x>hi)?hi:x); }
@@ -1085,7 +1086,7 @@ static const jb_hw_param_spec_t jb_hw_param_specs[] = {
     [JB_HW_PARAM_STRETCH]         = { "STR",   -1.f,   1.f,   0 },
     [JB_HW_PARAM_WARP]            = { "WARP",  -1.f,   1.f,   0 },
     [JB_HW_PARAM_DISPERSION]      = { "DISP",   0.f,   1.f,   0 },
-    [JB_HW_PARAM_DENSITY]         = { "DENS",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_DENSITY]         = { "DENS",  -1.f,   1.f,   0 },
     [JB_HW_PARAM_ODD_SKEW]        = { "ODDSK", -1.f,   1.f,   0 },
     [JB_HW_PARAM_EVEN_SKEW]       = { "EVNSK", -1.f,   1.f,   0 },
     [JB_HW_PARAM_COLLISION]       = { "COLL",   0.f,   1.f,   0 },
@@ -2490,15 +2491,17 @@ static void jb_project_behavior_into_voice2(t_juicy_bank_tilde *x, jb_voice_t *v
 
 // ---------- stretch (message only) + apply ----------
 static void juicy_bank_tilde_stretch(t_juicy_bank_tilde *x, t_floatarg f){
-    float v = jb_clamp(f, -1.f, 1.f);
+    float v = jb_clamp((float)f, -1.f, 1.f);
     if (x->edit_bank) x->stretch2 = v;
     else              x->stretch  = v;
+    jb_mark_all_voices_bank_dirty(x, x->edit_bank ? 1 : 0);
 }
 
 static void juicy_bank_tilde_warp(t_juicy_bank_tilde *x, t_floatarg f){
-    float v = jb_clamp(f, -1.f, 1.f);
+    float v = jb_clamp((float)f, -1.f, 1.f);
     if (x->edit_bank) x->warp2 = v;
     else              x->warp  = v;
+    jb_mark_all_voices_bank_dirty(x, x->edit_bank ? 1 : 0);
 }
 static void jb_apply_stretch(const t_juicy_bank_tilde *x, jb_voice_t *v){
     // Legacy wrapper (bank1 only). The actual synthesis path uses jb_apply_stretch_generic()
@@ -4367,14 +4370,13 @@ static void juicy_bank_tilde_damper_sel(t_juicy_bank_tilde *x, t_floatarg f){
 
 
 static void juicy_bank_tilde_brightness(t_juicy_bank_tilde *x, t_floatarg f){
-    float v = jb_ctrl_bipolar_from_knob_or_direct((float)f);
+    float v = jb_clamp((float)f, -1.f, 1.f);
     if (x->edit_bank) x->brightness2 = v;
     else              x->brightness  = v;
     jb_mark_all_voices_bank_gain_dirty(x, x->edit_bank ? 1 : 0);
 }
 static void juicy_bank_tilde_density(t_juicy_bank_tilde *x, t_floatarg f){
-    float v = (float)f;
-    if (v < -1.f) v = -1.f;
+    float v = jb_clamp((float)f, -1.f, 1.f);
     if (x->edit_bank) x->density_amt2 = v;
     else              x->density_amt  = v;
     jb_mark_all_voices_bank_dirty(x, x->edit_bank ? 1 : 0);
@@ -4420,7 +4422,7 @@ static void juicy_bank_tilde_pickup(t_juicy_bank_tilde *x, t_floatarg f){
 static void juicy_bank_tilde_odd_even(t_juicy_bank_tilde *x, t_floatarg f){
     // Odd vs Even emphasis bias: -1..+1
     // -1 => silence even modes, 0 => neutral, +1 => silence odd modes
-    float v = jb_ctrl_bipolar_from_knob_or_direct((float)f);
+    float v = jb_clamp((float)f, -1.f, 1.f);
     if (x->edit_bank) x->odd_even_bias2 = v;
     else              x->odd_even_bias  = v;
     jb_mark_all_voices_bank_gain_dirty(x, x->edit_bank ? 1 : 0);
@@ -4717,14 +4719,14 @@ static void jb_presetproxy_anything(jb_presetproxy *p, t_symbol *s, int argc, t_
 
 
 static void juicy_bank_tilde_odd_skew(t_juicy_bank_tilde *x, t_floatarg f){
-    float v = jb_ctrl_bipolar_from_knob_or_direct((float)f);
+    float v = jb_clamp((float)f, -1.f, 1.f);
     if (x->edit_bank) x->odd_skew2 = v;
     else              x->odd_skew  = v;
     jb_mark_all_voices_bank_dirty(x, x->edit_bank ? 1 : 0);
 }
 
 static void juicy_bank_tilde_even_skew(t_juicy_bank_tilde *x, t_floatarg f){
-    float v = jb_ctrl_bipolar_from_knob_or_direct((float)f);
+    float v = jb_clamp((float)f, -1.f, 1.f);
     if (x->edit_bank) x->even_skew2 = v;
     else              x->even_skew  = v;
     jb_mark_all_voices_bank_dirty(x, x->edit_bank ? 1 : 0);
@@ -5271,7 +5273,6 @@ static float jb_hw_param_to_norm(float v, jb_hw_param_t pid){
         case JB_HW_PARAM_LFO_RATE:
             if(v <= 0.f) return 0.f;
             return jb_norm_from_exp(v, 0.05f, 20.f);
-        case JB_HW_PARAM_DENSITY:
         case JB_HW_PARAM_DISPERSION:
         case JB_HW_PARAM_SPACE_SIZE:
         case JB_HW_PARAM_SPACE_DECAY:
@@ -5313,7 +5314,6 @@ static float jb_hw_norm_to_param(float n, jb_hw_param_t pid){
         case JB_HW_PARAM_LFO_RATE:
             v = (n <= 0.f) ? 0.f : jb_expmap01(n, 0.05f, 20.f);
             break;
-        case JB_HW_PARAM_DENSITY:
         case JB_HW_PARAM_DISPERSION:
         case JB_HW_PARAM_SPACE_SIZE:
         case JB_HW_PARAM_SPACE_DECAY:
@@ -5484,13 +5484,18 @@ static void juicy_bank_tilde_pot(t_juicy_bank_tilde *x, t_floatarg pf, t_floatar
     else
         ps->normalized = raw;
 
-    /* one-pole smoothing */
+    /* adaptive one-pole smoothing:
+       tiny movements stay filtered enough to kill ADC jitter,
+       but larger hand moves track much faster so controls do not feel laggy. */
     if(!ps->caught){
         ps->filtered = raw;
         ps->last_sent = raw;
         ps->caught = 1;
     }else{
-        ps->filtered += JB_HW_POT_SMOOTH_ALPHA * (raw - ps->filtered);
+        float delta = fabsf(raw - ps->filtered);
+        float alpha = JB_HW_POT_SMOOTH_ALPHA +
+                      (JB_HW_POT_SMOOTH_FAST - JB_HW_POT_SMOOTH_ALPHA) * jb_clamp(delta * 6.f, 0.f, 1.f);
+        ps->filtered += alpha * (raw - ps->filtered);
     }
 
     x->wf.highlighted_pot = pot;
