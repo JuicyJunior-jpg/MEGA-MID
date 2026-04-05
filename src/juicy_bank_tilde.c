@@ -3441,7 +3441,10 @@ static void jb_note_off_voice(t_juicy_bank_tilde *x, int vix1){
     if (x->v[idx].state != V_IDLE){
         jb_exc_note_off(&x->v[idx]);
         x->v[idx].state = V_RELEASE;
-        jb_mark_voice_dirty(&x->v[idx]);
+        /* Do not force a coefficient refresh on note-off.
+           The runtime ratio-slew path advances during coeff updates, so
+           re-dirtying the voice here causes an audible post-release pitch
+           step/glide even when the played note itself did not change. */
     }
 }
 
@@ -3469,7 +3472,9 @@ static void jb_note_off_voice_pitch(t_juicy_bank_tilde *x, int vix1, float f0){
 
     jb_exc_note_off(v);
     v->state = V_RELEASE;
-    jb_mark_voice_dirty(v);
+    /* Same reason as jb_note_off_voice(): release should only start the
+       amplitude/exciter release, not push the modal coefficients through
+       another ratio-slew update. */
 }
 
 // Message handlers (voice-addressed)
