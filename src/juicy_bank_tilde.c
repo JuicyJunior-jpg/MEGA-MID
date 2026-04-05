@@ -130,9 +130,12 @@ static void jb_screen_symbols_init(void){
 /* Hardware control conditioning.
    These values are tuned for noisy 0..1 analog controls on Bela/embedded ADCs. */
 #define JB_HW_POT_DEADBAND_NORM   0.0012f   /* ignore tiny idle ADC drift */
-#define JB_HW_POT_SMOOTH_ALPHA   0.30f     /* base one-pole smoothing amount */
-#define JB_HW_POT_SMOOTH_FAST    0.85f     /* faster tracking for larger knob moves */
-#define JB_HW_POT_SEND_HYST      0.00045f  /* do not re-apply microscopic changes */
+#define JB_HW_POT_SMOOTH_ALPHA    0.30f     /* base one-pole smoothing amount */
+#define JB_HW_POT_SMOOTH_FAST     0.85f     /* faster tracking for larger knob moves */
+#define JB_HW_POT_SEND_HYST       0.00045f  /* do not re-apply microscopic changes */
+#define JB_HW_POT_PAGE_REARM      0.0100f   /* after a page change, require real knob motion before takeover */
+#define JB_RATIO_SLEW_BASE        0.18f     /* block-rate smoothing for ratio-changing parameters */
+#define JB_RATIO_SLEW_FAST        0.65f     /* faster chase when the ratio target moves a lot */
 
 // ---------- utils ----------
 static inline float jb_clamp(float x, float lo, float hi){ return (x<lo)?lo:((x>hi)?hi:x); }
@@ -2695,13 +2698,34 @@ static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, in
 
     // ratio transforms
     {
-        float density_amt_eff = jb_bank_density_amt(x, bank);
-        jb_apply_density_generic(n_modes, base, density_amt_eff, m);
+        float ratio_prev[JB_MAX_MODES];
+        for(int i = 0; i < n_modes; ++i)
+            ratio_prev[i] = m[i].ratio_now;
+
+        {
+            float density_amt_eff = jb_bank_density_amt(x, bank);
+            jb_apply_density_generic(n_modes, base, density_amt_eff, m);
+        }
+        jb_lock_fundamental_generic(n_modes, base, m);
+        jb_apply_odd_even_skew_generic(n_modes, base, jb_bank_odd_skew(x, bank), jb_bank_even_skew(x, bank), m);
+        jb_apply_stretch_generic(n_modes, base, jb_bank_stretch_amt(x, bank), jb_bank_warp_amt(x, bank), m);
+        jb_apply_collision_generic(n_modes, base, jb_bank_collision_amt(x, bank), m);
+
+        /* Smooth the transformed modal ratios at block rate so coefficient
+           updates do not step audibly when body parameters move in real time.
+           This keeps the synth responsive, but avoids zipper/block edges. */
+        for(int i = 0; i < n_modes; ++i){
+            float target = m[i].ratio_now;
+            float prev = ratio_prev[i];
+            if(prev <= 0.0001f || !isfinite(prev))
+                prev = target;
+            float delta = fabsf(target - prev);
+            float slew = JB_RATIO_SLEW_BASE +
+                         (JB_RATIO_SLEW_FAST - JB_RATIO_SLEW_BASE) * jb_clamp(delta * 0.6f, 0.f, 1.f);
+            m[i].ratio_now = prev + slew * (target - prev);
+            if(m[i].ratio_now < 0.01f) m[i].ratio_now = 0.01f;
+        }
     }
-jb_lock_fundamental_generic(n_modes, base, m);
-    jb_apply_odd_even_skew_generic(n_modes, base, jb_bank_odd_skew(x, bank), jb_bank_even_skew(x, bank), m);
-    jb_apply_stretch_generic(n_modes, base, jb_bank_stretch_amt(x, bank), jb_bank_warp_amt(x, bank), m);
-    jb_apply_collision_generic(n_modes, base, jb_bank_collision_amt(x, bank), m);
 
     // --- pitch base (bank semitone + pitch-mod from matrix) ---
     float f0_eff = v->f0;
@@ -5135,7 +5159,11 @@ static jb_page_t jb_family_default_page(jb_page_family_t fam){
 }
 
 static void jb_hw_reset_soft_takeover(t_juicy_bank_tilde *x){
-    for(int i=0;i<6;++i) x->hw_pots[i].caught = 0;
+    for(int i = 0; i < 6; ++i){
+        /* After a page change, keep the physical pot state remembered and
+           wait for actual movement before the new page can take over. */
+        x->hw_pots[i].caught = x->hw_pots[i].caught ? 2 : 0;
+    }
 }
 
 
@@ -5209,7 +5237,7 @@ static void jb_screen_emit_full(t_juicy_bank_tilde *x){
     }
 
     jb_screen_send_float(jb_sym_screen_page, (t_float)x->wf.current_page);
-    jb_screen_send_float(jb_sym_screen_selected, (t_float)jb_clamp((float)x->wf.highlighted_pot, 0.f, 5.f));
+    jb_screen_send_float(jb_sym_screen_selected, (t_float)x->wf.highlighted_pot);
     jb_screen_send_float(jb_sym_screen_preset_slot, (t_float)x->preset_slot_sel);
 
     for(int i = 0; i < 6; ++i){
@@ -5254,6 +5282,7 @@ static void jb_hw_set_page(t_juicy_bank_tilde *x, jb_page_t page){
     else if(page == JB_PAGE_MOD_LFO1) x->lfo_index = 1.f;
     else if(page == JB_PAGE_MOD_LFO2) x->lfo_index = 2.f;
 
+    x->wf.highlighted_pot = -1;
     jb_hw_reset_soft_takeover(x);
     jb_screen_emit_full(x);
 }
@@ -5482,6 +5511,7 @@ static void juicy_bank_tilde_pot(t_juicy_bank_tilde *x, t_floatarg pf, t_floatar
     if(pot < 0 || pot >= 6) return;
 
     jb_hw_pot_state_t *ps = &x->hw_pots[pot];
+    float prev_norm = ps->normalized;
 
     /* tiny idle jitter guard */
     if(fabsf(raw - ps->normalized) < JB_HW_POT_DEADBAND_NORM)
@@ -5489,10 +5519,21 @@ static void juicy_bank_tilde_pot(t_juicy_bank_tilde *x, t_floatarg pf, t_floatar
     else
         ps->normalized = raw;
 
+    /* After a page change, do not let the newly visible parameters jump to the
+       stored physical pot positions. Wait until this pot actually moves. */
+    if(ps->caught == 2){
+        if(fabsf(raw - prev_norm) < JB_HW_POT_PAGE_REARM){
+            jb_screen_emit_full(x);
+            return;
+        }
+        ps->filtered = raw;
+        ps->last_sent = raw;
+        ps->caught = 1;
+    }
     /* adaptive one-pole smoothing:
        tiny movements stay filtered enough to kill ADC jitter,
        but larger hand moves track much faster so controls do not feel laggy. */
-    if(!ps->caught){
+    else if(!ps->caught){
         ps->filtered = raw;
         ps->last_sent = raw;
         ps->caught = 1;
@@ -5952,7 +5993,7 @@ x->excite_pos2    = x->excite_pos;
     x->wf.global_edit_cursor = 0;
     x->wf.highlighted_pot = -1;
     x->hw_pressure = 0.f;
-    for(int pi = 0; pi < 6; ++pi){ x->hw_pots[pi].normalized = 0.f; x->hw_pots[pi].caught = 0; }
+    for(int pi = 0; pi < 6; ++pi){ x->hw_pots[pi].normalized = 0.f; x->hw_pots[pi].filtered = 0.f; x->hw_pots[pi].last_sent = 0.f; x->hw_pots[pi].caught = 0; }
 
     x->edit_bank = 0;
     x->edit_damper = 0;
