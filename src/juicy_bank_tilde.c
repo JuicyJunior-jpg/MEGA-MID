@@ -50,6 +50,10 @@
 static t_symbol *jb_sym_screen_page = NULL;
 static t_symbol *jb_sym_screen_selected = NULL;
 static t_symbol *jb_sym_screen_preset_slot = NULL;
+static t_symbol *jb_sym_screen_preset_mode = NULL;
+static t_symbol *jb_sym_screen_preset_cursor = NULL;
+static t_symbol *jb_sym_screen_preset_used = NULL;
+static t_symbol *jb_sym_screen_preset_name[8] = {NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL};
 static t_symbol *jb_sym_screen_param[6] = {NULL, NULL, NULL, NULL, NULL, NULL};
 
 static inline void jb_screen_send_float(t_symbol *sym, t_float f){
@@ -63,6 +67,17 @@ static void jb_screen_symbols_init(void){
         jb_sym_screen_page = gensym("bela_screen_page");
         jb_sym_screen_selected = gensym("bela_screen_selected");
         jb_sym_screen_preset_slot = gensym("bela_screen_preset_slot");
+        jb_sym_screen_preset_mode = gensym("bela_screen_preset_mode");
+        jb_sym_screen_preset_cursor = gensym("bela_screen_preset_cursor");
+        jb_sym_screen_preset_used = gensym("bela_screen_preset_used");
+        jb_sym_screen_preset_name[0] = gensym("bela_screen_preset_name0");
+        jb_sym_screen_preset_name[1] = gensym("bela_screen_preset_name1");
+        jb_sym_screen_preset_name[2] = gensym("bela_screen_preset_name2");
+        jb_sym_screen_preset_name[3] = gensym("bela_screen_preset_name3");
+        jb_sym_screen_preset_name[4] = gensym("bela_screen_preset_name4");
+        jb_sym_screen_preset_name[5] = gensym("bela_screen_preset_name5");
+        jb_sym_screen_preset_name[6] = gensym("bela_screen_preset_name6");
+        jb_sym_screen_preset_name[7] = gensym("bela_screen_preset_name7");
         jb_sym_screen_param[0] = gensym("bela_screen_param0");
         jb_sym_screen_param[1] = gensym("bela_screen_param1");
         jb_sym_screen_param[2] = gensym("bela_screen_param2");
@@ -118,6 +133,7 @@ static void jb_screen_symbols_init(void){
 #define JB_SPACE_MAX_DELAY 1700
 #define JB_SPACE_NAP       4
 #define JB_SPACE_AP_MAX    700
+#define JB_SPACE_PREDELAY_MAX 24000
 
 // ---------- lookup-table tuning ----------
 #define JB_SINPI_LUT_SIZE      4096
@@ -335,6 +351,7 @@ typedef enum {
     JB_HW_PARAM_SPACE_DECAY,
     JB_HW_PARAM_SPACE_DIFFUSION,
     JB_HW_PARAM_SPACE_DAMPING,
+    JB_HW_PARAM_SPACE_ONSET,
     JB_HW_PARAM_LFO_BANK,
     JB_HW_PARAM_LFO_TARGET,
     JB_HW_PARAM_LFO_SHAPE,
@@ -416,7 +433,7 @@ typedef struct _jb_preset {
     float bell_npm[2][JB_N_DAMPERS];
 
     // SPACE
-    float space_size, space_decay, space_diffusion, space_damping, space_wetdry;
+    float space_size, space_decay, space_diffusion, space_damping, space_onset, space_wetdry;
 
     // exciter
     float exc_fader;
@@ -1077,7 +1094,7 @@ static const jb_hw_param_t jb_page_param_map[JB_PAGE_COUNT][6] = {
     [JB_PAGE_DAMPERS] =     { JB_HW_PARAM_BELL_FREQ, JB_HW_PARAM_BELL_ZETA, JB_HW_PARAM_BELL_NPL, JB_HW_PARAM_BELL_NPR, JB_HW_PARAM_BELL_NPM, JB_HW_PARAM_NONE },
     [JB_PAGE_EXCITER_A] =   { JB_HW_PARAM_EXC_FADER, JB_HW_PARAM_EXC_ATTACK, JB_HW_PARAM_EXC_DECAY, JB_HW_PARAM_EXC_SUSTAIN, JB_HW_PARAM_EXC_RELEASE, JB_HW_PARAM_NOISE_COLOR },
     [JB_PAGE_EXCITER_B] =   { JB_HW_PARAM_IMPULSE_SHAPE, JB_HW_PARAM_EXC_ATTACK_CURVE, JB_HW_PARAM_EXC_DECAY_CURVE, JB_HW_PARAM_EXC_RELEASE_CURVE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE },
-    [JB_PAGE_SPACE] =       { JB_HW_PARAM_SPACE_SIZE, JB_HW_PARAM_SPACE_DECAY, JB_HW_PARAM_SPACE_DIFFUSION, JB_HW_PARAM_SPACE_DAMPING, JB_HW_PARAM_SPACE_WETDRY, JB_HW_PARAM_NONE },
+    [JB_PAGE_SPACE] =       { JB_HW_PARAM_SPACE_SIZE, JB_HW_PARAM_SPACE_DECAY, JB_HW_PARAM_SPACE_DIFFUSION, JB_HW_PARAM_SPACE_DAMPING, JB_HW_PARAM_SPACE_ONSET, JB_HW_PARAM_SPACE_WETDRY },
     [JB_PAGE_MOD_LFO1] =    { JB_HW_PARAM_LFO_BANK, JB_HW_PARAM_LFO_TARGET, JB_HW_PARAM_LFO_SHAPE, JB_HW_PARAM_LFO_RATE, JB_HW_PARAM_LFO_MODE, JB_HW_PARAM_LFO_AMOUNT },
     [JB_PAGE_MOD_LFO2] =    { JB_HW_PARAM_LFO_BANK, JB_HW_PARAM_LFO_TARGET, JB_HW_PARAM_LFO_SHAPE, JB_HW_PARAM_LFO_RATE, JB_HW_PARAM_LFO_MODE, JB_HW_PARAM_LFO_AMOUNT },
     [JB_PAGE_VELOCITY] =    { JB_HW_PARAM_VEL_BANK, JB_HW_PARAM_VEL_TARGET, JB_HW_PARAM_VEL_AMOUNT, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE },
@@ -1122,6 +1139,7 @@ static const jb_hw_param_spec_t jb_hw_param_specs[] = {
     [JB_HW_PARAM_SPACE_DECAY]     = { "SDEC",   0.f,   1.f,   0 },
     [JB_HW_PARAM_SPACE_DIFFUSION] = { "DIFF",   0.f,   1.f,   0 },
     [JB_HW_PARAM_SPACE_DAMPING]   = { "DAMP",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_SPACE_ONSET]     = { "ONST",   0.f,   1.f,   0 },
     [JB_HW_PARAM_LFO_BANK]        = { "BANK",   1.f,   3.f,   1 },
     [JB_HW_PARAM_LFO_TARGET]      = { "TGT",    0.f,  10.f,   1 },
     [JB_HW_PARAM_LFO_SHAPE]       = { "SHAPE",  1.f,   5.f,   1 },
@@ -1329,6 +1347,7 @@ typedef struct _juicy_bank_tilde {
     t_inlet *in_space_decay;
     t_inlet *in_space_diffusion;
     t_inlet *in_space_damping;
+    t_inlet *in_space_onset;
     t_inlet *in_space_wetdry;
     t_outlet *out_index;           // float outlet reporting current selected partial (1-based)
     jb_mode_base_t base[JB_MAX_MODES];
@@ -1399,7 +1418,12 @@ float density_amt; jb_density_mode density_mode;
     float space_decay;
     float space_diffusion;
     float space_damping;
+    float space_onset;
     float space_wetdry;
+
+    float space_predelay_bufL[JB_SPACE_PREDELAY_MAX];
+    float space_predelay_bufR[JB_SPACE_PREDELAY_MAX];
+    int   space_predelay_w;
 
     // SPACE state (global)
     float space_comb_buf[JB_SPACE_NCOMB][JB_SPACE_MAX_DELAY];
@@ -4063,6 +4087,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         const float decay01 = jb_clamp(x->space_decay, 0.f, 1.f);
         const float diff01 = jb_clamp(x->space_diffusion, 0.f, 1.f);
         const float damp01 = jb_clamp(x->space_damping, 0.f, 1.f);
+        const float onset01 = jb_clamp(x->space_onset, 0.f, 1.f);
 
         const float size_scale = 0.05f + (size01 * 0.95f);
         float comb_g = powf(decay01, 1.5f) * 0.98f; // optional curve -> natural "long tails" at end
@@ -4086,10 +4111,24 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         // Wet/dry mapping: -1=dry, +1=wet
         const float mix = 0.5f * (wetdry + 1.f);
         const float dry_w = 1.f - mix;
+        const int predelay = (int)floorf(onset01 * 5760.f + 0.5f); /* 0..120 ms @48k-ish */
 
         for (int i = 0; i < n; ++i){
             const float dryL = outL[i];
             const float dryR = outR[i];
+            float revInL = dryL;
+            float revInR = dryR;
+            if(predelay > 0){
+                int wi = x->space_predelay_w;
+                int ri = wi - predelay;
+                while(ri < 0) ri += JB_SPACE_PREDELAY_MAX;
+                revInL = x->space_predelay_bufL[ri];
+                revInR = x->space_predelay_bufR[ri];
+                x->space_predelay_bufL[wi] = dryL;
+                x->space_predelay_bufR[wi] = dryR;
+                wi++; if(wi >= JB_SPACE_PREDELAY_MAX) wi = 0;
+                x->space_predelay_w = wi;
+            }
 
             // L combs: 0..3, R combs: 4..7
             float comb_sumL = 0.f;
@@ -4097,11 +4136,11 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             for (int k = 0; k < JB_SPACE_NCOMB_CH; ++k){
                 comb_sumL += jb_space_comb_tick(x->space_comb_buf[k], JB_SPACE_MAX_DELAY,
                                                &x->space_comb_w[k], comb_delay[k],
-                                               dryL, comb_g, damp, &x->space_comb_lp[k]);
+                                               revInL, comb_g, damp, &x->space_comb_lp[k]);
                 int rk = k + JB_SPACE_NCOMB_CH;
                 comb_sumR += jb_space_comb_tick(x->space_comb_buf[rk], JB_SPACE_MAX_DELAY,
                                                &x->space_comb_w[rk], comb_delay[rk],
-                                               dryR, comb_g, damp, &x->space_comb_lp[rk]);
+                                               revInR, comb_g, damp, &x->space_comb_lp[rk]);
             }
 
             // Normalize comb sum
@@ -4782,6 +4821,9 @@ static void juicy_bank_tilde_space_diffusion(t_juicy_bank_tilde *x, t_floatarg f
 static void juicy_bank_tilde_space_damping(t_juicy_bank_tilde *x, t_floatarg f){
     x->space_damping = jb_clamp(f, 0.f, 1.f);
 }
+static void juicy_bank_tilde_space_onset(t_juicy_bank_tilde *x, t_floatarg f){
+    x->space_onset = jb_clamp(f, 0.f, 1.f);
+}
 static void juicy_bank_tilde_space_wetdry(t_juicy_bank_tilde *x, t_floatarg f){
     x->space_wetdry = jb_clamp(f, -1.f, 1.f);
 }
@@ -5227,6 +5269,13 @@ static void jb_screen_get_preset_name(const t_juicy_bank_tilde *x, char *dst, si
 }
 
 
+
+static inline t_float jb_screen_pack_chars2(char a, char b){
+    unsigned int ua = ((unsigned char)a) & 0xFFu;
+    unsigned int ub = ((unsigned char)b) & 0xFFu;
+    return (t_float)(ua | (ub << 8));
+}
+
 static void jb_screen_emit_full(t_juicy_bank_tilde *x){
     if(!x) return;
     jb_screen_symbols_init();
@@ -5240,6 +5289,21 @@ static void jb_screen_emit_full(t_juicy_bank_tilde *x){
     jb_screen_send_float(jb_sym_screen_page, (t_float)x->wf.current_page);
     jb_screen_send_float(jb_sym_screen_selected, (t_float)x->wf.highlighted_pot);
     jb_screen_send_float(jb_sym_screen_preset_slot, (t_float)x->preset_slot_sel);
+    { int preset_screen_mode = x->preset_mode; if(x->wf.ui_mode == JB_UI_SAVE_MODE && preset_screen_mode == JB_PRESET_MODE_NORMAL) preset_screen_mode = JB_PRESET_MODE_SLOT; jb_screen_send_float(jb_sym_screen_preset_mode, (t_float)preset_screen_mode); }
+    jb_screen_send_float(jb_sym_screen_preset_cursor, (t_float)x->preset_cursor);
+    jb_screen_send_float(jb_sym_screen_preset_used, (t_float)((x->preset_slot_sel >= 0 && x->preset_slot_sel < JB_PRESET_SLOTS && x->presets[x->preset_slot_sel].used) ? 1.f : 0.f));
+
+    {
+        char pname[JB_PRESET_NAME_MAX + 1];
+        memset(pname, ' ', JB_PRESET_NAME_MAX);
+        pname[JB_PRESET_NAME_MAX] = '\0';
+        jb_screen_get_preset_name(x, pname, sizeof(pname));
+        size_t len = strlen(pname);
+        for(size_t i = len; i < JB_PRESET_NAME_MAX; ++i) pname[i] = ' ';
+        for(int i = 0; i < 8; ++i){
+            jb_screen_send_float(jb_sym_screen_preset_name[i], jb_screen_pack_chars2(pname[i*2], pname[i*2+1]));
+        }
+    }
 
     for(int i = 0; i < 6; ++i){
         jb_screen_send_float(jb_sym_screen_param[i], (t_float)vals[i]);
@@ -5410,6 +5474,7 @@ static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t 
         case JB_HW_PARAM_SPACE_DECAY: return x->space_decay;
         case JB_HW_PARAM_SPACE_DIFFUSION: return x->space_diffusion;
         case JB_HW_PARAM_SPACE_DAMPING: return x->space_damping;
+        case JB_HW_PARAM_SPACE_ONSET: return x->space_onset;
         case JB_HW_PARAM_LFO_BANK: return jb_target_bank_mode_to_param(x->lfo_target_bank[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0]);
         case JB_HW_PARAM_LFO_TARGET: return (float)jb_hw_lfo_target_to_index(x->lfo_target[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0]);
         case JB_HW_PARAM_LFO_SHAPE: return x->lfo_shape_v[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0];
@@ -5470,6 +5535,7 @@ static void jb_hw_apply_param_value(t_juicy_bank_tilde *x, jb_hw_param_t pid, fl
         case JB_HW_PARAM_SPACE_DECAY: juicy_bank_tilde_space_decay(x, value); break;
         case JB_HW_PARAM_SPACE_DIFFUSION: juicy_bank_tilde_space_diffusion(x, value); break;
         case JB_HW_PARAM_SPACE_DAMPING: juicy_bank_tilde_space_damping(x, value); break;
+        case JB_HW_PARAM_SPACE_ONSET: juicy_bank_tilde_space_onset(x, value); break;
         case JB_HW_PARAM_LFO_BANK: x->lfo_target_bank[lfoi] = jb_target_bank_mode_from_param(value); { t_symbol *eff = jb_hw_lfo_target_from_index(jb_hw_lfo_target_to_index(x->lfo_target[lfoi]), x->lfo_target_bank[lfoi]); if(lfoi==0) juicy_bank_tilde_lfo1_target(x, eff); else juicy_bank_tilde_lfo2_target(x, eff); } break;
         case JB_HW_PARAM_LFO_SHAPE: x->lfo_index = (float)(lfoi + 1); juicy_bank_tilde_lfo_shape(x, value); break;
         case JB_HW_PARAM_LFO_RATE: x->lfo_index = (float)(lfoi + 1); juicy_bank_tilde_lfo_rate(x, value); break;
@@ -5847,6 +5913,7 @@ static void juicy_bank_tilde_space_size(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_space_decay(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_space_diffusion(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_space_damping(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_space_onset(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_lfo_shape(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_lfo_rate(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_lfo_phase(t_juicy_bank_tilde *x, t_floatarg f);
@@ -6084,7 +6151,11 @@ x->excite_pos2    = x->excite_pos;
     x->space_decay = 0.35f;
     x->space_diffusion = 0.6f;
     x->space_damping = 0.25f;
+    x->space_onset = 0.f;
     x->space_wetdry = -0.3f; // -1..+1 : -1=dry, +1=wet (default matches old mix≈0.35)
+
+    x->space_predelay_w = 0;
+    for (int n = 0; n < JB_SPACE_PREDELAY_MAX; ++n){ x->space_predelay_bufL[n] = 0.f; x->space_predelay_bufR[n] = 0.f; }
 
     for (int k = 0; k < JB_SPACE_NCOMB; ++k){
         x->space_comb_w[k] = 0;
@@ -6110,6 +6181,7 @@ x->excite_pos2    = x->excite_pos;
     x->in_space_decay = NULL;
     x->in_space_diffusion = NULL;
     x->in_space_damping = NULL;
+    x->in_space_onset = NULL;
     x->in_space_wetdry = NULL;
     x->in_index = NULL;
     x->in_ratio = NULL;
@@ -6330,6 +6402,7 @@ static void jb_preset_snapshot(const t_juicy_bank_tilde *x, jb_preset_t *p){
     p->space_decay = x->space_decay;
     p->space_diffusion = x->space_diffusion;
     p->space_damping = x->space_damping;
+    p->space_onset = x->space_onset;
     p->space_wetdry = x->space_wetdry;
 
     p->exc_fader = x->exc_fader;
@@ -6436,6 +6509,7 @@ static void jb_preset_apply(t_juicy_bank_tilde *x, const jb_preset_t *p){
     x->space_decay = p->space_decay;
     x->space_diffusion = p->space_diffusion;
     x->space_damping = p->space_damping;
+    x->space_onset = p->space_onset;
     x->space_wetdry = p->space_wetdry;
 
     x->exc_fader = p->exc_fader;
@@ -6959,6 +7033,7 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_octave,   gen
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_space_decay,     gensym("space_decay"),     A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_space_diffusion, gensym("space_diffusion"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_space_damping,   gensym("space_damping"),   A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_space_onset,     gensym("space_onset"),     A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_space_wetdry,    gensym("space_wetdry"),    A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index_forward, gensym("forward"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_index_backward, gensym("backward"), 0);
