@@ -1306,6 +1306,8 @@ static void jb_ui_clock_tick(t_juicy_bank_tilde *x);
 static void jb_mark_patch_dirty(t_juicy_bank_tilde *x);
 static void jb_set_preset_feedback(t_juicy_bank_tilde *x, int code);
 static void jb_compare_capture_from_slot(t_juicy_bank_tilde *x, int slot);
+static int jb_preset_find_next_used(const t_juicy_bank_tilde *x, int start, int dir);
+static void jb_preset_apply(t_juicy_bank_tilde *x, const jb_preset_t *p);
 
 /* Dirty-flag helpers are defined later, but several setters call them earlier. */
 static inline void jb_mark_all_voices_dirty(t_juicy_bank_tilde *x);
@@ -1546,6 +1548,12 @@ char preset_edit_name[JB_PRESET_NAME_MAX + 1];
     jb_hw_pot_state_t hw_pots[6];
     float hw_pressure;
     t_clock *ui_clock;
+    int patch_dirty;
+    int preset_feedback;
+    int preset_feedback_ticks;
+    int compare_valid;
+    int compare_slot;
+    jb_preset_t compare_preset;
 
    // LFO1/LFO2 targets
     jb_tgtproxy *tgtproxy_lfo1;
