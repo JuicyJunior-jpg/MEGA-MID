@@ -5337,6 +5337,14 @@ static void juicy_bank_tilde_ui_test(t_juicy_bank_tilde *x){
 
 static void jb_hw_set_page(t_juicy_bank_tilde *x, jb_page_t page){
     if(page < 0 || page >= JB_PAGE_COUNT) return;
+
+    /* Leaving PRESET should always drop back to normal navigation so the encoder
+       does not stay trapped in slot/name editing on other pages. */
+    if(page != JB_PAGE_PRESET){
+        x->wf.ui_mode = JB_UI_NORMAL;
+        x->preset_mode = JB_PRESET_MODE_NORMAL;
+    }
+
     x->wf.current_page = page;
     jb_page_family_t fam = jb_page_family_map[page];
     if(fam >= 0 && fam < JB_FAMILY_COUNT) x->wf.last_page_in_family[fam] = page;
@@ -5687,7 +5695,7 @@ static void juicy_bank_tilde_button(t_juicy_bank_tilde *x, t_symbol *s, int argc
     if(!state) return;
 
     /* hardware-native preset naming / save interactions */
-    if(x->preset_mode == JB_PRESET_MODE_NAMING){
+    if(x->wf.current_page == JB_PAGE_PRESET && x->preset_mode == JB_PRESET_MODE_NAMING){
         switch((jb_button_t)button){
             case JB_BTN_PRESET:
                 if(x->preset_cursor < JB_PRESET_NAME_MAX - 1) x->preset_cursor++;
@@ -5795,7 +5803,7 @@ static void juicy_bank_tilde_encoder(t_juicy_bank_tilde *x, t_floatarg f){
         }
         return;
     }
-    if(x->wf.ui_mode == JB_UI_SAVE_MODE || x->wf.current_page == JB_PAGE_PRESET || x->preset_mode == JB_PRESET_MODE_SLOT){
+    if(x->wf.ui_mode == JB_UI_SAVE_MODE || x->wf.current_page == JB_PAGE_PRESET){
         x->preset_slot_sel += delta;
         if(x->preset_slot_sel < 0) x->preset_slot_sel = 0;
         if(x->preset_slot_sel >= JB_PRESET_SLOTS) x->preset_slot_sel = JB_PRESET_SLOTS - 1;
@@ -5877,12 +5885,12 @@ static void juicy_bank_tilde_encoder_press(t_juicy_bank_tilde *x, t_floatarg f){
         jb_preset_emit_ui(x);
         return;
     }
-    if(x->preset_mode == JB_PRESET_MODE_NAMING){
+    if(x->wf.current_page == JB_PAGE_PRESET && x->preset_mode == JB_PRESET_MODE_NAMING){
         x->preset_mode = JB_PRESET_MODE_SLOT;
         jb_preset_emit_ui(x);
         return;
     }
-    if(x->preset_mode == JB_PRESET_MODE_SLOT){
+    if(x->wf.current_page == JB_PAGE_PRESET && x->preset_mode == JB_PRESET_MODE_SLOT){
         juicy_bank_tilde_preset_cmd(x, gensym("SAVE"));
         jb_preset_emit_ui(x);
         return;
