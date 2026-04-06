@@ -574,7 +574,7 @@ static inline float jb_hadd_f32x4(float32x4_t v){
 // Noise diffusion (all-pass) + color slope constants
 #define JB_EXC_SLOPE_PIVOT_HZ  1000.f
 #define JB_EXC_COLOR_OCT_SPAN  3.f   // approx octaves from pivot to spectral edge
-#define JB_EXC_IMPULSE_GAIN   7.f   // fixed perceptual boost for one-shot impulse branch
+#define JB_EXC_IMPULSE_GAIN   8.f   // fixed perceptual boost for one-shot impulse branch
 
 // ---------- SPACE (Schroeder-style reverb) ----------
 static const int jb_space_base_delay[JB_SPACE_NCOMB] = { 1117, 1373, 1481, 1607, 1103, 1361, 1471, 1597 };
@@ -1306,8 +1306,6 @@ static void jb_ui_clock_tick(t_juicy_bank_tilde *x);
 static void jb_mark_patch_dirty(t_juicy_bank_tilde *x);
 static void jb_set_preset_feedback(t_juicy_bank_tilde *x, int code);
 static void jb_compare_capture_from_slot(t_juicy_bank_tilde *x, int slot);
-static int jb_preset_find_next_used(const t_juicy_bank_tilde *x, int start, int dir);
-static void jb_preset_apply(t_juicy_bank_tilde *x, const jb_preset_t *p);
 
 /* Dirty-flag helpers are defined later, but several setters call them earlier. */
 static inline void jb_mark_all_voices_dirty(t_juicy_bank_tilde *x);
@@ -1548,12 +1546,6 @@ char preset_edit_name[JB_PRESET_NAME_MAX + 1];
     jb_hw_pot_state_t hw_pots[6];
     float hw_pressure;
     t_clock *ui_clock;
-    int patch_dirty;
-    int preset_feedback;
-    int preset_feedback_ticks;
-    int compare_valid;
-    int compare_slot;
-    jb_preset_t compare_preset;
 
    // LFO1/LFO2 targets
     jb_tgtproxy *tgtproxy_lfo1;
