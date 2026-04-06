@@ -537,7 +537,7 @@ static inline float jb_hadd_f32x4(float32x4_t v){
 // Noise diffusion (all-pass) + color slope constants
 #define JB_EXC_SLOPE_PIVOT_HZ  1000.f
 #define JB_EXC_COLOR_OCT_SPAN  3.f   // approx octaves from pivot to spectral edge
-#define JB_EXC_IMPULSE_GAIN   5.f   // fixed perceptual boost for one-shot impulse branch
+#define JB_EXC_IMPULSE_GAIN   7.f   // fixed perceptual boost for one-shot impulse branch
 
 // ---------- SPACE (Schroeder-style reverb) ----------
 static const int jb_space_base_delay[JB_SPACE_NCOMB] = { 1117, 1373, 1481, 1607, 1103, 1361, 1471, 1597 };
