@@ -126,6 +126,7 @@ static void jb_screen_symbols_init(void){
 #define JB_BRIGHT_LUT_R_MAX    128.0f
 #define JB_TAN_LUT_SIZE        4096
 #define JB_PARAM_EPS           1.0e-5f
+#define JB_MOD_CHANGE_EPS      2.5e-3f
 
 /* Hardware control conditioning.
    These values are tuned for noisy 0..1 analog controls on Bela/embedded ADCs. */
@@ -334,6 +335,7 @@ typedef enum {
     JB_HW_PARAM_SPACE_DECAY,
     JB_HW_PARAM_SPACE_DIFFUSION,
     JB_HW_PARAM_SPACE_DAMPING,
+    JB_HW_PARAM_LFO_BANK,
     JB_HW_PARAM_LFO_TARGET,
     JB_HW_PARAM_LFO_SHAPE,
     JB_HW_PARAM_LFO_RATE,
@@ -341,6 +343,7 @@ typedef enum {
     JB_HW_PARAM_LFO_MODE,
     JB_HW_PARAM_LFO_AMOUNT,
     JB_HW_PARAM_VEL_AMOUNT,
+    JB_HW_PARAM_VEL_BANK,
     JB_HW_PARAM_VEL_TARGET,
     JB_HW_PARAM_BANK_SELECT,
     JB_HW_PARAM_OCTAVE,
@@ -429,9 +432,11 @@ typedef struct _jb_preset {
     float lfo_mode_v[JB_N_LFO];
     float lfo_amt_v[JB_N_LFO];
     t_symbol *lfo_target[JB_N_LFO];
+    int lfo_target_bank[JB_N_LFO];
 
     // velocity mapping
     float   velmap_amount;
+    int     velmap_target_bank;
     uint8_t velmap_on[JB_VELMAP_N_TARGETS];
 } jb_preset_t;
 
@@ -1028,16 +1033,20 @@ static void jb_init_luts_once(void);
    Cached Pd symbols (avoid gensym() in the audio thread)
    NOTE: gensym() touches Pd's symbol table; keep it out of perform().
    ------------------------------------------------------------------------- */
+static t_symbol *jb_sym_master       = NULL;
 static t_symbol *jb_sym_master_1     = NULL;
 static t_symbol *jb_sym_master_2     = NULL;
 static t_symbol *jb_sym_lfo2_amount  = NULL;
 static t_symbol *jb_sym_lfo2_rate    = NULL;
 static t_symbol *jb_sym_noise_timbre = NULL;
 static t_symbol *jb_sym_imp_shape    = NULL;
+static t_symbol *jb_sym_pitch        = NULL;
 static t_symbol *jb_sym_pitch_1      = NULL;
 static t_symbol *jb_sym_pitch_2      = NULL;
+static t_symbol *jb_sym_brightness   = NULL;
 static t_symbol *jb_sym_brightness_1 = NULL;
 static t_symbol *jb_sym_brightness_2 = NULL;
+static t_symbol *jb_sym_partials     = NULL;
 static t_symbol *jb_sym_partials_1   = NULL;
 static t_symbol *jb_sym_partials_2   = NULL;
 static t_symbol *jb_sym_position     = NULL;
@@ -1069,9 +1078,9 @@ static const jb_hw_param_t jb_page_param_map[JB_PAGE_COUNT][6] = {
     [JB_PAGE_EXCITER_A] =   { JB_HW_PARAM_EXC_FADER, JB_HW_PARAM_EXC_ATTACK, JB_HW_PARAM_EXC_DECAY, JB_HW_PARAM_EXC_SUSTAIN, JB_HW_PARAM_EXC_RELEASE, JB_HW_PARAM_NOISE_COLOR },
     [JB_PAGE_EXCITER_B] =   { JB_HW_PARAM_IMPULSE_SHAPE, JB_HW_PARAM_EXC_ATTACK_CURVE, JB_HW_PARAM_EXC_DECAY_CURVE, JB_HW_PARAM_EXC_RELEASE_CURVE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE },
     [JB_PAGE_SPACE] =       { JB_HW_PARAM_SPACE_SIZE, JB_HW_PARAM_SPACE_DECAY, JB_HW_PARAM_SPACE_DIFFUSION, JB_HW_PARAM_SPACE_DAMPING, JB_HW_PARAM_SPACE_WETDRY, JB_HW_PARAM_NONE },
-    [JB_PAGE_MOD_LFO1] =    { JB_HW_PARAM_LFO_TARGET, JB_HW_PARAM_LFO_SHAPE, JB_HW_PARAM_LFO_RATE, JB_HW_PARAM_LFO_PHASE, JB_HW_PARAM_LFO_MODE, JB_HW_PARAM_LFO_AMOUNT },
-    [JB_PAGE_MOD_LFO2] =    { JB_HW_PARAM_LFO_TARGET, JB_HW_PARAM_LFO_SHAPE, JB_HW_PARAM_LFO_RATE, JB_HW_PARAM_LFO_PHASE, JB_HW_PARAM_LFO_MODE, JB_HW_PARAM_LFO_AMOUNT },
-    [JB_PAGE_VELOCITY] =    { JB_HW_PARAM_VEL_AMOUNT, JB_HW_PARAM_VEL_TARGET, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE },
+    [JB_PAGE_MOD_LFO1] =    { JB_HW_PARAM_LFO_BANK, JB_HW_PARAM_LFO_TARGET, JB_HW_PARAM_LFO_SHAPE, JB_HW_PARAM_LFO_RATE, JB_HW_PARAM_LFO_MODE, JB_HW_PARAM_LFO_AMOUNT },
+    [JB_PAGE_MOD_LFO2] =    { JB_HW_PARAM_LFO_BANK, JB_HW_PARAM_LFO_TARGET, JB_HW_PARAM_LFO_SHAPE, JB_HW_PARAM_LFO_RATE, JB_HW_PARAM_LFO_MODE, JB_HW_PARAM_LFO_AMOUNT },
+    [JB_PAGE_VELOCITY] =    { JB_HW_PARAM_VEL_BANK, JB_HW_PARAM_VEL_TARGET, JB_HW_PARAM_VEL_AMOUNT, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE },
     [JB_PAGE_GLOBAL_EDIT] = { JB_HW_PARAM_BANK_SELECT, JB_HW_PARAM_OCTAVE, JB_HW_PARAM_SEMITONE, JB_HW_PARAM_TUNE, JB_HW_PARAM_PARTIALS, JB_HW_PARAM_NONE },
     [JB_PAGE_RESONATOR_EDIT]={ JB_HW_PARAM_RESONATOR_INDEX, JB_HW_PARAM_RATIO, JB_HW_PARAM_GAIN, JB_HW_PARAM_DECAY, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE },
     [JB_PAGE_PRESET] =      { JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE }
@@ -1113,14 +1122,16 @@ static const jb_hw_param_spec_t jb_hw_param_specs[] = {
     [JB_HW_PARAM_SPACE_DECAY]     = { "SDEC",   0.f,   1.f,   0 },
     [JB_HW_PARAM_SPACE_DIFFUSION] = { "DIFF",   0.f,   1.f,   0 },
     [JB_HW_PARAM_SPACE_DAMPING]   = { "DAMP",   0.f,   1.f,   0 },
-    [JB_HW_PARAM_LFO_TARGET]      = { "TGT",    0.f,   4.f,   1 },
+    [JB_HW_PARAM_LFO_BANK]        = { "BANK",   1.f,   3.f,   1 },
+    [JB_HW_PARAM_LFO_TARGET]      = { "TGT",    0.f,  10.f,   1 },
     [JB_HW_PARAM_LFO_SHAPE]       = { "SHAPE",  1.f,   5.f,   1 },
     [JB_HW_PARAM_LFO_RATE]        = { "RATE",   0.f,  20.f,   0 },
     [JB_HW_PARAM_LFO_PHASE]       = { "PHASE",  0.f,   1.f,   0 },
     [JB_HW_PARAM_LFO_MODE]        = { "MODE",   1.f,   2.f,   1 },
     [JB_HW_PARAM_LFO_AMOUNT]      = { "AMT",   -1.f,   1.f,   0 },
     [JB_HW_PARAM_VEL_AMOUNT]      = { "VELA",  -1.f,   1.f,   0 },
-    [JB_HW_PARAM_VEL_TARGET]      = { "VELT",   0.f,   4.f,   1 },
+    [JB_HW_PARAM_VEL_BANK]        = { "BANK",   1.f,   3.f,   1 },
+    [JB_HW_PARAM_VEL_TARGET]      = { "VELT",   0.f,  12.f,   1 },
     [JB_HW_PARAM_BANK_SELECT]     = { "BANK",   1.f,   2.f,   1 },
     [JB_HW_PARAM_OCTAVE]          = { "OCTV",  -2.f,   2.f,   1 },
     [JB_HW_PARAM_SEMITONE]        = { "SEMI", -12.f,  12.f,   1 },
@@ -1148,81 +1159,89 @@ static int jb_hw_button_from_atom(const t_atom *a){
     return -1;
 }
 
-static t_symbol *jb_hw_lfo_target_from_index(int lfoi, int idx){
-    idx = (int)jb_clamp((float)idx, 0.f, 4.f);
-    if(lfoi == 0){
-        switch(idx){
-            default:
-            case 0: return jb_sym_none;
-            case 1: return jb_sym_brightness_1;
-            case 2: return jb_sym_position_1;
-            case 3: return jb_sym_pickup_1;
-            case 4: return jb_sym_master_1;
-        }
-    } else {
-        switch(idx){
-            default:
-            case 0: return jb_sym_none;
-            case 1: return jb_sym_brightness_2;
-            case 2: return jb_sym_position_2;
-            case 3: return jb_sym_pickup_2;
-            case 4: return jb_sym_master_2;
-        }
+static inline int jb_target_bank_mode_clamp(int mode){
+    if(mode < 0) return 0;
+    if(mode > 2) return 2;
+    return mode;
+}
+
+static inline int jb_target_bank_mode_from_param(float v){
+    int m = (int)floorf(v + 0.5f) - 1;
+    return jb_target_bank_mode_clamp(m);
+}
+
+static inline float jb_target_bank_mode_to_param(int mode){
+    return (float)(jb_target_bank_mode_clamp(mode) + 1);
+}
+
+static t_symbol *jb_hw_lfo_target_from_index(int idx, int bank_mode){
+    bank_mode = jb_target_bank_mode_clamp(bank_mode);
+    idx = (int)jb_clamp((float)idx, 0.f, 10.f);
+    switch(idx){
+        default:
+        case 0: return jb_sym_none;
+        case 1: return (bank_mode == 2) ? jb_sym_master : (bank_mode == 0 ? jb_sym_master_1 : jb_sym_master_2);
+        case 2: return (bank_mode == 2) ? jb_sym_pitch : (bank_mode == 0 ? jb_sym_pitch_1 : jb_sym_pitch_2);
+        case 3: return (bank_mode == 2) ? jb_sym_brightness : (bank_mode == 0 ? jb_sym_brightness_1 : jb_sym_brightness_2);
+        case 4: return (bank_mode == 2) ? jb_sym_position : (bank_mode == 0 ? jb_sym_position_1 : jb_sym_position_2);
+        case 5: return (bank_mode == 2) ? jb_sym_pickup : (bank_mode == 0 ? jb_sym_pickup_1 : jb_sym_pickup_2);
+        case 6: return (bank_mode == 2) ? jb_sym_partials : (bank_mode == 0 ? jb_sym_partials_1 : jb_sym_partials_2);
+        case 7: return jb_sym_imp_shape;
+        case 8: return jb_sym_noise_timbre;
+        case 9: return jb_sym_lfo2_rate;
+        case 10: return jb_sym_lfo2_amount;
     }
 }
 
-static int jb_hw_lfo_target_to_index(const t_symbol *s, int lfoi){
-    if(!s || !strcmp(s->s_name, "none")) return 0;
-    if(lfoi == 0){
-        if(s == jb_sym_brightness_1) return 1;
-        if(s == jb_sym_position_1)   return 2;
-        if(s == jb_sym_pickup_1)     return 3;
-        if(s == jb_sym_master_1)     return 4;
-    } else {
-        if(s == jb_sym_brightness_2) return 1;
-        if(s == jb_sym_position_2)   return 2;
-        if(s == jb_sym_pickup_2)     return 3;
-        if(s == jb_sym_master_2)     return 4;
-    }
+static int jb_hw_lfo_target_to_index(const t_symbol *s){
+    if(!s || s == jb_sym_none || !strcmp(s->s_name, "none")) return 0;
+    if(s == jb_sym_master || s == jb_sym_master_1 || s == jb_sym_master_2) return 1;
+    if(s == jb_sym_pitch || s == jb_sym_pitch_1 || s == jb_sym_pitch_2) return 2;
+    if(s == jb_sym_brightness || s == jb_sym_brightness_1 || s == jb_sym_brightness_2) return 3;
+    if(s == jb_sym_position || s == jb_sym_position_1 || s == jb_sym_position_2) return 4;
+    if(s == jb_sym_pickup || s == jb_sym_pickup_1 || s == jb_sym_pickup_2) return 5;
+    if(s == jb_sym_partials || s == jb_sym_partials_1 || s == jb_sym_partials_2) return 6;
+    if(s == jb_sym_imp_shape) return 7;
+    if(s == jb_sym_noise_timbre) return 8;
+    if(s == jb_sym_lfo2_rate) return 9;
+    if(s == jb_sym_lfo2_amount) return 10;
     return 0;
 }
 
-static t_symbol *jb_hw_vel_target_from_index(int bank, int idx){
-    idx = (int)jb_clamp((float)idx, 0.f, 4.f);
-    if(bank == 0){
-        switch(idx){
-            default:
-            case 0: return jb_sym_none;
-            case 1: return gensym("brightness_1");
-            case 2: return gensym("position_1");
-            case 3: return gensym("pickup_1");
-            case 4: return gensym("master_1");
-        }
-    } else {
-        switch(idx){
-            default:
-            case 0: return jb_sym_none;
-            case 1: return gensym("brightness_2");
-            case 2: return gensym("position_2");
-            case 3: return gensym("pickup_2");
-            case 4: return gensym("master_2");
-        }
+static t_symbol *jb_hw_vel_target_symbol_from_index(int idx){
+    idx = (int)jb_clamp((float)idx, 0.f, 12.f);
+    switch(idx){
+        default:
+        case 0: return jb_sym_none;
+        case 1: return jb_sym_master;
+        case 2: return jb_sym_brightness;
+        case 3: return jb_sym_position;
+        case 4: return jb_sym_pickup;
+        case 5: return gensym("adsr_attack");
+        case 6: return gensym("adsr_decay");
+        case 7: return gensym("adsr_release");
+        case 8: return jb_sym_imp_shape;
+        case 9: return jb_sym_noise_timbre;
+        case 10: return gensym("bell_z_damper1");
+        case 11: return gensym("bell_z_damper2");
+        case 12: return gensym("bell_z_damper3");
     }
 }
 
-static int jb_hw_vel_target_to_index(const t_symbol *s, int bank){
-    if(!s || !strcmp(s->s_name, "none")) return 0;
-    if(bank == 0){
-        if(!strcmp(s->s_name, "brightness_1")) return 1;
-        if(!strcmp(s->s_name, "position_1"))   return 2;
-        if(!strcmp(s->s_name, "pickup_1"))     return 3;
-        if(!strcmp(s->s_name, "master_1"))     return 4;
-    } else {
-        if(!strcmp(s->s_name, "brightness_2")) return 1;
-        if(!strcmp(s->s_name, "position_2"))   return 2;
-        if(!strcmp(s->s_name, "pickup_2"))     return 3;
-        if(!strcmp(s->s_name, "master_2"))     return 4;
-    }
+static int jb_hw_vel_target_to_index(const t_symbol *s){
+    if(!s || s == jb_sym_none || !strcmp(s->s_name, "none")) return 0;
+    if(s == jb_sym_master || !strcmp(s->s_name, "master_1") || !strcmp(s->s_name, "master_2")) return 1;
+    if(s == jb_sym_brightness || !strcmp(s->s_name, "brightness_1") || !strcmp(s->s_name, "brightness_2")) return 2;
+    if(s == jb_sym_position || !strcmp(s->s_name, "position_1") || !strcmp(s->s_name, "position_2")) return 3;
+    if(s == jb_sym_pickup || !strcmp(s->s_name, "pickup_1") || !strcmp(s->s_name, "pickup_2")) return 4;
+    if(!strcmp(s->s_name, "adsr_attack")) return 5;
+    if(!strcmp(s->s_name, "adsr_decay")) return 6;
+    if(!strcmp(s->s_name, "adsr_release")) return 7;
+    if(s == jb_sym_imp_shape) return 8;
+    if(s == jb_sym_noise_timbre) return 9;
+    if(!strcmp(s->s_name, "bell_z_damper1") || !strcmp(s->s_name, "bell_z_damper1_1") || !strcmp(s->s_name, "bell_z_damper1_2")) return 10;
+    if(!strcmp(s->s_name, "bell_z_damper2") || !strcmp(s->s_name, "bell_z_damper2_1") || !strcmp(s->s_name, "bell_z_damper2_2")) return 11;
+    if(!strcmp(s->s_name, "bell_z_damper3") || !strcmp(s->s_name, "bell_z_damper3_1") || !strcmp(s->s_name, "bell_z_damper3_2")) return 12;
     return 0;
 }
 
@@ -1456,8 +1475,10 @@ float density_amt; jb_density_mode density_mode;
     // Targets are stored as symbols; the special symbol "none" disables that lane.
     // Uniqueness rule: if a target is already owned by another lane, new assignment is ignored.
     t_symbol *lfo_target[JB_N_LFO];
+    int       lfo_target_bank[JB_N_LFO]; // 0=A,1=B,2=BOTH
     // Velocity mapping lane (velocity -> selected target per note)
     float     velmap_amount;         // -1..+1
+    int       velmap_target_bank;    // 0=A,1=B,2=BOTH
     t_symbol *velmap_target;         // symbol selector
 
         uint8_t   velmap_on[JB_VELMAP_N_TARGETS];         // toggle map of enabled velocity-mapping targets (see enum jb_velmap_idx)
@@ -2462,12 +2483,12 @@ static void jb_project_behavior_into_voice_bank(t_juicy_bank_tilde *x, jb_voice_
 
         float add = 0.f;
         if (lfo1 != 0.f){
-            if ((bank == 0 && lfo1_tgt == jb_sym_brightness_1) || (bank != 0 && lfo1_tgt == jb_sym_brightness_2)){
+            if (lfo1_tgt == jb_sym_brightness || (bank == 0 && lfo1_tgt == jb_sym_brightness_1) || (bank != 0 && lfo1_tgt == jb_sym_brightness_2)){
                 add += lfo1;
             }
         }
         if (lfo2 != 0.f){
-            if ((bank == 0 && lfo2_tgt == jb_sym_brightness_1) || (bank != 0 && lfo2_tgt == jb_sym_brightness_2)){
+            if (lfo2_tgt == jb_sym_brightness || (bank == 0 && lfo2_tgt == jb_sym_brightness_1) || (bank != 0 && lfo2_tgt == jb_sym_brightness_2)){
                 add += lfo2;
             }
         }
@@ -2626,10 +2647,10 @@ static inline float jb_coeff_pitch_lfo_add(const t_juicy_bank_tilde *x, const jb
     const float lfo2 = jb_lfo_value_for_voice(x, v, 1) * jb_clamp(x->lfo_amt_eff[1], -1.f, 1.f);
     float add = 0.f;
     if (lfo1 != 0.f){
-        if ((bank == 0 && lfo1_tgt == jb_sym_pitch_1) || (bank != 0 && lfo1_tgt == jb_sym_pitch_2)) add += lfo1;
+        if (lfo1_tgt == jb_sym_pitch || (bank == 0 && lfo1_tgt == jb_sym_pitch_1) || (bank != 0 && lfo1_tgt == jb_sym_pitch_2)) add += lfo1;
     }
     if (lfo2 != 0.f){
-        if ((bank == 0 && lfo2_tgt == jb_sym_pitch_1) || (bank != 0 && lfo2_tgt == jb_sym_pitch_2)) add += lfo2;
+        if (lfo2_tgt == jb_sym_pitch || (bank == 0 && lfo2_tgt == jb_sym_pitch_1) || (bank != 0 && lfo2_tgt == jb_sym_pitch_2)) add += lfo2;
     }
     return jb_clamp(add, -1.f, 1.f);
 }
@@ -2657,7 +2678,7 @@ static inline void jb_voice_refresh_dirty_flags(const t_juicy_bank_tilde *x, jb_
         jb_changedf(v->cache_disp[bank], disp, JB_PARAM_EPS) ||
         jb_changedf(v->cache_decay_pitch_mul[bank], decay_pitch_mul, JB_PARAM_EPS) ||
         jb_changedf(v->cache_decay_vel_mul[bank], decay_vel_mul, JB_PARAM_EPS) ||
-        jb_changedf(v->cache_pitch_lfo[bank], pitch_lfo_add, JB_PARAM_EPS)){
+        jb_changedf(v->cache_pitch_lfo[bank], pitch_lfo_add, JB_MOD_CHANGE_EPS)){
         v->coeff_dirty[bank] = 1u;
         v->cache_f0_eff[bank] = f0_eff;
         v->cache_disp[bank] = disp;
@@ -2671,8 +2692,8 @@ static inline void jb_voice_refresh_dirty_flags(const t_juicy_bank_tilde *x, jb_
         jb_changedf(v->cache_pos[bank], pos_base, JB_PARAM_EPS) ||
         jb_changedf(v->cache_pickup[bank], pickup_base, JB_PARAM_EPS) ||
         jb_changedf(v->cache_brightness[bank], brightness_v, JB_PARAM_EPS) ||
-        jb_changedf(v->cache_gain_lfo1[bank], lfo1, JB_PARAM_EPS) ||
-        jb_changedf(v->cache_gain_lfo2[bank], lfo2, JB_PARAM_EPS) ||
+        jb_changedf(v->cache_gain_lfo1[bank], lfo1, JB_MOD_CHANGE_EPS) ||
+        jb_changedf(v->cache_gain_lfo2[bank], lfo2, JB_MOD_CHANGE_EPS) ||
         v->cache_active_modes[bank] != active_modes){
         v->gain_dirty[bank] = 1u;
         v->cache_pos[bank] = pos_base;
@@ -2728,12 +2749,12 @@ static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, in
     const float lfo2 = jb_lfo_value_for_voice(x, v, 1) * jb_clamp(x->lfo_amt_eff[1], -1.f, 1.f);
     float add = 0.f;
     if (lfo1 != 0.f){
-        if ((bank == 0 && lfo1_tgt == jb_sym_pitch_1) || (bank != 0 && lfo1_tgt == jb_sym_pitch_2)){
+        if (lfo1_tgt == jb_sym_pitch || (bank == 0 && lfo1_tgt == jb_sym_pitch_1) || (bank != 0 && lfo1_tgt == jb_sym_pitch_2)){
             add += lfo1;
         }
     }
     if (lfo2 != 0.f){
-        if ((bank == 0 && lfo2_tgt == jb_sym_pitch_1) || (bank != 0 && lfo2_tgt == jb_sym_pitch_2)){
+        if (lfo2_tgt == jb_sym_pitch || (bank == 0 && lfo2_tgt == jb_sym_pitch_1) || (bank != 0 && lfo2_tgt == jb_sym_pitch_2)){
             add += lfo2;
         }
     }
@@ -2942,12 +2963,12 @@ float brightness_v = bank ? v->brightness_v2 : v->brightness_v;
     {
         float mod = 0.f;
         if (lfo1 != 0.f){
-            if ((bank == 0 && lfo1_tgt == jb_sym_partials_1) || (bank != 0 && lfo1_tgt == jb_sym_partials_2)){
+            if (lfo1_tgt == jb_sym_partials || (bank == 0 && lfo1_tgt == jb_sym_partials_1) || (bank != 0 && lfo1_tgt == jb_sym_partials_2)){
                 mod += lfo1;
             }
         }
         if (lfo2 != 0.f){
-            if ((bank == 0 && lfo2_tgt == jb_sym_partials_1) || (bank != 0 && lfo2_tgt == jb_sym_partials_2)){
+            if (lfo2_tgt == jb_sym_partials || (bank == 0 && lfo2_tgt == jb_sym_partials_1) || (bank != 0 && lfo2_tgt == jb_sym_partials_2)){
                 mod += lfo2;
             }
         }
@@ -3509,6 +3530,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
 
     // update LFOs once per block (for modulation matrix sources)
     jb_update_lfos_block(x, n);    // Cached symbols (initialized in setup()); no gensym() in the audio thread.
+    const t_symbol *sym_master       = jb_sym_master;
     const t_symbol *sym_master_1     = jb_sym_master_1;
     const t_symbol *sym_master_2     = jb_sym_master_2;
     const t_symbol *sym_lfo2_amount  = jb_sym_lfo2_amount;
@@ -3640,12 +3662,12 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
             float add2 = 0.f;
 
             if (lfo1_out_v != 0.f){
-                if (lfo1_tgt == sym_master_1) add1 += lfo1_out_v;
-                else if (lfo1_tgt == sym_master_2) add2 += lfo1_out_v;
+                if (lfo1_tgt == sym_master || lfo1_tgt == sym_master_1) add1 += lfo1_out_v;
+                if (lfo1_tgt == sym_master || lfo1_tgt == sym_master_2) add2 += lfo1_out_v;
             }
             if (lfo2_out_local != 0.f){
-                if (lfo2_tgt_local == sym_master_1) add1 += lfo2_out_local;
-                else if (lfo2_tgt_local == sym_master_2) add2 += lfo2_out_local;
+                if (lfo2_tgt_local == sym_master || lfo2_tgt_local == sym_master_1) add1 += lfo2_out_local;
+                if (lfo2_tgt_local == sym_master || lfo2_tgt_local == sym_master_2) add2 += lfo2_out_local;
             }
 
             if (add1 != 0.f) bank_gain1 = jb_clamp(bank_gain1 + add1, 0.f, 1.f);
@@ -4448,54 +4470,70 @@ static void juicy_bank_tilde_odd_even(t_juicy_bank_tilde *x, t_floatarg f){
 }
 
 // --- LFO + ADSR param setters (for modulation matrix) ---
+static void jb_invalidate_lfo_lane(t_juicy_bank_tilde *x, int li){
+    if(!x) return;
+    if(li < 0 || li >= JB_N_LFO) return;
+    const t_symbol *tgt = x->lfo_target[li];
+    int bank_mode = jb_target_bank_mode_clamp(x->lfo_target_bank[li]);
+    int idx = jb_hw_lfo_target_to_index(tgt);
+    switch(idx){
+        case 1: /* master */
+        case 3: /* brightness */
+        case 4: /* position */
+        case 5: /* pickup */
+        case 6: /* partials */
+            if(bank_mode == 2){ jb_mark_all_voices_bank_gain_dirty(x, 0); jb_mark_all_voices_bank_gain_dirty(x, 1); }
+            else jb_mark_all_voices_bank_gain_dirty(x, bank_mode);
+            break;
+        case 2: /* pitch */
+            if(bank_mode == 2){ jb_mark_all_voices_bank_dirty(x, 0); jb_mark_all_voices_bank_dirty(x, 1); }
+            else jb_mark_all_voices_bank_dirty(x, bank_mode);
+            break;
+        default:
+            break;
+    }
+}
+
 static void juicy_bank_tilde_lfo_shape(t_juicy_bank_tilde *x, t_floatarg f){
     int s = (int)floorf(f + 0.5f);
     if (s < 1) s = 1;
     if (s > 5) s = 5;
     x->lfo_shape = (float)s;
-
-    // write into the currently selected LFO slot
     int idx = (int)floorf(x->lfo_index + 0.5f) - 1;
     if (idx < 0) idx = 0;
     if (idx >= JB_N_LFO) idx = JB_N_LFO - 1;
     x->lfo_shape_v[idx] = (float)s;
-    jb_mark_all_voices_dirty(x);
+    jb_invalidate_lfo_lane(x, idx);
 }
 static void juicy_bank_tilde_lfo_rate(t_juicy_bank_tilde *x, t_floatarg f){
     float r = jb_clamp(f, 0.f, 20.f);
     x->lfo_rate = r;
-
-    // write into the currently selected LFO slot
     int idx = (int)floorf(x->lfo_index + 0.5f) - 1;
     if (idx < 0) idx = 0;
     if (idx >= JB_N_LFO) idx = JB_N_LFO - 1;
     x->lfo_rate_v[idx] = r;
-    jb_mark_all_voices_dirty(x);
+    jb_invalidate_lfo_lane(x, idx);
 }
 static void juicy_bank_tilde_lfo_phase(t_juicy_bank_tilde *x, t_floatarg f){
     float p = f - floorf(f);
     if (p < 0.f) p += 1.f;
     x->lfo_phase = p;
-
-    // write into the currently selected LFO slot
     int idx = (int)floorf(x->lfo_index + 0.5f) - 1;
     if (idx < 0) idx = 0;
     if (idx >= JB_N_LFO) idx = JB_N_LFO - 1;
     x->lfo_phase_v[idx] = p;
-    jb_mark_all_voices_dirty(x);
+    jb_invalidate_lfo_lane(x, idx);
 }
 static void juicy_bank_tilde_lfo_mode(t_juicy_bank_tilde *x, t_floatarg f){
     int m = (int)floorf(f + 0.5f);
     if (m < 1) m = 1;
     if (m > 2) m = 2;
     x->lfo_mode = (float)m;
-
-    // write into the currently selected LFO slot
     int idx = (int)floorf(x->lfo_index + 0.5f) - 1;
     if (idx < 0) idx = 0;
     if (idx >= JB_N_LFO) idx = JB_N_LFO - 1;
     x->lfo_mode_v[idx] = (float)m;
-    jb_mark_all_voices_dirty(x);
+    jb_invalidate_lfo_lane(x, idx);
 }
 
 static void juicy_bank_tilde_lfo_index(t_juicy_bank_tilde *x, t_floatarg f){
@@ -4503,8 +4541,6 @@ static void juicy_bank_tilde_lfo_index(t_juicy_bank_tilde *x, t_floatarg f){
     if (idx < 1) idx = 1;
     if (idx > JB_N_LFO) idx = JB_N_LFO;
     x->lfo_index = (float)idx;
-
-    // when switching LFO index, mirror that slot back to the scalar view
     int li = idx - 1;
     if (li < 0) li = 0;
     if (li >= JB_N_LFO) li = JB_N_LFO - 1;
@@ -4518,12 +4554,11 @@ static void juicy_bank_tilde_lfo_index(t_juicy_bank_tilde *x, t_floatarg f){
 static void juicy_bank_tilde_lfo_amount(t_juicy_bank_tilde *x, t_floatarg f){
     float a = jb_clamp(f, -1.f, 1.f);
     x->lfo_amount = a;
-
     int idx = (int)floorf(x->lfo_index + 0.5f) - 1;
     if (idx < 0) idx = 0;
     if (idx >= JB_N_LFO) idx = JB_N_LFO - 1;
     x->lfo_amt_v[idx] = a;
-    jb_mark_all_voices_dirty(x);
+    jb_invalidate_lfo_lane(x, idx);
 }
 
 // --- target assignment helpers (symbols) ---
@@ -4532,7 +4567,6 @@ static inline int jb_target_is_none(t_symbol *s){
 }
 static inline int jb_target_taken(const t_juicy_bank_tilde *x, t_symbol *tgt, int exclude_lane){
     if (jb_target_is_none(tgt)) return 0;
-    // lanes: 0=LFO1, 1=LFO2
     if (exclude_lane != 0 && x->lfo_target[0] == tgt) return 1;
     if (exclude_lane != 1 && x->lfo_target[1] == tgt) return 1;
     return 0;
@@ -4540,21 +4574,16 @@ static inline int jb_target_taken(const t_juicy_bank_tilde *x, t_symbol *tgt, in
 
 
 static inline int jb_lfo_target_allowed(t_symbol *s){
-    // Note: Called on control-rate message paths (not per-sample DSP),
-    // so using gensym() here is fine.
     if (jb_target_is_none(s)) return 1;
     return (
-        s == gensym("master_1") || s == gensym("master_2") ||
-        s == gensym("pitch_1")  || s == gensym("pitch_2")  ||
-        s == gensym("brightness_1") || s == gensym("brightness_2") ||
-        s == gensym("partials_1")   || s == gensym("partials_2")   ||
-        s == gensym("position")     || s == gensym("pickup")       ||
-        s == gensym("position_1")   || s == gensym("position_2")   ||
-        s == gensym("pickup_1")     || s == gensym("pickup_2")     ||
-        s == gensym("imp_shape")    ||  /* maps to x->exc_imp_shape (0..1) */
-        s == gensym("noise_timbre") ||  /* maps to x->exc_shape     (0..1) */
-        s == gensym("lfo2_rate")    ||
-        s == gensym("lfo2_amount")
+        s == jb_sym_master || s == jb_sym_master_1 || s == jb_sym_master_2 ||
+        s == jb_sym_pitch || s == jb_sym_pitch_1 || s == jb_sym_pitch_2 ||
+        s == jb_sym_brightness || s == jb_sym_brightness_1 || s == jb_sym_brightness_2 ||
+        s == jb_sym_partials || s == jb_sym_partials_1 || s == jb_sym_partials_2 ||
+        s == jb_sym_position || s == jb_sym_position_1 || s == jb_sym_position_2 ||
+        s == jb_sym_pickup || s == jb_sym_pickup_1 || s == jb_sym_pickup_2 ||
+        s == jb_sym_imp_shape || s == jb_sym_noise_timbre ||
+        s == jb_sym_lfo2_rate || s == jb_sym_lfo2_amount
     );
 }
 
@@ -4562,29 +4591,22 @@ static inline int jb_lfo_target_allowed(t_symbol *s){
 static inline int jb_velmap_target_allowed(t_symbol *s){
     if (!s) return 0;
     if (jb_target_is_none(s)) return 1;
-
-    // bell_z_damper{1..3}_{1..2}
+    if (!strcmp(s->s_name, "bell_z_damper1") || !strcmp(s->s_name, "bell_z_damper2") || !strcmp(s->s_name, "bell_z_damper3")) return 1;
     if (!strncmp(s->s_name, "bell_z_damper", 13)){
         int damper=0, bank=0;
         if (sscanf(s->s_name, "bell_z_damper%d_%d", &damper, &bank) == 2){
             return (damper>=1 && damper<=JB_N_DAMPERS && bank>=1 && bank<=2);
         }
-        return 0;
     }
-
-    // bank-suffixed targets
-    if (!strcmp(s->s_name, "brightness_1") || !strcmp(s->s_name, "brightness_2")) return 1;
-    if (!strcmp(s->s_name, "position_1")   || !strcmp(s->s_name, "position_2"))   return 1;
-    if (!strcmp(s->s_name, "pickup_1")     || !strcmp(s->s_name, "pickup_2"))     return 1;
-    if (!strcmp(s->s_name, "master_1")     || !strcmp(s->s_name, "master_2"))     return 1;
-
-    // noise/exciter ADSR + timbre (no bank suffix)
+    if (s == jb_sym_brightness || !strcmp(s->s_name, "brightness_1") || !strcmp(s->s_name, "brightness_2")) return 1;
+    if (s == jb_sym_position || !strcmp(s->s_name, "position_1") || !strcmp(s->s_name, "position_2")) return 1;
+    if (s == jb_sym_pickup || !strcmp(s->s_name, "pickup_1") || !strcmp(s->s_name, "pickup_2")) return 1;
+    if (s == jb_sym_master || !strcmp(s->s_name, "master_1") || !strcmp(s->s_name, "master_2")) return 1;
     if (!strcmp(s->s_name, "adsr_attack"))  return 1;
     if (!strcmp(s->s_name, "adsr_decay"))   return 1;
     if (!strcmp(s->s_name, "adsr_release")) return 1;
-    if (!strcmp(s->s_name, "imp_shape"))    return 1;
-    if (!strcmp(s->s_name, "noise_timbre")) return 1;
-
+    if (s == jb_sym_imp_shape || !strcmp(s->s_name, "imp_shape"))    return 1;
+    if (s == jb_sym_noise_timbre || !strcmp(s->s_name, "noise_timbre")) return 1;
     return 0;
 }
 
@@ -4629,60 +4651,49 @@ static inline int jb_velmap_symbol_to_idx(const t_symbol *s){
 
 
 static void juicy_bank_tilde_lfo1_target(t_juicy_bank_tilde *x, t_symbol *s){
-    if (!s) return;
-    if (!jb_lfo_target_allowed(s)){
-        s = gensym("none");
-    }
-    if (jb_target_is_none(s)){
-        x->lfo_target[0] = gensym("none");
-        jb_mark_all_voices_dirty(x);
-        return;
-    }
-    if (jb_target_taken(x, s, 0)) return; // reject duplicate target
+    if (!s || !jb_lfo_target_allowed(s)) s = jb_sym_none;
+    t_symbol *old = x->lfo_target[0];
     x->lfo_target[0] = s;
-    jb_mark_all_voices_dirty(x);
+    if(!jb_target_is_none(old)){
+        t_symbol *saved = x->lfo_target[0];
+        x->lfo_target[0] = old;
+        jb_invalidate_lfo_lane(x, 0);
+        x->lfo_target[0] = saved;
+    }
+    jb_invalidate_lfo_lane(x, 0);
 }
 
 static void juicy_bank_tilde_lfo2_target(t_juicy_bank_tilde *x, t_symbol *s){
-    if (!s) return;
-    if (!jb_lfo_target_allowed(s)){
-        s = gensym("none");
-    }
-    if (jb_target_is_none(s)){
-        x->lfo_target[1] = gensym("none");
-        jb_mark_all_voices_dirty(x);
-        return;
-    }
-    if (jb_target_taken(x, s, 1)) return;
+    if (!s || !jb_lfo_target_allowed(s)) s = jb_sym_none;
+    t_symbol *old = x->lfo_target[1];
     x->lfo_target[1] = s;
-    jb_mark_all_voices_dirty(x);
+    if(!jb_target_is_none(old)){
+        t_symbol *saved = x->lfo_target[1];
+        x->lfo_target[1] = old;
+        jb_invalidate_lfo_lane(x, 1);
+        x->lfo_target[1] = saved;
+    }
+    jb_invalidate_lfo_lane(x, 1);
 }
 
 static void juicy_bank_tilde_velmap_amount(t_juicy_bank_tilde *x, t_floatarg f){
     x->velmap_amount = jb_clamp((float)f, -1.f, 1.f);
-    jb_mark_all_voices_dirty(x);
 }
 
 static void juicy_bank_tilde_velmap_target(t_juicy_bank_tilde *x, t_symbol *s){
     if (!x || !s) return;
-    if (!jb_velmap_target_allowed(s)){
-        s = gensym("none");
-    }
+    if (!jb_velmap_target_allowed(s)) s = jb_sym_none;
     if (jb_target_is_none(s)){
-        // "none" clears all velocity-mapping toggles
         for (int i = 0; i < JB_VELMAP_N_TARGETS; ++i) x->velmap_on[i] = 0;
         x->velmap_target = jb_sym_none;
-        jb_mark_all_voices_dirty(x);
         return;
     }
 
     int idx = jb_velmap_symbol_to_idx(s);
     if (idx < 0 || idx >= JB_VELMAP_N_TARGETS) return;
 
-    // Toggle behavior: sending the same target again flips it off.
     x->velmap_on[idx] = (uint8_t)(!x->velmap_on[idx]);
-    x->velmap_target = s; // keep last-selected symbol for UI feedback/debug
-    jb_mark_all_voices_dirty(x);
+    x->velmap_target = s;
 }
 
 
@@ -5399,14 +5410,16 @@ static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t 
         case JB_HW_PARAM_SPACE_DECAY: return x->space_decay;
         case JB_HW_PARAM_SPACE_DIFFUSION: return x->space_diffusion;
         case JB_HW_PARAM_SPACE_DAMPING: return x->space_damping;
-        case JB_HW_PARAM_LFO_TARGET: return (float)jb_hw_lfo_target_to_index(x->lfo_target[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0], (x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0);
+        case JB_HW_PARAM_LFO_BANK: return jb_target_bank_mode_to_param(x->lfo_target_bank[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0]);
+        case JB_HW_PARAM_LFO_TARGET: return (float)jb_hw_lfo_target_to_index(x->lfo_target[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0]);
         case JB_HW_PARAM_LFO_SHAPE: return x->lfo_shape_v[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0];
         case JB_HW_PARAM_LFO_RATE: return x->lfo_rate_v[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0];
         case JB_HW_PARAM_LFO_PHASE: return x->lfo_phase_v[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0];
         case JB_HW_PARAM_LFO_MODE: return x->lfo_mode_v[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0];
         case JB_HW_PARAM_LFO_AMOUNT: return x->lfo_amt_v[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0];
         case JB_HW_PARAM_VEL_AMOUNT: return x->velmap_amount;
-        case JB_HW_PARAM_VEL_TARGET: return (float)jb_hw_vel_target_to_index(x->velmap_target, b);
+        case JB_HW_PARAM_VEL_BANK: return jb_target_bank_mode_to_param(x->velmap_target_bank);
+        case JB_HW_PARAM_VEL_TARGET: return (float)jb_hw_vel_target_to_index(x->velmap_target);
         case JB_HW_PARAM_BANK_SELECT: return (float)(x->edit_bank + 1);
         case JB_HW_PARAM_OCTAVE: return (float)x->bank_octave[b];
         case JB_HW_PARAM_SEMITONE: return (float)x->bank_semitone[b];
@@ -5457,21 +5470,65 @@ static void jb_hw_apply_param_value(t_juicy_bank_tilde *x, jb_hw_param_t pid, fl
         case JB_HW_PARAM_SPACE_DECAY: juicy_bank_tilde_space_decay(x, value); break;
         case JB_HW_PARAM_SPACE_DIFFUSION: juicy_bank_tilde_space_diffusion(x, value); break;
         case JB_HW_PARAM_SPACE_DAMPING: juicy_bank_tilde_space_damping(x, value); break;
+        case JB_HW_PARAM_LFO_BANK: x->lfo_target_bank[lfoi] = jb_target_bank_mode_from_param(value); { t_symbol *eff = jb_hw_lfo_target_from_index(jb_hw_lfo_target_to_index(x->lfo_target[lfoi]), x->lfo_target_bank[lfoi]); if(lfoi==0) juicy_bank_tilde_lfo1_target(x, eff); else juicy_bank_tilde_lfo2_target(x, eff); } break;
         case JB_HW_PARAM_LFO_SHAPE: x->lfo_index = (float)(lfoi + 1); juicy_bank_tilde_lfo_shape(x, value); break;
         case JB_HW_PARAM_LFO_RATE: x->lfo_index = (float)(lfoi + 1); juicy_bank_tilde_lfo_rate(x, value); break;
         case JB_HW_PARAM_LFO_PHASE: x->lfo_index = (float)(lfoi + 1); juicy_bank_tilde_lfo_phase(x, value); break;
         case JB_HW_PARAM_LFO_MODE: x->lfo_index = (float)(lfoi + 1); juicy_bank_tilde_lfo_mode(x, value); break;
         case JB_HW_PARAM_LFO_AMOUNT: x->lfo_index = (float)(lfoi + 1); juicy_bank_tilde_lfo_amount(x, value); break;
         case JB_HW_PARAM_LFO_TARGET: {
-            int idx = (int)jb_clamp(floorf(value + 0.5f), 0.f, 4.f);
-            t_symbol *tgt = jb_hw_lfo_target_from_index(lfoi, idx);
+            int idx = (int)jb_clamp(floorf(value + 0.5f), 0.f, 10.f);
+            t_symbol *tgt = jb_hw_lfo_target_from_index(idx, x->lfo_target_bank[lfoi]);
             if(lfoi == 0) juicy_bank_tilde_lfo1_target(x, tgt);
             else juicy_bank_tilde_lfo2_target(x, tgt);
         } break;
         case JB_HW_PARAM_VEL_AMOUNT: juicy_bank_tilde_velmap_amount(x, value); break;
+        case JB_HW_PARAM_VEL_BANK: {
+            x->velmap_target_bank = jb_target_bank_mode_from_param(value);
+            int idx = jb_hw_vel_target_to_index(x->velmap_target);
+            if (idx > 0) {
+                t_symbol *base = jb_hw_vel_target_symbol_from_index(idx);
+                for (int i = 0; i < JB_VELMAP_N_TARGETS; ++i) x->velmap_on[i] = 0;
+                x->velmap_target = base;
+                int bm = jb_target_bank_mode_clamp(x->velmap_target_bank);
+                switch(idx){
+                    case 1: if(bm != 1) x->velmap_on[JB_VEL_MASTER_1] = 1; if(bm != 0) x->velmap_on[JB_VEL_MASTER_2] = 1; break;
+                    case 2: if(bm != 1) x->velmap_on[JB_VEL_BRIGHTNESS_1] = 1; if(bm != 0) x->velmap_on[JB_VEL_BRIGHTNESS_2] = 1; break;
+                    case 3: if(bm != 1) x->velmap_on[JB_VEL_POSITION_1] = 1; if(bm != 0) x->velmap_on[JB_VEL_POSITION_2] = 1; break;
+                    case 4: if(bm != 1) x->velmap_on[JB_VEL_PICKUP_1] = 1; if(bm != 0) x->velmap_on[JB_VEL_PICKUP_2] = 1; break;
+                    case 5: x->velmap_on[JB_VEL_ADSR_ATTACK] = 1; break;
+                    case 6: x->velmap_on[JB_VEL_ADSR_DECAY] = 1; break;
+                    case 7: x->velmap_on[JB_VEL_ADSR_RELEASE] = 1; break;
+                    case 8: x->velmap_on[JB_VEL_IMP_SHAPE] = 1; break;
+                    case 9: x->velmap_on[JB_VEL_NOISE_TIMBRE] = 1; break;
+                    case 10: if(bm != 1) x->velmap_on[JB_VEL_BELL_Z_D1_B1] = 1; if(bm != 0) x->velmap_on[JB_VEL_BELL_Z_D1_B2] = 1; break;
+                    case 11: if(bm != 1) x->velmap_on[JB_VEL_BELL_Z_D2_B1] = 1; if(bm != 0) x->velmap_on[JB_VEL_BELL_Z_D2_B2] = 1; break;
+                    case 12: if(bm != 1) x->velmap_on[JB_VEL_BELL_Z_D3_B1] = 1; if(bm != 0) x->velmap_on[JB_VEL_BELL_Z_D3_B2] = 1; break;
+                }
+            }
+        } break;
         case JB_HW_PARAM_VEL_TARGET: {
-            int idx = (int)jb_clamp(floorf(value + 0.5f), 0.f, 4.f);
-            jb_hw_vel_target_set_exact(x, jb_hw_vel_target_from_index(x->edit_bank ? 1 : 0, idx));
+            int idx = (int)jb_clamp(floorf(value + 0.5f), 0.f, 12.f);
+            t_symbol *base = jb_hw_vel_target_symbol_from_index(idx);
+            for (int i = 0; i < JB_VELMAP_N_TARGETS; ++i) x->velmap_on[i] = 0;
+            x->velmap_target = base;
+            if (!jb_target_is_none(base)) {
+                int bm = jb_target_bank_mode_clamp(x->velmap_target_bank);
+                switch(idx){
+                    case 1: if(bm != 1) x->velmap_on[JB_VEL_MASTER_1] = 1; if(bm != 0) x->velmap_on[JB_VEL_MASTER_2] = 1; break;
+                    case 2: if(bm != 1) x->velmap_on[JB_VEL_BRIGHTNESS_1] = 1; if(bm != 0) x->velmap_on[JB_VEL_BRIGHTNESS_2] = 1; break;
+                    case 3: if(bm != 1) x->velmap_on[JB_VEL_POSITION_1] = 1; if(bm != 0) x->velmap_on[JB_VEL_POSITION_2] = 1; break;
+                    case 4: if(bm != 1) x->velmap_on[JB_VEL_PICKUP_1] = 1; if(bm != 0) x->velmap_on[JB_VEL_PICKUP_2] = 1; break;
+                    case 5: x->velmap_on[JB_VEL_ADSR_ATTACK] = 1; break;
+                    case 6: x->velmap_on[JB_VEL_ADSR_DECAY] = 1; break;
+                    case 7: x->velmap_on[JB_VEL_ADSR_RELEASE] = 1; break;
+                    case 8: x->velmap_on[JB_VEL_IMP_SHAPE] = 1; break;
+                    case 9: x->velmap_on[JB_VEL_NOISE_TIMBRE] = 1; break;
+                    case 10: if(bm != 1) x->velmap_on[JB_VEL_BELL_Z_D1_B1] = 1; if(bm != 0) x->velmap_on[JB_VEL_BELL_Z_D1_B2] = 1; break;
+                    case 11: if(bm != 1) x->velmap_on[JB_VEL_BELL_Z_D2_B1] = 1; if(bm != 0) x->velmap_on[JB_VEL_BELL_Z_D2_B2] = 1; break;
+                    case 12: if(bm != 1) x->velmap_on[JB_VEL_BELL_Z_D3_B1] = 1; if(bm != 0) x->velmap_on[JB_VEL_BELL_Z_D3_B2] = 1; break;
+                }
+            }
         } break;
         case JB_HW_PARAM_BANK_SELECT: juicy_bank_tilde_bank(x, value); break;
         case JB_HW_PARAM_OCTAVE: juicy_bank_tilde_octave(x, value); break;
@@ -5928,11 +5985,13 @@ x->excite_pos2    = x->excite_pos;
         x->lfo_amt_v[li] = 0.f;
         x->lfo_amt_eff[li] = 0.f;
         x->lfo_target[li] = jb_sym_none;
+        x->lfo_target_bank[li] = 2;
     }
     x->lfo_amount = 0.f;
 
     // velocity mapping lane defaults
     x->velmap_amount = 0.f;
+    x->velmap_target_bank = 2;
     x->velmap_target = jb_sym_none;
     for (int i = 0; i < JB_VELMAP_N_TARGETS; ++i) x->velmap_on[i] = 0;
 
@@ -6149,12 +6208,10 @@ static void jb_hw_vel_target_set_exact(t_juicy_bank_tilde *x, t_symbol *s){
     for (int i = 0; i < JB_VELMAP_N_TARGETS; ++i) x->velmap_on[i] = 0;
     x->velmap_target = jb_sym_none;
     if (!s || jb_target_is_none(s)){
-        jb_mark_all_voices_dirty(x);
         return;
     }
     if (!jb_velmap_target_allowed(s)) s = jb_sym_none;
     if (jb_target_is_none(s)){
-        jb_mark_all_voices_dirty(x);
         return;
     }
     {
@@ -6164,7 +6221,6 @@ static void jb_hw_vel_target_set_exact(t_juicy_bank_tilde *x, t_symbol *s){
             x->velmap_target = s;
         }
     }
-    jb_mark_all_voices_dirty(x);
 }
 
 static void jb_hw_preset_begin_naming(t_juicy_bank_tilde *x){
@@ -6292,9 +6348,11 @@ static void jb_preset_snapshot(const t_juicy_bank_tilde *x, jb_preset_t *p){
         p->lfo_mode_v[li]  = x->lfo_mode_v[li];
         p->lfo_amt_v[li]   = x->lfo_amt_v[li];
         p->lfo_target[li]  = x->lfo_target[li];
+        p->lfo_target_bank[li] = x->lfo_target_bank[li];
     }
 
     p->velmap_amount = x->velmap_amount;
+    p->velmap_target_bank = x->velmap_target_bank;
     for (int ti = 0; ti < JB_VELMAP_N_TARGETS; ++ti){
         p->velmap_on[ti] = x->velmap_on[ti];
     }
@@ -6395,13 +6453,32 @@ static void jb_preset_apply(t_juicy_bank_tilde *x, const jb_preset_t *p){
         x->lfo_mode_v[li]  = p->lfo_mode_v[li];
         x->lfo_amt_v[li]   = p->lfo_amt_v[li];
         x->lfo_target[li]  = p->lfo_target[li] ? p->lfo_target[li] : jb_sym_none;
+        x->lfo_target_bank[li] = jb_target_bank_mode_clamp(p->lfo_target_bank[li]);
     }
     x->lfo_index = p->lfo_index;
     juicy_bank_tilde_lfo_index(x, x->lfo_index);
 
     x->velmap_amount = p->velmap_amount;
+    x->velmap_target_bank = jb_target_bank_mode_clamp(p->velmap_target_bank);
+    x->velmap_target = jb_sym_none;
     for (int ti = 0; ti < JB_VELMAP_N_TARGETS; ++ti){
         x->velmap_on[ti] = p->velmap_on[ti];
+        if (x->velmap_target == jb_sym_none && x->velmap_on[ti]) {
+            switch(ti){
+                case JB_VEL_MASTER_1: case JB_VEL_MASTER_2: x->velmap_target = jb_sym_master; break;
+                case JB_VEL_BRIGHTNESS_1: case JB_VEL_BRIGHTNESS_2: x->velmap_target = jb_sym_brightness; break;
+                case JB_VEL_POSITION_1: case JB_VEL_POSITION_2: x->velmap_target = jb_sym_position; break;
+                case JB_VEL_PICKUP_1: case JB_VEL_PICKUP_2: x->velmap_target = jb_sym_pickup; break;
+                case JB_VEL_ADSR_ATTACK: x->velmap_target = gensym("adsr_attack"); break;
+                case JB_VEL_ADSR_DECAY: x->velmap_target = gensym("adsr_decay"); break;
+                case JB_VEL_ADSR_RELEASE: x->velmap_target = gensym("adsr_release"); break;
+                case JB_VEL_IMP_SHAPE: x->velmap_target = jb_sym_imp_shape; break;
+                case JB_VEL_NOISE_TIMBRE: x->velmap_target = jb_sym_noise_timbre; break;
+                case JB_VEL_BELL_Z_D1_B1: case JB_VEL_BELL_Z_D1_B2: x->velmap_target = gensym("bell_z_damper1"); break;
+                case JB_VEL_BELL_Z_D2_B1: case JB_VEL_BELL_Z_D2_B2: x->velmap_target = gensym("bell_z_damper2"); break;
+                case JB_VEL_BELL_Z_D3_B1: case JB_VEL_BELL_Z_D3_B2: x->velmap_target = gensym("bell_z_damper3"); break;
+            }
+        }
     }
 }
 
@@ -6715,16 +6792,20 @@ void juicy_bank_tilde_setup(void){
 
     // Cache symbols once (avoid gensym() in the audio thread)
     if(!jb_sym_master_1){
+        jb_sym_master       = gensym("master");
         jb_sym_master_1     = gensym("master_1");
         jb_sym_master_2     = gensym("master_2");
         jb_sym_lfo2_amount  = gensym("lfo2_amount");
         jb_sym_lfo2_rate    = gensym("lfo2_rate");
         jb_sym_noise_timbre = gensym("noise_timbre");
         jb_sym_imp_shape    = gensym("imp_shape");
+        jb_sym_pitch        = gensym("pitch");
         jb_sym_pitch_1      = gensym("pitch_1");
         jb_sym_pitch_2      = gensym("pitch_2");
+        jb_sym_brightness   = gensym("brightness");
         jb_sym_brightness_1 = gensym("brightness_1");
         jb_sym_brightness_2 = gensym("brightness_2");
+        jb_sym_partials     = gensym("partials");
         jb_sym_partials_1   = gensym("partials_1");
         jb_sym_partials_2   = gensym("partials_2");
         jb_sym_position     = gensym("position");
