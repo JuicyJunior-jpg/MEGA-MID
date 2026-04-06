@@ -1306,6 +1306,8 @@ static void jb_ui_clock_tick(t_juicy_bank_tilde *x);
 static void jb_mark_patch_dirty(t_juicy_bank_tilde *x);
 static void jb_set_preset_feedback(t_juicy_bank_tilde *x, int code);
 static void jb_compare_capture_from_slot(t_juicy_bank_tilde *x, int slot);
+static int jb_preset_find_next_used(const t_juicy_bank_tilde *x, int start, int dir);
+static void jb_preset_apply(t_juicy_bank_tilde *x, const jb_preset_t *p);
 
 /* Dirty-flag helpers are defined later, but several setters call them earlier. */
 static inline void jb_mark_all_voices_dirty(t_juicy_bank_tilde *x);
@@ -1540,6 +1542,12 @@ int preset_mode;              // jb_preset_mode_t
 int preset_cursor;            // 0..JB_PRESET_NAME_MAX-1 (naming mode)
 int preset_slot_sel;          // 0..JB_PRESET_SLOTS-1 (slot mode)
 char preset_edit_name[JB_PRESET_NAME_MAX + 1];
+int patch_dirty;                 // 1 when current patch differs from last loaded/saved state
+int preset_feedback;             // JB_FEEDBACK_* for transient OLED feedback
+int preset_feedback_ticks;       // countdown timer for transient feedback
+int compare_valid;               // compare/revert snapshot valid flag
+int compare_slot;                // originating slot for compare snapshot
+jb_preset_t compare_preset;      // compare/revert snapshot
 
     // hardware/workflow transition state
     jb_workflow_state_t wf;
