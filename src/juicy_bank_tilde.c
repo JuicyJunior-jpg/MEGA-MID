@@ -537,6 +537,7 @@ static inline float jb_hadd_f32x4(float32x4_t v){
 // Noise diffusion (all-pass) + color slope constants
 #define JB_EXC_SLOPE_PIVOT_HZ  1000.f
 #define JB_EXC_COLOR_OCT_SPAN  3.f   // approx octaves from pivot to spectral edge
+#define JB_EXC_IMPULSE_GAIN   5.f   // fixed perceptual boost for one-shot impulse branch
 
 // ---------- SPACE (Schroeder-style reverb) ----------
 static const int jb_space_base_delay[JB_SPACE_NCOMB] = { 1117, 1373, 1481, 1607, 1103, 1361, 1471, 1597 };
@@ -1083,7 +1084,7 @@ static const jb_hw_param_spec_t jb_hw_param_specs[] = {
     [JB_HW_PARAM_POSITION]        = { "POS",    0.f,   1.f,   0 },
     [JB_HW_PARAM_PICKUP]          = { "PICK",   0.f,   1.f,   0 },
     [JB_HW_PARAM_SPACE_WETDRY]    = { "WET",   -1.f,   1.f,   0 },
-    [JB_HW_PARAM_EXC_FADER]       = { "EXC",    0.f,   1.f,   0 },
+    [JB_HW_PARAM_EXC_FADER]       = { "EXC",   -1.f,   1.f,   0 },
     [JB_HW_PARAM_STRETCH]         = { "STR",   -1.f,   1.f,   0 },
     [JB_HW_PARAM_WARP]            = { "WARP",  -1.f,   1.f,   0 },
     [JB_HW_PARAM_DISPERSION]      = { "DISP",   0.f,   1.f,   0 },
@@ -1509,8 +1510,6 @@ char preset_edit_name[JB_PRESET_NAME_MAX + 1];
     float exc_noise_color_gL, exc_noise_color_gH, exc_noise_color_comp;
 
 
-    float noise_scale;   // factory trim (linear amp)
-    float impulse_scale; // factory trim (linear amp)
     // --- INTERNAL EXCITER inlets (created after keytrack, before LFO) ---
     t_inlet *in_exc_fader;
     t_inlet *in_exc_attack;
@@ -1919,8 +1918,8 @@ static inline void jb_exc_process_sample(const t_juicy_bank_tilde *x,
     pR *= e->vel_on * e->gainR;
 
 
-    *outL = w_noise * (yL * x->noise_scale) + w_imp * (pL * x->impulse_scale);
-    *outR = w_noise * (yR * x->noise_scale) + w_imp * (pR * x->impulse_scale);
+    *outL = w_noise * yL + w_imp * (pL * JB_EXC_IMPULSE_GAIN);
+    *outR = w_noise * yR + w_imp * (pR * JB_EXC_IMPULSE_GAIN);
 }
 // ---------
 
@@ -3570,9 +3569,9 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         // (Coupling removed) Both banks are always excited by the internal exciter and always summed to the output.
     // Internal exciter mix weights (computed once per block)
     float exc_f = jb_clamp(x->exc_fader, -1.f, 1.f);
-    float exc_t = 0.5f * (exc_f + 1.f);
-    float exc_w_imp   = jb_fast_sinpi(0.5f * exc_t);
-    float exc_w_noise = jb_fast_sinpi(0.5f * (1.f - exc_t));
+    float exc_t = 0.5f * (exc_f + 1.f); /* -1 -> 0 (impulse), +1 -> 1 (noise) */
+    float exc_w_imp   = jb_fast_sinpi(0.5f * (1.f - exc_t));
+    float exc_w_noise = jb_fast_sinpi(0.5f * exc_t);
     const float a_energy = expf(-1.0f / (x->sr * 0.050f));
     const float one_minus_a_energy = 1.f - a_energy;
 
@@ -5895,7 +5894,7 @@ x->excite_pos2    = x->excite_pos;
     x->lfo_index = 1.f;   // LFO 1 selected by default
 
     // Internal exciter defaults (shared across BOTH banks)
-    x->exc_fader = 0.f;
+    x->exc_fader = -1.f;
 
     x->exc_attack_ms     = 5.f;
     x->exc_attack_curve  = 0.f;
@@ -5908,8 +5907,6 @@ x->excite_pos2    = x->excite_pos;
     x->exc_imp_shape  = 0.5f;  // Impulse-only Shape (old shape logic)
     x->exc_shape      = 0.5f;  // Noise Color (slope EQ)
     // Feedback-loop AGC defaults (0..1 mapped to time constants in DSP)
-    x->noise_scale  = 1.f;
-    x->impulse_scale = 1.f;
 
     // Offline render buffer
     x->render_bufL = x->render_bufR = NULL;
