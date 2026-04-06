@@ -54,6 +54,8 @@ static t_symbol *jb_sym_screen_preset_mode = NULL;
 static t_symbol *jb_sym_screen_preset_cursor = NULL;
 static t_symbol *jb_sym_screen_preset_used = NULL;
 static t_symbol *jb_sym_screen_preset_name[8] = {NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL};
+static t_symbol *jb_sym_screen_feedback = NULL;
+static t_symbol *jb_sym_screen_patch_dirty = NULL;
 static t_symbol *jb_sym_screen_param[6] = {NULL, NULL, NULL, NULL, NULL, NULL};
 
 static inline void jb_screen_send_float(t_symbol *sym, t_float f){
@@ -78,6 +80,8 @@ static void jb_screen_symbols_init(void){
         jb_sym_screen_preset_name[5] = gensym("bela_screen_preset_name5");
         jb_sym_screen_preset_name[6] = gensym("bela_screen_preset_name6");
         jb_sym_screen_preset_name[7] = gensym("bela_screen_preset_name7");
+        jb_sym_screen_feedback = gensym("bela_screen_feedback");
+        jb_sym_screen_patch_dirty = gensym("bela_screen_patch_dirty");
         jb_sym_screen_param[0] = gensym("bela_screen_param0");
         jb_sym_screen_param[1] = gensym("bela_screen_param1");
         jb_sym_screen_param[2] = gensym("bela_screen_param2");
@@ -267,6 +271,16 @@ typedef enum {
     JB_PRESET_MODE_SLOT   = 2
 } jb_preset_mode_t;
 
+#define JB_PRESET_CHARSET_COUNT 83
+
+enum {
+    JB_FEEDBACK_NONE = 0,
+    JB_FEEDBACK_LOADED = 1,
+    JB_FEEDBACK_SAVED = 2,
+    JB_FEEDBACK_OVERWRITE = 3,
+    JB_FEEDBACK_REVERTED = 4
+};
+
 // -------------------- HARDWARE / WORKFLOW SCAFFOLD (transition step 1) --------------------
 typedef enum {
     JB_PAGE_PLAY = 0,
@@ -389,6 +403,7 @@ typedef struct {
     int preset_cursor;
     int global_edit_cursor;
     int highlighted_pot;
+    int highlight_ticks;
 } jb_workflow_state_t;
 
 typedef struct {
@@ -1288,6 +1303,9 @@ static void juicy_bank_tilde_screen_refresh(t_juicy_bank_tilde *x);
 static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t pid);
 static void jb_screen_emit_full(t_juicy_bank_tilde *x);
 static void jb_ui_clock_tick(t_juicy_bank_tilde *x);
+static void jb_mark_patch_dirty(t_juicy_bank_tilde *x);
+static void jb_set_preset_feedback(t_juicy_bank_tilde *x, int code);
+static void jb_compare_capture_from_slot(t_juicy_bank_tilde *x, int slot);
 
 /* Dirty-flag helpers are defined later, but several setters call them earlier. */
 static inline void jb_mark_all_voices_dirty(t_juicy_bank_tilde *x);
@@ -5292,6 +5310,8 @@ static void jb_screen_emit_full(t_juicy_bank_tilde *x){
     { int preset_screen_mode = x->preset_mode; if(x->wf.ui_mode == JB_UI_SAVE_MODE && preset_screen_mode == JB_PRESET_MODE_NORMAL) preset_screen_mode = JB_PRESET_MODE_SLOT; jb_screen_send_float(jb_sym_screen_preset_mode, (t_float)preset_screen_mode); }
     jb_screen_send_float(jb_sym_screen_preset_cursor, (t_float)x->preset_cursor);
     jb_screen_send_float(jb_sym_screen_preset_used, (t_float)((x->preset_slot_sel >= 0 && x->preset_slot_sel < JB_PRESET_SLOTS && x->presets[x->preset_slot_sel].used) ? 1.f : 0.f));
+    jb_screen_send_float(jb_sym_screen_feedback, (t_float)x->preset_feedback);
+    jb_screen_send_float(jb_sym_screen_patch_dirty, (t_float)(x->patch_dirty ? 1.f : 0.f));
 
     {
         char pname[JB_PRESET_NAME_MAX + 1];
@@ -5312,6 +5332,21 @@ static void jb_screen_emit_full(t_juicy_bank_tilde *x){
 
 static void jb_ui_clock_tick(t_juicy_bank_tilde *x){
     if(!x) return;
+    int changed = 0;
+    if(x->wf.highlight_ticks > 0){
+        x->wf.highlight_ticks--;
+        if(x->wf.highlight_ticks <= 0 && x->wf.highlighted_pot >= 0){
+            x->wf.highlighted_pot = -1;
+            changed = 1;
+        }
+    }
+    if(x->preset_feedback_ticks > 0){
+        x->preset_feedback_ticks--;
+        if(x->preset_feedback_ticks <= 0 && x->preset_feedback != JB_FEEDBACK_NONE){
+            x->preset_feedback = JB_FEEDBACK_NONE;
+            changed = 1;
+        }
+    }
     jb_screen_emit_full(x);
     if(x->ui_clock) clock_delay(x->ui_clock, 50);
 }
@@ -5666,6 +5701,7 @@ static void juicy_bank_tilde_pot(t_juicy_bank_tilde *x, t_floatarg pf, t_floatar
     }
 
     x->wf.highlighted_pot = pot;
+    x->wf.highlight_ticks = 4;
 
     jb_hw_param_t pid = jb_page_param_map[x->wf.current_page][pot];
     if(pid == JB_HW_PARAM_NONE){
@@ -5681,6 +5717,7 @@ static void juicy_bank_tilde_pot(t_juicy_bank_tilde *x, t_floatarg pf, t_floatar
     ps->last_sent = ps->filtered;
 
     jb_hw_apply_param_value(x, pid, jb_hw_norm_to_param(ps->filtered, pid));
+    jb_mark_patch_dirty(x);
     jb_screen_emit_full(x);
 }
 
@@ -5748,6 +5785,15 @@ static void juicy_bank_tilde_button(t_juicy_bank_tilde *x, t_symbol *s, int argc
             jb_hw_set_page(x, x->wf.shift_held ? JB_PAGE_GLOBAL_EDIT : x->wf.last_page_in_family[JB_FAMILY_MOD]);
             break;
         case JB_BTN_BACK:
+            if(x->wf.current_page == JB_PAGE_PRESET && x->wf.shift_held && x->wf.ui_mode == JB_UI_NORMAL && x->preset_mode == JB_PRESET_MODE_NORMAL && x->compare_valid){
+                jb_preset_apply(x, &x->compare_preset);
+                juicy_bank_tilde_preset_recall(x);
+                x->patch_dirty = 0;
+                if(x->compare_slot >= 0 && x->compare_slot < JB_PRESET_SLOTS) x->preset_slot_sel = x->compare_slot;
+                jb_set_preset_feedback(x, JB_FEEDBACK_REVERTED);
+                jb_preset_emit_ui(x);
+                return;
+            }
             if(x->preset_mode != JB_PRESET_MODE_NORMAL || x->wf.ui_mode == JB_UI_SAVE_MODE){
                 x->wf.ui_mode = JB_UI_NORMAL;
                 x->preset_mode = JB_PRESET_MODE_NORMAL;
@@ -5767,7 +5813,11 @@ static void juicy_bank_tilde_button(t_juicy_bank_tilde *x, t_symbol *s, int argc
                     snprintf(tmpname, sizeof(tmpname), "P%02d", x->preset_slot_sel + 1);
                     nm = tmpname;
                 }
+                int overw = (x->preset_slot_sel >= 0 && x->preset_slot_sel < JB_PRESET_SLOTS && x->presets[x->preset_slot_sel].used);
                 jb_preset_store(x, x->preset_slot_sel, nm);
+                jb_compare_capture_from_slot(x, x->preset_slot_sel);
+                x->patch_dirty = 0;
+                jb_set_preset_feedback(x, overw ? JB_FEEDBACK_OVERWRITE : JB_FEEDBACK_SAVED);
                 x->wf.ui_mode = JB_UI_NORMAL;
                 jb_hw_set_page(x, JB_PAGE_PRESET);
             } else {
@@ -5796,17 +5846,30 @@ static void juicy_bank_tilde_encoder(t_juicy_bank_tilde *x, t_floatarg f){
         {
             int idx = jb_preset_index_from_char(x->preset_edit_name[cur]);
             idx += delta;
-            if(idx < 1) idx = 64;
-            if(idx > 64) idx = 1;
+            if(idx < 1) idx = JB_PRESET_CHARSET_COUNT;
+            if(idx > JB_PRESET_CHARSET_COUNT) idx = 1;
             x->preset_edit_name[cur] = jb_preset_char_from_index(idx);
             jb_preset_emit_ui(x);
         }
         return;
     }
-    if(x->wf.ui_mode == JB_UI_SAVE_MODE || x->wf.current_page == JB_PAGE_PRESET){
+    if(x->wf.ui_mode == JB_UI_SAVE_MODE || x->preset_mode == JB_PRESET_MODE_SLOT){
         x->preset_slot_sel += delta;
         if(x->preset_slot_sel < 0) x->preset_slot_sel = 0;
         if(x->preset_slot_sel >= JB_PRESET_SLOTS) x->preset_slot_sel = JB_PRESET_SLOTS - 1;
+        jb_preset_emit_ui(x);
+        return;
+    }
+    if(x->wf.current_page == JB_PAGE_PRESET){
+        int cur = x->preset_slot_sel;
+        if(cur < 0 || cur >= JB_PRESET_SLOTS) cur = 0;
+        int nxt = jb_preset_find_next_used(x, cur, delta);
+        if(nxt >= 0) x->preset_slot_sel = nxt;
+        else {
+            x->preset_slot_sel += delta;
+            if(x->preset_slot_sel < 0) x->preset_slot_sel = 0;
+            if(x->preset_slot_sel >= JB_PRESET_SLOTS) x->preset_slot_sel = JB_PRESET_SLOTS - 1;
+        }
         jb_preset_emit_ui(x);
         return;
     }
@@ -5900,7 +5963,15 @@ static void juicy_bank_tilde_encoder_press(t_juicy_bank_tilde *x, t_floatarg f){
         return;
     }
     if(x->wf.current_page == JB_PAGE_PRESET){
-        juicy_bank_tilde_preset_recall(x);
+        if(x->preset_slot_sel >= 0 && x->preset_slot_sel < JB_PRESET_SLOTS && x->presets[x->preset_slot_sel].used){
+            jb_preset_apply(x, &x->presets[x->preset_slot_sel]);
+            juicy_bank_tilde_preset_recall(x);
+            jb_compare_capture_from_slot(x, x->preset_slot_sel);
+            x->patch_dirty = 0;
+            jb_set_preset_feedback(x, JB_FEEDBACK_LOADED);
+            jb_preset_emit_ui(x);
+        }
+        return;
     }
 }
 
@@ -6114,7 +6185,14 @@ x->excite_pos2    = x->excite_pos;
     x->wf.preset_cursor = 0;
     x->wf.global_edit_cursor = 0;
     x->wf.highlighted_pot = -1;
+    x->wf.highlight_ticks = 0;
     x->hw_pressure = 0.f;
+    x->patch_dirty = 0;
+    x->preset_feedback = JB_FEEDBACK_NONE;
+    x->preset_feedback_ticks = 0;
+    x->compare_valid = 0;
+    x->compare_slot = 0;
+    memset(&x->compare_preset, 0, sizeof(x->compare_preset));
     for(int pi = 0; pi < 6; ++pi){ x->hw_pots[pi].normalized = 0.f; x->hw_pots[pi].filtered = 0.f; x->hw_pots[pi].last_sent = 0.f; x->hw_pots[pi].caught = 0; }
 
     x->edit_bank = 0;
@@ -6261,25 +6339,24 @@ static void juicy_bank_tilde_bang(t_juicy_bank_tilde *x){
 static void juicy_bank_tilde_INIT(t_juicy_bank_tilde *x);
 // -------------------- PRESET HELPERS --------------------
 static inline char jb_preset_char_from_index(int idx){
-    // idx: 1..64
-    // 1 = space
-    // 2..27 = A..Z
-    // 28..53 = a..z
-    // 54..63 = 0..9
-    // 64 = '_' (extra)
+    /* 1 space, 2..27 A-Z, 28..53 a-z, 54..63 0-9,
+       64..79 common symbols, 80..83 custom symbol surrogates. */
+    static const char extras[] = {'#','$','%','&','/','(',')','-','_','+','=','!','?','.',',',':','{','}','~','@'};
     if (idx <= 1) return ' ';
     if (idx >= 2 && idx <= 27) return (char)('A' + (idx - 2));
     if (idx >= 28 && idx <= 53) return (char)('a' + (idx - 28));
     if (idx >= 54 && idx <= 63) return (char)('0' + (idx - 54));
-    return '_';
+    if (idx >= 64 && idx <= JB_PRESET_CHARSET_COUNT) return extras[idx - 64];
+    return ' ';
 }
 
 static inline int jb_preset_index_from_char(char c){
+    static const char extras[] = {'#','$','%','&','/','(',')','-','_','+','=','!','?','.',',',':','{','}','~','@'};
     if (c == ' ') return 1;
     if (c >= 'A' && c <= 'Z') return 2 + (int)(c - 'A');
     if (c >= 'a' && c <= 'z') return 28 + (int)(c - 'a');
     if (c >= '0' && c <= '9') return 54 + (int)(c - '0');
-    if (c == '_') return 64;
+    for (int i = 0; i < (int)sizeof(extras); ++i) if (c == extras[i]) return 64 + i;
     return 1;
 }
 
@@ -6354,6 +6431,25 @@ static int jb_preset_find_next_used(const t_juicy_bank_tilde *x, int start, int 
         if (x->presets[i].used) return i;
     }
     return -1;
+}
+
+static void jb_mark_patch_dirty(t_juicy_bank_tilde *x){
+    if(!x) return;
+    x->patch_dirty = 1;
+}
+
+static void jb_set_preset_feedback(t_juicy_bank_tilde *x, int code){
+    if(!x) return;
+    x->preset_feedback = code;
+    x->preset_feedback_ticks = 20;
+}
+
+static void jb_compare_capture_from_slot(t_juicy_bank_tilde *x, int slot){
+    if(!x) return;
+    if(slot < 0 || slot >= JB_PRESET_SLOTS || !x->presets[slot].used) return;
+    x->compare_preset = x->presets[slot];
+    x->compare_valid = 1;
+    x->compare_slot = slot;
 }
 
 static void jb_preset_snapshot(const t_juicy_bank_tilde *x, jb_preset_t *p){
@@ -6568,7 +6664,7 @@ static void juicy_bank_tilde_preset_char(t_juicy_bank_tilde *x, t_floatarg f){
     if (!x || x->preset_mode != JB_PRESET_MODE_NAMING) return;
     int idx = (int)floorf(f + 0.5f);
     if (idx < 1) idx = 1;
-    if (idx > 64) idx = 64;
+    if (idx > JB_PRESET_CHARSET_COUNT) idx = JB_PRESET_CHARSET_COUNT;
 
     char c = jb_preset_char_from_index(idx);
 
@@ -6608,22 +6704,19 @@ static void juicy_bank_tilde_preset_cmd(t_juicy_bank_tilde *x, t_symbol *s){
         }
         // normal INIT: factory reset patch (existing init)
         juicy_bank_tilde_INIT(x);
+        x->patch_dirty = 0;
+        x->compare_valid = 0;
+        jb_preset_emit_ui(x);
         return;
     }
 
     if (s == gensym("SAVE")){
         if (x->preset_mode == JB_PRESET_MODE_NORMAL){
-            x->preset_mode = JB_PRESET_MODE_NAMING;
-            x->preset_cursor = 0;
-            x->preset_slot_sel = 0;
-            memset(x->preset_edit_name, ' ', JB_PRESET_NAME_MAX);
-            x->preset_edit_name[JB_PRESET_NAME_MAX] = '\0';
-            jb_preset_emit_ui(x);
+            jb_hw_preset_begin_naming(x);
             return;
         }
         if (x->preset_mode == JB_PRESET_MODE_NAMING){
             x->preset_mode = JB_PRESET_MODE_SLOT;
-            x->preset_slot_sel = 0;
             jb_preset_emit_ui(x);
             return;
         }
@@ -6642,6 +6735,9 @@ static void juicy_bank_tilde_preset_cmd(t_juicy_bank_tilde *x, t_symbol *s){
 
             // exit
             x->preset_mode = JB_PRESET_MODE_NORMAL;
+            x->patch_dirty = 0;
+            jb_compare_capture_from_slot(x, slot);
+            jb_set_preset_feedback(x, overw ? JB_FEEDBACK_OVERWRITE : JB_FEEDBACK_SAVED);
 
             if (x->out_preset){
                 t_atom a[3];
@@ -6694,6 +6790,9 @@ static void juicy_bank_tilde_preset_cmd(t_juicy_bank_tilde *x, t_symbol *s){
         if (nxt >= 0){
             x->preset_slot_sel = nxt;
             jb_preset_apply(x, &x->presets[nxt]);
+            jb_compare_capture_from_slot(x, nxt);
+            x->patch_dirty = 0;
+            jb_set_preset_feedback(x, JB_FEEDBACK_LOADED);
             if (x->out_preset){
                 t_atom a[2];
                 SETFLOAT(&a[0], (t_float)(nxt + 1));
