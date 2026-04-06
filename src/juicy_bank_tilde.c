@@ -134,8 +134,6 @@ static void jb_screen_symbols_init(void){
 #define JB_HW_POT_SMOOTH_FAST     0.85f     /* faster tracking for larger knob moves */
 #define JB_HW_POT_SEND_HYST       0.00045f  /* do not re-apply microscopic changes */
 #define JB_HW_POT_PAGE_REARM      0.0100f   /* after a page change, require real knob motion before takeover */
-#define JB_RATIO_SLEW_BASE        0.18f     /* block-rate smoothing for ratio-changing parameters */
-#define JB_RATIO_SLEW_FAST        0.65f     /* faster chase when the ratio target moves a lot */
 
 // ---------- utils ----------
 static inline float jb_clamp(float x, float lo, float hi){ return (x<lo)?lo:((x>hi)?hi:x); }
@@ -2698,31 +2696,19 @@ static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, in
 
     // ratio transforms
     {
-        float ratio_prev[JB_MAX_MODES];
-        for(int i = 0; i < n_modes; ++i)
-            ratio_prev[i] = m[i].ratio_now;
-
-        {
-            float density_amt_eff = jb_bank_density_amt(x, bank);
-            jb_apply_density_generic(n_modes, base, density_amt_eff, m);
-        }
+        float density_amt_eff = jb_bank_density_amt(x, bank);
+        jb_apply_density_generic(n_modes, base, density_amt_eff, m);
         jb_lock_fundamental_generic(n_modes, base, m);
         jb_apply_odd_even_skew_generic(n_modes, base, jb_bank_odd_skew(x, bank), jb_bank_even_skew(x, bank), m);
         jb_apply_stretch_generic(n_modes, base, jb_bank_stretch_amt(x, bank), jb_bank_warp_amt(x, bank), m);
         jb_apply_collision_generic(n_modes, base, jb_bank_collision_amt(x, bank), m);
 
-        /* Smooth the transformed modal ratios at block rate so coefficient
-           updates do not step audibly when body parameters move in real time.
-           This keeps the synth responsive, but avoids zipper/block edges. */
+        /* Important: do NOT add a second time-domain glide here.
+           Body and damper parameters already arrive through the hardware control
+           conditioning path. Smoothing modal ratios again at the coefficient
+           stage causes audible post-note pitch drift, especially on release.
+           Coefficients should reflect the current parameter state directly. */
         for(int i = 0; i < n_modes; ++i){
-            float target = m[i].ratio_now;
-            float prev = ratio_prev[i];
-            if(prev <= 0.0001f || !isfinite(prev))
-                prev = target;
-            float delta = fabsf(target - prev);
-            float slew = JB_RATIO_SLEW_BASE +
-                         (JB_RATIO_SLEW_FAST - JB_RATIO_SLEW_BASE) * jb_clamp(delta * 0.6f, 0.f, 1.f);
-            m[i].ratio_now = prev + slew * (target - prev);
             if(m[i].ratio_now < 0.01f) m[i].ratio_now = 0.01f;
         }
     }
