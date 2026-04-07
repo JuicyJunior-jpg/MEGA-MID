@@ -1555,7 +1555,8 @@ float density_amt; jb_density_mode density_mode;
     float echo_spawn_acc;
     struct {
         uint8_t active;
-        float pos;
+        float posL;
+        float posR;
         float inc;
         float env;
         float env_inc;
@@ -2152,15 +2153,21 @@ static inline void jb_echo_process_stereo(t_juicy_bank_tilde *x, float *inoutL, 
                 if(!x->echo_grain[g].active){ slot = g; break; }
             }
             if(slot >= 0){
-                float r1 = jb_rng_uni(&x->rng);
-                float r2 = jb_rng_uni(&x->rng);
-                float ro = (r1 * 2.f - 1.f) * spray_samps;
-                float rp = (r2 * 2.f - 1.f) * 0.03f;
-                int ri = x->echo_w - (int)floorf(base_delay + ro);
-                while(ri < 0) ri += JB_ECHO_MAX_DELAY;
-                while(ri >= JB_ECHO_MAX_DELAY) ri -= JB_ECHO_MAX_DELAY;
+                float rL = jb_rng_uni(&x->rng);
+                float rR = jb_rng_uni(&x->rng);
+                float rP = jb_rng_uni(&x->rng);
+                float roL = (rL * 2.f - 1.f) * spray_samps;
+                float roR = (rR * 2.f - 1.f) * spray_samps;
+                float rp = (rP * 2.f - 1.f) * 0.03f;
+                int riL = x->echo_w - (int)floorf(base_delay + roL);
+                int riR = x->echo_w - (int)floorf(base_delay + roR);
+                while(riL < 0) riL += JB_ECHO_MAX_DELAY;
+                while(riL >= JB_ECHO_MAX_DELAY) riL -= JB_ECHO_MAX_DELAY;
+                while(riR < 0) riR += JB_ECHO_MAX_DELAY;
+                while(riR >= JB_ECHO_MAX_DELAY) riR -= JB_ECHO_MAX_DELAY;
                 x->echo_grain[slot].active = 1;
-                x->echo_grain[slot].pos = (float)ri;
+                x->echo_grain[slot].posL = (float)riL;
+                x->echo_grain[slot].posR = (float)riR;
                 x->echo_grain[slot].inc = jb_clamp(base_inc * (1.f + rp), 0.25f, 4.f);
                 x->echo_grain[slot].env = 0.f;
                 x->echo_grain[slot].env_inc = 1.f / (float)grain_len;
@@ -2179,15 +2186,20 @@ static inline void jb_echo_process_stereo(t_juicy_bank_tilde *x, float *inoutL, 
             if(tri < 0.f) tri = 0.f;
             float soft = tri * tri * (3.f - 2.f * tri);
             float win = tri + shape * (soft - tri);
-            int i0 = (int)x->echo_grain[g].pos;
-            int i1 = i0 + 1; if(i1 >= JB_ECHO_MAX_DELAY) i1 = 0;
-            float frac = x->echo_grain[g].pos - (float)i0;
-            float sL = x->echo_bufL[i0] + frac * (x->echo_bufL[i1] - x->echo_bufL[i0]);
-            float sR = x->echo_bufR[i0] + frac * (x->echo_bufR[i1] - x->echo_bufR[i0]);
+            int i0L = (int)x->echo_grain[g].posL;
+            int i1L = i0L + 1; if(i1L >= JB_ECHO_MAX_DELAY) i1L = 0;
+            float fracL = x->echo_grain[g].posL - (float)i0L;
+            int i0R = (int)x->echo_grain[g].posR;
+            int i1R = i0R + 1; if(i1R >= JB_ECHO_MAX_DELAY) i1R = 0;
+            float fracR = x->echo_grain[g].posR - (float)i0R;
+            float sL = x->echo_bufL[i0L] + fracL * (x->echo_bufL[i1L] - x->echo_bufL[i0L]);
+            float sR = x->echo_bufR[i0R] + fracR * (x->echo_bufR[i1R] - x->echo_bufR[i0R]);
             wetL += sL * win * x->echo_grain[g].gainL;
             wetR += sR * win * x->echo_grain[g].gainR;
-            x->echo_grain[g].pos += x->echo_grain[g].inc;
-            while(x->echo_grain[g].pos >= JB_ECHO_MAX_DELAY) x->echo_grain[g].pos -= JB_ECHO_MAX_DELAY;
+            x->echo_grain[g].posL += x->echo_grain[g].inc;
+            x->echo_grain[g].posR += x->echo_grain[g].inc;
+            while(x->echo_grain[g].posL >= JB_ECHO_MAX_DELAY) x->echo_grain[g].posL -= JB_ECHO_MAX_DELAY;
+            while(x->echo_grain[g].posR >= JB_ECHO_MAX_DELAY) x->echo_grain[g].posR -= JB_ECHO_MAX_DELAY;
             x->echo_grain[g].env += x->echo_grain[g].env_inc;
         }
 
@@ -6008,7 +6020,14 @@ static void jb_hw_apply_param_value(t_juicy_bank_tilde *x, jb_hw_param_t pid, fl
         case JB_HW_PARAM_ECHO_SIZE: x->echo_size = jb_clamp(value, 0.f, 1.f); break;
         case JB_HW_PARAM_ECHO_DENSITY: x->echo_density = jb_clamp(value, 0.f, 1.f); break;
         case JB_HW_PARAM_ECHO_SPRAY: x->echo_spray = jb_clamp(value, 0.f, 1.f); break;
-        case JB_HW_PARAM_ECHO_PITCH: x->echo_pitch = jb_clamp(value, -1.f, 1.f); break;
+        case JB_HW_PARAM_ECHO_PITCH: {
+            float pitchv = jb_clamp(value, -1.f, 1.f);
+            if(x->wf.shift_held){
+                pitchv = floorf(pitchv * 12.f + (pitchv >= 0.f ? 0.5f : -0.5f)) / 12.f;
+                pitchv = jb_clamp(pitchv, -1.f, 1.f);
+            }
+            x->echo_pitch = pitchv;
+        } break;
         case JB_HW_PARAM_ECHO_SHAPE: x->echo_shape = jb_clamp(value, 0.f, 1.f); break;
         case JB_HW_PARAM_ECHO_FEEDBACK: x->echo_feedback = jb_clamp(value, 0.f, 1.f); break;
         case JB_HW_PARAM_SAT_DRIVE: x->sat_drive = jb_clamp(value, 0.f, 1.f); break;
