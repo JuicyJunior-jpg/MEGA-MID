@@ -196,6 +196,18 @@ static inline float jb_unscurve(float y){
     }
     return t;
 }
+static inline float jb_pressure_curve_apply(float u, float curve){
+    u = jb_clamp(u, 0.f, 1.f);
+    curve = jb_clamp(curve, -1.f, 1.f);
+    if (curve > 0.f){
+        float g = 1.f + curve * 4.f;
+        return powf(u, g);
+    } else if (curve < 0.f){
+        float g = 1.f + (-curve) * 4.f;
+        return 1.f - powf(1.f - u, g);
+    }
+    return u;
+}
 static inline float jb_ctrl_bipolar_from_knob_or_direct(float f){
     /* For bipolar parameters, 0..1 from a hardware knob should span -1..+1.
        Values outside 0..1 are treated as already-direct. */
@@ -296,6 +308,7 @@ typedef enum {
     JB_PAGE_MOD_LFO1,
     JB_PAGE_MOD_LFO2,
     JB_PAGE_VELOCITY,
+    JB_PAGE_PRESSURE,
     JB_PAGE_GLOBAL_EDIT,
     JB_PAGE_RESONATOR_EDIT,
     JB_PAGE_PRESET,
@@ -376,6 +389,12 @@ typedef enum {
     JB_HW_PARAM_VEL_AMOUNT,
     JB_HW_PARAM_VEL_BANK,
     JB_HW_PARAM_VEL_TARGET,
+    JB_HW_PARAM_PRESS_AMOUNT,
+    JB_HW_PARAM_PRESS_BANK,
+    JB_HW_PARAM_PRESS_TARGET,
+    JB_HW_PARAM_PRESS_THRESH,
+    JB_HW_PARAM_PRESS_DZ,
+    JB_HW_PARAM_PRESS_CURVE,
     JB_HW_PARAM_BANK_SELECT,
     JB_HW_PARAM_OCTAVE,
     JB_HW_PARAM_SEMITONE,
@@ -470,6 +489,13 @@ typedef struct _jb_preset {
     float   velmap_amount;
     int     velmap_target_bank;
     uint8_t velmap_on[JB_VELMAP_N_TARGETS];
+
+    float pressure_amount;
+    int   pressure_target_bank;
+    int   pressure_target_index;
+    float pressure_threshold;
+    float pressure_deadzone;
+    float pressure_curve;
 } jb_preset_t;
 
 typedef struct { unsigned int s; } jb_rng_t;
@@ -1094,7 +1120,7 @@ static const jb_page_family_t jb_page_family_map[JB_PAGE_COUNT] = {
     JB_FAMILY_PLAY, JB_FAMILY_PLAY,
     JB_FAMILY_BODY, JB_FAMILY_BODY, JB_FAMILY_BODY, JB_FAMILY_BODY, JB_FAMILY_BODY,
     JB_FAMILY_EXCITER, JB_FAMILY_EXCITER, JB_FAMILY_EXCITER,
-    JB_FAMILY_MOD, JB_FAMILY_MOD, JB_FAMILY_MOD, JB_FAMILY_MOD,
+    JB_FAMILY_MOD, JB_FAMILY_MOD, JB_FAMILY_MOD, JB_FAMILY_MOD, JB_FAMILY_MOD,
     JB_FAMILY_EDIT,
     JB_FAMILY_PRESET
 };
@@ -1113,6 +1139,7 @@ static const jb_hw_param_t jb_page_param_map[JB_PAGE_COUNT][6] = {
     [JB_PAGE_MOD_LFO1] =    { JB_HW_PARAM_LFO_BANK, JB_HW_PARAM_LFO_TARGET, JB_HW_PARAM_LFO_SHAPE, JB_HW_PARAM_LFO_RATE, JB_HW_PARAM_LFO_MODE, JB_HW_PARAM_LFO_AMOUNT },
     [JB_PAGE_MOD_LFO2] =    { JB_HW_PARAM_LFO_BANK, JB_HW_PARAM_LFO_TARGET, JB_HW_PARAM_LFO_SHAPE, JB_HW_PARAM_LFO_RATE, JB_HW_PARAM_LFO_MODE, JB_HW_PARAM_LFO_AMOUNT },
     [JB_PAGE_VELOCITY] =    { JB_HW_PARAM_VEL_BANK, JB_HW_PARAM_VEL_TARGET, JB_HW_PARAM_VEL_AMOUNT, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE },
+    [JB_PAGE_PRESSURE] =    { JB_HW_PARAM_PRESS_BANK, JB_HW_PARAM_PRESS_TARGET, JB_HW_PARAM_PRESS_AMOUNT, JB_HW_PARAM_PRESS_THRESH, JB_HW_PARAM_PRESS_DZ, JB_HW_PARAM_PRESS_CURVE },
     [JB_PAGE_GLOBAL_EDIT] = { JB_HW_PARAM_BANK_SELECT, JB_HW_PARAM_OCTAVE, JB_HW_PARAM_SEMITONE, JB_HW_PARAM_TUNE, JB_HW_PARAM_PARTIALS, JB_HW_PARAM_NONE },
     [JB_PAGE_RESONATOR_EDIT]={ JB_HW_PARAM_RESONATOR_INDEX, JB_HW_PARAM_RATIO, JB_HW_PARAM_GAIN, JB_HW_PARAM_DECAY, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE },
     [JB_PAGE_PRESET] =      { JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE }
@@ -1165,6 +1192,12 @@ static const jb_hw_param_spec_t jb_hw_param_specs[] = {
     [JB_HW_PARAM_VEL_AMOUNT]      = { "VELA",  -1.f,   1.f,   0 },
     [JB_HW_PARAM_VEL_BANK]        = { "BANK",   1.f,   3.f,   1 },
     [JB_HW_PARAM_VEL_TARGET]      = { "VELT",   0.f,  12.f,   1 },
+    [JB_HW_PARAM_PRESS_AMOUNT]    = { "PAMT",  -1.f,   1.f,   0 },
+    [JB_HW_PARAM_PRESS_BANK]      = { "BANK",   1.f,   3.f,   1 },
+    [JB_HW_PARAM_PRESS_TARGET]    = { "PTGT",   0.f,  12.f,   1 },
+    [JB_HW_PARAM_PRESS_THRESH]    = { "THR",    0.f,   1.f,   0 },
+    [JB_HW_PARAM_PRESS_DZ]        = { "DZ",     0.f,   1.f,   0 },
+    [JB_HW_PARAM_PRESS_CURVE]     = { "CURV",  -1.f,   1.f,   0 },
     [JB_HW_PARAM_BANK_SELECT]     = { "BANK",   1.f,   2.f,   1 },
     [JB_HW_PARAM_OCTAVE]          = { "OCTV",  -2.f,   2.f,   1 },
     [JB_HW_PARAM_SEMITONE]        = { "SEMI", -12.f,  12.f,   1 },
@@ -1293,7 +1326,11 @@ static void juicy_bank_tilde_encoder_press(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_encoder_left(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_encoder_right(t_juicy_bank_tilde *x, t_floatarg f);
 static void juicy_bank_tilde_pressure(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_pressure_amount(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_pressure_target_bank(t_juicy_bank_tilde *x, t_floatarg f);
+static void juicy_bank_tilde_pressure_target(t_juicy_bank_tilde *x, t_symbol *s);
 static void jb_hw_vel_target_set_exact(t_juicy_bank_tilde *x, t_symbol *s);
+static void jb_hw_pressure_target_set_exact(t_juicy_bank_tilde *x, t_symbol *s);
 static void jb_hw_preset_begin_naming(t_juicy_bank_tilde *x);
 static inline int jb_preset_index_from_char(char c);
 static inline char jb_preset_char_from_index(int idx);
@@ -1304,6 +1341,7 @@ static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t 
 static void jb_screen_emit_full(t_juicy_bank_tilde *x);
 static void jb_ui_clock_tick(t_juicy_bank_tilde *x);
 static void jb_mark_patch_dirty(t_juicy_bank_tilde *x);
+static inline int jb_velmap_target_allowed(t_symbol *s);
 static void jb_set_preset_feedback(t_juicy_bank_tilde *x, int code);
 static void jb_compare_capture_from_slot(t_juicy_bank_tilde *x, int slot);
 static int jb_preset_find_next_used(const t_juicy_bank_tilde *x, int start, int dir);
@@ -1525,6 +1563,14 @@ float density_amt; jb_density_mode density_mode;
     int       velmap_target_bank;    // 0=A,1=B,2=BOTH
     t_symbol *velmap_target;         // symbol selector
 
+    float     pressure_amount;
+    int       pressure_target_bank;
+    t_symbol *pressure_target;
+    uint8_t   pressure_on[JB_VELMAP_N_TARGETS];
+    float     pressure_threshold;
+    float     pressure_deadzone;
+    float     pressure_curve;
+
         uint8_t   velmap_on[JB_VELMAP_N_TARGETS];         // toggle map of enabled velocity-mapping targets (see enum jb_velmap_idx)
     jb_tgtproxy *tgtproxy_velmap;
     t_inlet  *in_velmap_amount;
@@ -1553,6 +1599,7 @@ jb_preset_t compare_preset;      // compare/revert snapshot
     jb_workflow_state_t wf;
     jb_hw_pot_state_t hw_pots[6];
     float hw_pressure;
+    float hw_pressure_smoothed;
     t_clock *ui_clock;
 
    // LFO1/LFO2 targets
@@ -1614,6 +1661,46 @@ jb_preset_t compare_preset;      // compare/revert snapshot
 
 // --- CHECKPOINT (bake) revert buffer ---
 } t_juicy_bank_tilde;
+
+static inline float jb_pressure_effective(const t_juicy_bank_tilde *x){
+    if (!x) return 0.f;
+    float p = jb_clamp(x->hw_pressure_smoothed, 0.f, 1.f);
+    float dz = jb_clamp(x->pressure_deadzone, 0.f, 0.95f);
+    if (p <= dz) return 0.f;
+    float u = (p - dz) / (1.f - dz);
+    return jb_pressure_curve_apply(u, x->pressure_curve);
+}
+
+static inline float jb_pressure_delta(const t_juicy_bank_tilde *x){
+    if (!x) return 0.f;
+    return jb_clamp(x->pressure_amount, -1.f, 1.f) * jb_pressure_effective(x);
+}
+
+static inline void jb_pressure_rebuild_flags(t_juicy_bank_tilde *x, t_symbol *base){
+    if (!x) return;
+    for (int i = 0; i < JB_VELMAP_N_TARGETS; ++i) x->pressure_on[i] = 0;
+    x->pressure_target = jb_sym_none;
+    if (!base || jb_target_is_none(base)) return;
+    if (!jb_velmap_target_allowed(base)) return;
+    x->pressure_target = base;
+    int idx = jb_hw_vel_target_to_index(base);
+    int bm = jb_target_bank_mode_clamp(x->pressure_target_bank);
+    switch(idx){
+        case 1: if(bm != 1) x->pressure_on[JB_VEL_MASTER_1] = 1; if(bm != 0) x->pressure_on[JB_VEL_MASTER_2] = 1; break;
+        case 2: if(bm != 1) x->pressure_on[JB_VEL_BRIGHTNESS_1] = 1; if(bm != 0) x->pressure_on[JB_VEL_BRIGHTNESS_2] = 1; break;
+        case 3: if(bm != 1) x->pressure_on[JB_VEL_POSITION_1] = 1; if(bm != 0) x->pressure_on[JB_VEL_POSITION_2] = 1; break;
+        case 4: if(bm != 1) x->pressure_on[JB_VEL_PICKUP_1] = 1; if(bm != 0) x->pressure_on[JB_VEL_PICKUP_2] = 1; break;
+        case 5: x->pressure_on[JB_VEL_ADSR_ATTACK] = 1; break;
+        case 6: x->pressure_on[JB_VEL_ADSR_DECAY] = 1; break;
+        case 7: x->pressure_on[JB_VEL_ADSR_RELEASE] = 1; break;
+        case 8: x->pressure_on[JB_VEL_IMP_SHAPE] = 1; break;
+        case 9: x->pressure_on[JB_VEL_NOISE_TIMBRE] = 1; break;
+        case 10: if(bm != 1) x->pressure_on[JB_VEL_BELL_Z_D1_B1] = 1; if(bm != 0) x->pressure_on[JB_VEL_BELL_Z_D1_B2] = 1; break;
+        case 11: if(bm != 1) x->pressure_on[JB_VEL_BELL_Z_D2_B1] = 1; if(bm != 0) x->pressure_on[JB_VEL_BELL_Z_D2_B2] = 1; break;
+        case 12: if(bm != 1) x->pressure_on[JB_VEL_BELL_Z_D3_B1] = 1; if(bm != 0) x->pressure_on[JB_VEL_BELL_Z_D3_B2] = 1; break;
+        default: x->pressure_target = jb_sym_none; break;
+    }
+}
 
 // ---------- LFO runtime update (per block) ----------
 // Updates both LFOs for this block. Outputs live in x->lfo_val[0..JB_N_LFO-1],
@@ -1825,9 +1912,12 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
     for(int i=0; i<x->max_voices; ++i){
         jb_exc_voice_t *e = &x->v[i].exc;
 
+        float pd = jb_pressure_delta(x);
+
         // ----- Noise timbre/color (0..1) -----
         float color = (e->noise_timbre_v >= 0.f) ? jb_clamp(e->noise_timbre_v, 0.f, 1.f)
                                                  : jb_clamp(x->exc_shape, 0.f, 1.f);
+        if (pd != 0.f && x->pressure_on[JB_VEL_NOISE_TIMBRE]) color = jb_clamp(color + pd, 0.f, 1.f);
         float slope_db_per_oct = -6.f + 12.f * color;
         float slope_db = slope_db_per_oct * JB_EXC_COLOR_OCT_SPAN;
         float gH = powf(10.f,  slope_db / 20.f);
@@ -1847,6 +1937,7 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
         // ----- Impulse shape (0..1) -----
         float s = (e->imp_shape_v >= 0.f) ? jb_clamp(e->imp_shape_v, 0.f, 1.f)
                                           : jb_clamp(x->exc_imp_shape, 0.f, 1.f);
+        if (pd != 0.f && x->pressure_on[JB_VEL_IMP_SHAPE]) s = jb_clamp(s + pd, 0.f, 1.f);
 
         float lp_norm, hp_norm;
         if (s <= 0.5f){
@@ -1874,6 +1965,11 @@ static void jb_exc_update_block(t_juicy_bank_tilde *x){
         float a_ms = (e->a_ms_v >= 0.f) ? e->a_ms_v : a_ms_base;
         float d_ms = (e->d_ms_v >= 0.f) ? e->d_ms_v : d_ms_base;
         float r_ms = (e->r_ms_v >= 0.f) ? e->r_ms_v : r_ms_base;
+        if (pd != 0.f){
+            if (x->pressure_on[JB_VEL_ADSR_ATTACK])  a_ms = jb_clamp(a_ms * (1.f + pd), 0.f, 10000.f);
+            if (x->pressure_on[JB_VEL_ADSR_DECAY])   d_ms = jb_clamp(d_ms * (1.f + pd), 0.f, 10000.f);
+            if (x->pressure_on[JB_VEL_ADSR_RELEASE]) r_ms = jb_clamp(r_ms * (1.f + pd), 0.f, 10000.f);
+        }
 
         e->env.curveA = aC;
         e->env.curveD = dC;
@@ -2272,6 +2368,20 @@ static inline float jb_bell_zeta_eval(const t_juicy_bank_tilde *x, const jb_voic
     for (int k = 0; k < JB_N_DAMPERS; ++k){
         float zeta_p = (v && v->velmap_bell_zeta_on[bank][k]) ? v->velmap_bell_zeta[bank][k]
                      : jb_bank_bell_peak_zeta(x, bank, k);
+        {
+            float pd = jb_pressure_delta(x);
+            if (pd != 0.f){
+                int match = 0;
+                if (bank == 0 && ((k == 0 && x->pressure_on[JB_VEL_BELL_Z_D1_B1]) || (k == 1 && x->pressure_on[JB_VEL_BELL_Z_D2_B1]) || (k == 2 && x->pressure_on[JB_VEL_BELL_Z_D3_B1]))) match = 1;
+                if (bank == 1 && ((k == 0 && x->pressure_on[JB_VEL_BELL_Z_D1_B2]) || (k == 1 && x->pressure_on[JB_VEL_BELL_Z_D2_B2]) || (k == 2 && x->pressure_on[JB_VEL_BELL_Z_D3_B2]))) match = 1;
+                if (match){
+                    float u = x->bell_peak_zeta_param[bank][k];
+                    if (u < 0.f) u = 0.5915f;
+                    u = jb_clamp(u + pd, 0.f, 1.f);
+                    zeta_p = jb_bell_map_norm_to_zeta(u);
+                }
+            }
+        }
         if (!isfinite(zeta_p) || zeta_p <= 0.f) continue; // treat <=0 as "off"
 
         float peak_hz = jb_bank_bell_peak_hz(x, bank, k);
@@ -2709,6 +2819,26 @@ static inline void jb_voice_refresh_dirty_flags(const t_juicy_bank_tilde *x, jb_
     float pos_base = (v->velmap_pos[bank] >= 0.f) ? v->velmap_pos[bank] : jb_bank_excite_pos(x, bank);
     float pickup_base = (v->velmap_pickup[bank] >= 0.f) ? v->velmap_pickup[bank] : jb_bank_pickup_pos(x, bank);
     float brightness_v = bank ? v->brightness_v2 : v->brightness_v;
+    if (pressure_add != 0.f){
+        if (bank == 0 && x->pressure_on[JB_VEL_BRIGHTNESS_1]) brightness_v = jb_clamp(brightness_v + pressure_add, -1.f, 1.f);
+        if (bank == 1 && x->pressure_on[JB_VEL_BRIGHTNESS_2]) brightness_v = jb_clamp(brightness_v + pressure_add, -1.f, 1.f);
+    }
+    float pressure_add = jb_pressure_delta(x);
+    if (pressure_add != 0.f){
+        if (bank == 0){
+            if (x->pressure_on[JB_VEL_POSITION_1]) pos_base = jb_clamp(pos_base + pressure_add, 0.f, 1.f);
+            if (x->pressure_on[JB_VEL_PICKUP_1]) pickup_base = jb_clamp(pickup_base + pressure_add, 0.f, 1.f);
+            if (x->pressure_on[JB_VEL_BRIGHTNESS_1]) brightness_v = jb_clamp(brightness_v + pressure_add, -1.f, 1.f);
+        } else {
+            if (x->pressure_on[JB_VEL_POSITION_2]) pos_base = jb_clamp(pos_base + pressure_add, 0.f, 1.f);
+            if (x->pressure_on[JB_VEL_PICKUP_2]) pickup_base = jb_clamp(pickup_base + pressure_add, 0.f, 1.f);
+            if (x->pressure_on[JB_VEL_BRIGHTNESS_2]) brightness_v = jb_clamp(brightness_v + pressure_add, -1.f, 1.f);
+        }
+        if ((bank == 0 && (x->pressure_on[JB_VEL_BELL_Z_D1_B1] || x->pressure_on[JB_VEL_BELL_Z_D2_B1] || x->pressure_on[JB_VEL_BELL_Z_D3_B1])) ||
+            (bank == 1 && (x->pressure_on[JB_VEL_BELL_Z_D1_B2] || x->pressure_on[JB_VEL_BELL_Z_D2_B2] || x->pressure_on[JB_VEL_BELL_Z_D3_B2]))){
+            v->coeff_dirty[bank] = 1u;
+        }
+    }
     float decay_pitch_mul = bank ? v->decay_pitch_mul2 : v->decay_pitch_mul;
     float decay_vel_mul   = bank ? v->decay_vel_mul2   : v->decay_vel_mul;
     float f0_eff = v->f0;
@@ -2956,6 +3086,16 @@ static void jb_update_voice_gains_bank(const t_juicy_bank_tilde *x, jb_voice_t *
     // then RMS-normalize per channel to keep level stable.
     float pos_base = (v->velmap_pos[bank] >= 0.f) ? v->velmap_pos[bank] : jb_bank_excite_pos(x, bank);
     float pickup_base = (v->velmap_pickup[bank] >= 0.f) ? v->velmap_pickup[bank] : jb_bank_pickup_pos(x, bank);
+    float pressure_add = jb_pressure_delta(x);
+    if (pressure_add != 0.f){
+        if (bank == 0){
+            if (x->pressure_on[JB_VEL_POSITION_1]) pos_base = jb_clamp(pos_base + pressure_add, 0.f, 1.f);
+            if (x->pressure_on[JB_VEL_PICKUP_1]) pickup_base = jb_clamp(pickup_base + pressure_add, 0.f, 1.f);
+        } else {
+            if (x->pressure_on[JB_VEL_POSITION_2]) pos_base = jb_clamp(pos_base + pressure_add, 0.f, 1.f);
+            if (x->pressure_on[JB_VEL_PICKUP_2]) pickup_base = jb_clamp(pickup_base + pressure_add, 0.f, 1.f);
+        }
+    }
     float pos    = jb_clamp(pos_base, 0.f, 1.f);
     float pickup = jb_clamp(pickup_base, 0.f, 1.f);
 
@@ -3669,6 +3809,15 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         if (v->gain_dirty[1]) { jb_update_voice_gains2(x, v);  v->gain_dirty[1]  = 0u; }
     }
 
+    // pressure smoothing / shaping (continuous expression)
+    {
+        float target = jb_clamp(x->hw_pressure, 0.f, 1.f);
+        float tau_s = 0.02f;
+        float alpha = 1.f - expf(-(float)n / (x->sr * tau_s + 1.0e-9f));
+        alpha = jb_clamp(alpha, 0.01f, 1.f);
+        x->hw_pressure_smoothed += alpha * (target - x->hw_pressure_smoothed);
+    }
+
     // constants
 
     // Process per-voice, sample-major so feedback uses only a 2-sample delay (no block latency)
@@ -3727,6 +3876,14 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         // Velocity mapping -> per-voice bank gain (additive, clamped)
         if (v->velmap_master_add[0] != 0.f) bank_gain1 = jb_clamp(bank_gain1 + v->velmap_master_add[0], 0.f, 1.f);
         if (v->velmap_master_add[1] != 0.f) bank_gain2 = jb_clamp(bank_gain2 + v->velmap_master_add[1], 0.f, 1.f);
+
+        {
+            float pd = jb_pressure_delta(x);
+            if (pd != 0.f){
+                if (x->pressure_on[JB_VEL_MASTER_1]) bank_gain1 = jb_clamp(bank_gain1 + pd * 3.f, 0.f, 4.f);
+                if (x->pressure_on[JB_VEL_MASTER_2]) bank_gain2 = jb_clamp(bank_gain2 + pd * 3.f, 0.f, 4.f);
+            }
+        }
 
         // Pan is intentionally not used in this synth anymore.
 
@@ -4101,6 +4258,17 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
     for (int i = 0; i < n; ++i){
         if (!jb_isfinitef(outL[i])) outL[i] = 0.f;
         if (!jb_isfinitef(outR[i])) outR[i] = 0.f;
+    }
+
+    {
+        float pd = jb_pressure_delta(x);
+        if (pd > 0.f && (x->pressure_on[JB_VEL_MASTER_1] || x->pressure_on[JB_VEL_MASTER_2])){
+            float thr = jb_clamp(x->pressure_threshold, 0.05f, 0.99f);
+            for (int i = 0; i < n; ++i){
+                outL[i] = jb_softclip_thresh(outL[i], thr);
+                outR[i] = jb_softclip_thresh(outR[i], thr);
+            }
+        }
     }
 
     // ---------- SPACE (global stereo room) ----------
@@ -4745,6 +4913,21 @@ static void juicy_bank_tilde_velmap_amount(t_juicy_bank_tilde *x, t_floatarg f){
     x->velmap_amount = jb_clamp((float)f, -1.f, 1.f);
 }
 
+static void juicy_bank_tilde_pressure_amount(t_juicy_bank_tilde *x, t_floatarg f){
+    x->pressure_amount = jb_clamp((float)f, -1.f, 1.f);
+}
+
+static void juicy_bank_tilde_pressure_target_bank(t_juicy_bank_tilde *x, t_floatarg f){
+    x->pressure_target_bank = jb_target_bank_mode_from_param(f);
+    jb_pressure_rebuild_flags(x, x->pressure_target);
+}
+
+static void juicy_bank_tilde_pressure_target(t_juicy_bank_tilde *x, t_symbol *s){
+    if (!x) return;
+    if (!s || !jb_velmap_target_allowed(s)) s = jb_sym_none;
+    jb_pressure_rebuild_flags(x, s);
+}
+
 static void juicy_bank_tilde_velmap_target(t_juicy_bank_tilde *x, t_symbol *s){
     if (!x || !s) return;
     if (!jb_velmap_target_allowed(s)) s = jb_sym_none;
@@ -5251,6 +5434,7 @@ static const char *jb_screen_page_name(jb_page_t page){
         case JB_PAGE_MOD_LFO1: return "MOD";
         case JB_PAGE_MOD_LFO2: return "MOD";
         case JB_PAGE_VELOCITY: return "MOD";
+        case JB_PAGE_PRESSURE: return "MOD";
         case JB_PAGE_GLOBAL_EDIT: return "EDIT";
         case JB_PAGE_RESONATOR_EDIT: return "EDIT";
         case JB_PAGE_PRESET: return "PRESET";
@@ -5273,6 +5457,7 @@ static const char *jb_screen_subpage_name(const t_juicy_bank_tilde *x){
         case JB_PAGE_MOD_LFO1: return "LFO1";
         case JB_PAGE_MOD_LFO2: return "LFO2";
         case JB_PAGE_VELOCITY: return "VEL";
+        case JB_PAGE_PRESSURE: return "PRESS";
         case JB_PAGE_GLOBAL_EDIT: return "GLOBAL";
         case JB_PAGE_RESONATOR_EDIT: return "RES";
         case JB_PAGE_PRESET: return (x->wf.ui_mode == JB_UI_SAVE_MODE || x->preset_mode != JB_PRESET_MODE_NORMAL) ? "SAVE" : "LOAD";
@@ -5536,6 +5721,12 @@ static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t 
         case JB_HW_PARAM_VEL_AMOUNT: return x->velmap_amount;
         case JB_HW_PARAM_VEL_BANK: return jb_target_bank_mode_to_param(x->velmap_target_bank);
         case JB_HW_PARAM_VEL_TARGET: return (float)jb_hw_vel_target_to_index(x->velmap_target);
+        case JB_HW_PARAM_PRESS_AMOUNT: return x->pressure_amount;
+        case JB_HW_PARAM_PRESS_BANK: return jb_target_bank_mode_to_param(x->pressure_target_bank);
+        case JB_HW_PARAM_PRESS_TARGET: return (float)jb_hw_vel_target_to_index(x->pressure_target);
+        case JB_HW_PARAM_PRESS_THRESH: return x->pressure_threshold;
+        case JB_HW_PARAM_PRESS_DZ: return x->pressure_deadzone;
+        case JB_HW_PARAM_PRESS_CURVE: return x->pressure_curve;
         case JB_HW_PARAM_BANK_SELECT: return (float)(x->edit_bank + 1);
         case JB_HW_PARAM_OCTAVE: return (float)x->bank_octave[b];
         case JB_HW_PARAM_SEMITONE: return (float)x->bank_semitone[b];
@@ -5600,6 +5791,18 @@ static void jb_hw_apply_param_value(t_juicy_bank_tilde *x, jb_hw_param_t pid, fl
             else juicy_bank_tilde_lfo2_target(x, tgt);
         } break;
         case JB_HW_PARAM_VEL_AMOUNT: juicy_bank_tilde_velmap_amount(x, value); break;
+        case JB_HW_PARAM_PRESS_AMOUNT: juicy_bank_tilde_pressure_amount(x, value); break;
+        case JB_HW_PARAM_PRESS_BANK: {
+            x->pressure_target_bank = jb_target_bank_mode_from_param(value);
+            jb_hw_pressure_target_set_exact(x, jb_hw_vel_target_symbol_from_index(jb_hw_vel_target_to_index(x->pressure_target)));
+        } break;
+        case JB_HW_PARAM_PRESS_TARGET: {
+            int idx = (int)jb_clamp(floorf(value + 0.5f), 0.f, 12.f);
+            jb_hw_pressure_target_set_exact(x, jb_hw_vel_target_symbol_from_index(idx));
+        } break;
+        case JB_HW_PARAM_PRESS_THRESH: x->pressure_threshold = jb_clamp(value, 0.f, 1.f); break;
+        case JB_HW_PARAM_PRESS_DZ: x->pressure_deadzone = jb_clamp(value, 0.f, 1.f); break;
+        case JB_HW_PARAM_PRESS_CURVE: x->pressure_curve = jb_clamp(value, -1.f, 1.f); break;
         case JB_HW_PARAM_VEL_BANK: {
             x->velmap_target_bank = jb_target_bank_mode_from_param(value);
             int idx = jb_hw_vel_target_to_index(x->velmap_target);
@@ -5907,10 +6110,10 @@ static void juicy_bank_tilde_encoder(t_juicy_bank_tilde *x, t_floatarg f){
             int idx = (x->wf.current_page == JB_PAGE_EXCITER_B) ? 1 : (x->wf.current_page == JB_PAGE_SPACE ? 2 : 0);
             idx = (idx + delta + 3) % 3; jb_hw_set_page(x, seq[idx]);
         } break;
-        case JB_PAGE_MOD_LFO1: case JB_PAGE_MOD_LFO2: case JB_PAGE_VELOCITY: {
-            jb_page_t seq[4] = { JB_PAGE_MOD_LFO1, JB_PAGE_MOD_LFO2, JB_PAGE_VELOCITY, JB_PAGE_GLOBAL_EDIT };
-            int idx = 0; if(x->wf.current_page == JB_PAGE_MOD_LFO2) idx = 1; else if(x->wf.current_page == JB_PAGE_VELOCITY) idx = 2;
-            idx = (idx + delta + 4) % 4; jb_hw_set_page(x, seq[idx]);
+        case JB_PAGE_MOD_LFO1: case JB_PAGE_MOD_LFO2: case JB_PAGE_VELOCITY: case JB_PAGE_PRESSURE: {
+            jb_page_t seq[5] = { JB_PAGE_MOD_LFO1, JB_PAGE_MOD_LFO2, JB_PAGE_VELOCITY, JB_PAGE_PRESSURE, JB_PAGE_GLOBAL_EDIT };
+            int idx = 0; if(x->wf.current_page == JB_PAGE_MOD_LFO2) idx = 1; else if(x->wf.current_page == JB_PAGE_VELOCITY) idx = 2; else if(x->wf.current_page == JB_PAGE_PRESSURE) idx = 3; else if(x->wf.current_page == JB_PAGE_GLOBAL_EDIT) idx = 4;
+            idx = (idx + delta + 5) % 5; jb_hw_set_page(x, seq[idx]);
         } break;
         case JB_PAGE_GLOBAL_EDIT:
             x->wf.global_edit_cursor += delta;
@@ -6149,6 +6352,14 @@ x->excite_pos2    = x->excite_pos;
     x->velmap_target = jb_sym_none;
     for (int i = 0; i < JB_VELMAP_N_TARGETS; ++i) x->velmap_on[i] = 0;
 
+    x->pressure_amount = 0.f;
+    x->pressure_target_bank = 2;
+    x->pressure_target = jb_sym_none;
+    for (int i = 0; i < JB_VELMAP_N_TARGETS; ++i) x->pressure_on[i] = 0;
+    x->pressure_threshold = 0.95f;
+    x->pressure_deadzone = 0.05f;
+    x->pressure_curve = 0.f;
+
 
     // clear modulation matrix (bank 1 + bank 2)
     for(int i=0;i<JB_N_MODSRC;i++)
@@ -6195,6 +6406,7 @@ x->excite_pos2    = x->excite_pos;
     x->wf.highlighted_pot = -1;
     x->wf.highlight_ticks = 0;
     x->hw_pressure = 0.f;
+    x->hw_pressure_smoothed = 0.f;
     x->patch_dirty = 0;
     x->preset_feedback = JB_FEEDBACK_NONE;
     x->preset_feedback_ticks = 0;
@@ -6388,6 +6600,12 @@ static void jb_hw_vel_target_set_exact(t_juicy_bank_tilde *x, t_symbol *s){
     }
 }
 
+static void jb_hw_pressure_target_set_exact(t_juicy_bank_tilde *x, t_symbol *s){
+    if (!x) return;
+    if (!s || !jb_velmap_target_allowed(s)) s = jb_sym_none;
+    jb_pressure_rebuild_flags(x, s);
+}
+
 static void jb_hw_preset_begin_naming(t_juicy_bank_tilde *x){
     if (!x) return;
     x->preset_mode = JB_PRESET_MODE_NAMING;
@@ -6541,6 +6759,13 @@ static void jb_preset_snapshot(const t_juicy_bank_tilde *x, jb_preset_t *p){
     for (int ti = 0; ti < JB_VELMAP_N_TARGETS; ++ti){
         p->velmap_on[ti] = x->velmap_on[ti];
     }
+
+    p->pressure_amount = x->pressure_amount;
+    p->pressure_target_bank = x->pressure_target_bank;
+    p->pressure_target_index = jb_hw_vel_target_to_index(x->pressure_target);
+    p->pressure_threshold = x->pressure_threshold;
+    p->pressure_deadzone = x->pressure_deadzone;
+    p->pressure_curve = x->pressure_curve;
 }
 
 static void jb_preset_store(t_juicy_bank_tilde *x, int slot, const char *name_or_null){
@@ -6666,6 +6891,13 @@ static void jb_preset_apply(t_juicy_bank_tilde *x, const jb_preset_t *p){
             }
         }
     }
+
+    x->pressure_amount = p->pressure_amount;
+    x->pressure_target_bank = jb_target_bank_mode_clamp(p->pressure_target_bank);
+    x->pressure_threshold = jb_clamp(p->pressure_threshold, 0.f, 1.f);
+    x->pressure_deadzone = jb_clamp(p->pressure_deadzone, 0.f, 1.f);
+    x->pressure_curve = jb_clamp(p->pressure_curve, -1.f, 1.f);
+    jb_hw_pressure_target_set_exact(x, jb_hw_vel_target_symbol_from_index(p->pressure_target_index));
 }
 
 static void juicy_bank_tilde_preset_char(t_juicy_bank_tilde *x, t_floatarg f){
@@ -7138,6 +7370,9 @@ class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_preset_char, 
     class_addbang(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_bang);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_ui_test, gensym("ui_test"), 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pressure, gensym("pressure"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pressure_amount, gensym("pressure_amount"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pressure_target_bank, gensym("pressure_target_bank"), A_DEFFLOAT, 0);
+    class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_pressure_target, gensym("pressure_target"), A_SYMBOL, 0);
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_partials, gensym("partials"), A_DEFFLOAT, 0);
     class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_master,   gensym("master"),   A_DEFFLOAT, 0);
 class_addmethod(juicy_bank_tilde_class, (t_method)juicy_bank_tilde_octave,   gensym("octave"),   A_DEFFLOAT, 0);
