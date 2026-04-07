@@ -139,6 +139,10 @@ static void jb_screen_symbols_init(void){
 #define JB_SPACE_AP_MAX    700
 #define JB_SPACE_PREDELAY_MAX 24000
 
+// ---------- ECHO (global granular delay) ----------
+#define JB_ECHO_MAX_DELAY 96000
+#define JB_ECHO_MAX_GRAINS 12
+
 // ---------- lookup-table tuning ----------
 #define JB_SINPI_LUT_SIZE      4096
 #define JB_BRIGHT_LUT_B_SIZE    256
@@ -305,6 +309,7 @@ typedef enum {
     JB_PAGE_EXCITER_A,
     JB_PAGE_EXCITER_B,
     JB_PAGE_SPACE,
+    JB_PAGE_ECHO,
     JB_PAGE_SATURATION,
     JB_PAGE_MOD_LFO1,
     JB_PAGE_MOD_LFO2,
@@ -380,12 +385,18 @@ typedef enum {
     JB_HW_PARAM_SPACE_DIFFUSION,
     JB_HW_PARAM_SPACE_DAMPING,
     JB_HW_PARAM_SPACE_ONSET,
+    JB_HW_PARAM_ECHO_SIZE,
+    JB_HW_PARAM_ECHO_DENSITY,
+    JB_HW_PARAM_ECHO_SPRAY,
+    JB_HW_PARAM_ECHO_PITCH,
+    JB_HW_PARAM_ECHO_SHAPE,
+    JB_HW_PARAM_ECHO_FEEDBACK,
     JB_HW_PARAM_SAT_DRIVE,
     JB_HW_PARAM_SAT_THRESH,
     JB_HW_PARAM_SAT_CURVE,
     JB_HW_PARAM_SAT_ASYM,
     JB_HW_PARAM_SAT_TONE,
-    JB_HW_PARAM_SAT_COMP,
+    JB_HW_PARAM_SAT_WETDRY,
     JB_HW_PARAM_LFO_BANK,
     JB_HW_PARAM_LFO_TARGET,
     JB_HW_PARAM_LFO_SHAPE,
@@ -482,6 +493,14 @@ typedef struct _jb_preset {
     float exc_imp_shape;
     float exc_shape;
 
+    // echo
+    float echo_size;
+    float echo_density;
+    float echo_spray;
+    float echo_pitch;
+    float echo_shape;
+    float echo_feedback;
+
     // LFOs
     float lfo_index; // 1..2
     float lfo_shape_v[JB_N_LFO];
@@ -502,7 +521,7 @@ typedef struct _jb_preset {
     float sat_curve;
     float sat_asym;
     float sat_tone;
-    float sat_comp;
+    float sat_wetdry;
 
     float pressure_amount;
     int   pressure_target_bank;
@@ -1133,7 +1152,7 @@ static t_symbol *jb_sym_none         = NULL;
 static const jb_page_family_t jb_page_family_map[JB_PAGE_COUNT] = {
     JB_FAMILY_PLAY, JB_FAMILY_PLAY,
     JB_FAMILY_BODY, JB_FAMILY_BODY, JB_FAMILY_BODY, JB_FAMILY_BODY, JB_FAMILY_BODY,
-    JB_FAMILY_EXCITER, JB_FAMILY_EXCITER, JB_FAMILY_EXCITER, JB_FAMILY_EXCITER,
+    JB_FAMILY_EXCITER, JB_FAMILY_EXCITER, JB_FAMILY_EXCITER, JB_FAMILY_EXCITER, JB_FAMILY_EXCITER,
     JB_FAMILY_MOD, JB_FAMILY_MOD, JB_FAMILY_MOD, JB_FAMILY_MOD, JB_FAMILY_MOD,
     JB_FAMILY_EDIT,
     JB_FAMILY_PRESET
@@ -1150,7 +1169,8 @@ static const jb_hw_param_t jb_page_param_map[JB_PAGE_COUNT][6] = {
     [JB_PAGE_EXCITER_A] =   { JB_HW_PARAM_EXC_FADER, JB_HW_PARAM_EXC_ATTACK, JB_HW_PARAM_EXC_DECAY, JB_HW_PARAM_EXC_SUSTAIN, JB_HW_PARAM_EXC_RELEASE, JB_HW_PARAM_NOISE_COLOR },
     [JB_PAGE_EXCITER_B] =   { JB_HW_PARAM_IMPULSE_SHAPE, JB_HW_PARAM_EXC_ATTACK_CURVE, JB_HW_PARAM_EXC_DECAY_CURVE, JB_HW_PARAM_EXC_RELEASE_CURVE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE },
     [JB_PAGE_SPACE] =       { JB_HW_PARAM_SPACE_SIZE, JB_HW_PARAM_SPACE_DECAY, JB_HW_PARAM_SPACE_DIFFUSION, JB_HW_PARAM_SPACE_DAMPING, JB_HW_PARAM_SPACE_ONSET, JB_HW_PARAM_SPACE_WETDRY },
-    [JB_PAGE_SATURATION] =  { JB_HW_PARAM_SAT_DRIVE, JB_HW_PARAM_SAT_THRESH, JB_HW_PARAM_SAT_CURVE, JB_HW_PARAM_SAT_ASYM, JB_HW_PARAM_SAT_TONE, JB_HW_PARAM_SAT_COMP },
+    [JB_PAGE_ECHO] =        { JB_HW_PARAM_ECHO_SIZE, JB_HW_PARAM_ECHO_DENSITY, JB_HW_PARAM_ECHO_SPRAY, JB_HW_PARAM_ECHO_PITCH, JB_HW_PARAM_ECHO_SHAPE, JB_HW_PARAM_ECHO_FEEDBACK },
+    [JB_PAGE_SATURATION] =  { JB_HW_PARAM_SAT_DRIVE, JB_HW_PARAM_SAT_THRESH, JB_HW_PARAM_SAT_CURVE, JB_HW_PARAM_SAT_ASYM, JB_HW_PARAM_SAT_TONE, JB_HW_PARAM_SAT_WETDRY },
     [JB_PAGE_MOD_LFO1] =    { JB_HW_PARAM_LFO_BANK, JB_HW_PARAM_LFO_TARGET, JB_HW_PARAM_LFO_SHAPE, JB_HW_PARAM_LFO_RATE, JB_HW_PARAM_LFO_MODE, JB_HW_PARAM_LFO_AMOUNT },
     [JB_PAGE_MOD_LFO2] =    { JB_HW_PARAM_LFO_BANK, JB_HW_PARAM_LFO_TARGET, JB_HW_PARAM_LFO_SHAPE, JB_HW_PARAM_LFO_RATE, JB_HW_PARAM_LFO_MODE, JB_HW_PARAM_LFO_AMOUNT },
     [JB_PAGE_VELOCITY] =    { JB_HW_PARAM_VEL_BANK, JB_HW_PARAM_VEL_TARGET, JB_HW_PARAM_VEL_AMOUNT, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE },
@@ -1197,12 +1217,18 @@ static const jb_hw_param_spec_t jb_hw_param_specs[] = {
     [JB_HW_PARAM_SPACE_DIFFUSION] = { "DIFF",   0.f,   1.f,   0 },
     [JB_HW_PARAM_SPACE_DAMPING]   = { "DAMP",   0.f,   1.f,   0 },
     [JB_HW_PARAM_SPACE_ONSET]     = { "ONST",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_ECHO_SIZE]      = { "SIZE",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_ECHO_DENSITY]   = { "DENS",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_ECHO_SPRAY]     = { "SPRY",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_ECHO_PITCH]     = { "PITC",  -1.f,   1.f,   0 },
+    [JB_HW_PARAM_ECHO_SHAPE]     = { "SHAP",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_ECHO_FEEDBACK]  = { "FDBK",   0.f,   1.f,   0 },
     [JB_HW_PARAM_SAT_DRIVE]       = { "DRIV",   0.f,   1.f,   0 },
     [JB_HW_PARAM_SAT_THRESH]      = { "THR",    0.f,   1.f,   0 },
     [JB_HW_PARAM_SAT_CURVE]       = { "CURV",   0.f,   1.f,   0 },
     [JB_HW_PARAM_SAT_ASYM]        = { "ASYM",  -1.f,   1.f,   0 },
     [JB_HW_PARAM_SAT_TONE]        = { "TONE",  -1.f,   1.f,   0 },
-    [JB_HW_PARAM_SAT_COMP]        = { "COMP",   0.f,   2.f,   0 },
+    [JB_HW_PARAM_SAT_WETDRY]      = { "WET",   -1.f,   1.f,   0 },
     [JB_HW_PARAM_LFO_BANK]        = { "BANK",   1.f,   3.f,   1 },
     [JB_HW_PARAM_LFO_TARGET]      = { "TGT",    0.f,  10.f,   1 },
     [JB_HW_PARAM_LFO_SHAPE]       = { "SHAPE",  1.f,   5.f,   1 },
@@ -1514,6 +1540,29 @@ float density_amt; jb_density_mode density_mode;
     float space_ap_buf[JB_SPACE_NAP][JB_SPACE_AP_MAX];
     int   space_ap_w[JB_SPACE_NAP];
 
+    // ECHO parameters/state (global granular delay)
+    float echo_size;
+    float echo_density;
+    float echo_spray;
+    float echo_pitch;
+    float echo_shape;
+    float echo_feedback;
+    float echo_bufL[JB_ECHO_MAX_DELAY];
+    float echo_bufR[JB_ECHO_MAX_DELAY];
+    int   echo_w;
+    float echo_feedbackL;
+    float echo_feedbackR;
+    float echo_spawn_acc;
+    struct {
+        uint8_t active;
+        float pos;
+        float inc;
+        float env;
+        float env_inc;
+        float gainL;
+        float gainR;
+    } echo_grain[JB_ECHO_MAX_GRAINS];
+
     // IO
     // main stereo exciter inputs
     // per-voice exciter inputs (optional)
@@ -1591,7 +1640,7 @@ float density_amt; jb_density_mode density_mode;
     float     sat_curve;
     float     sat_asym;
     float     sat_tone;
-    float     sat_comp;
+    float     sat_wetdry;
     float     sat_tone_lpL;
     float     sat_tone_lpR;
 
@@ -2054,21 +2103,6 @@ static inline float jb_hp1_run_a(float x, float a, float *x1, float *y1){
     return y;
 }
 
-// Soft clip with ceiling=1.0 and a lower knee (threshold) where it begins to squash.
-// threshold should be ~0.7..0.8; we default to 0.75 for organic saturation.
-static inline float jb_softclip_thresh(float x, float threshold){
-    float t = threshold;
-    if (t < 0.05f) t = 0.05f;
-    if (t > 0.95f) t = 0.95f;
-
-    float ax = fabsf(x);
-    if (ax <= t) return x;
-
-    float s = (ax - t) / (1.f - t);           // 0..inf
-    float y = t + (1.f - t) * tanhf(s);       // asymptote -> 1.0
-    return copysignf(y, x);
-}
-
 static inline float jb_sat_curve_nl(float x, float thr, float curve, float asym){
     float t = jb_clamp(thr, 0.05f, 0.99f);
     float k = 1.f + 11.f * jb_clamp(curve, 0.f, 1.f);
@@ -2080,6 +2114,96 @@ static inline float jb_sat_curve_nl(float x, float thr, float curve, float asym)
     return y - dc;
 }
 
+static inline void jb_echo_process_stereo(t_juicy_bank_tilde *x, float *inoutL, float *inoutR, int n){
+    float density = jb_clamp(x->echo_density, 0.f, 1.f);
+    float size01 = jb_clamp(x->echo_size, 0.f, 1.f);
+    if (density <= 1.0e-5f || size01 <= 1.0e-5f){
+        // still feed the buffer so the effect is ready instantly when enabled
+        for(int i = 0; i < n; ++i){
+            x->echo_bufL[x->echo_w] = inoutL[i] + x->echo_feedbackL;
+            x->echo_bufR[x->echo_w] = inoutR[i] + x->echo_feedbackR;
+            x->echo_feedbackL = x->echo_feedbackR = 0.f;
+            x->echo_w++; if(x->echo_w >= JB_ECHO_MAX_DELAY) x->echo_w = 0;
+        }
+        return;
+    }
+
+    const float sr = (x->sr > 1.f) ? x->sr : 48000.f;
+    const float size_ms = 10.f + size01 * 490.f;
+    const int grain_len = (int)jb_clamp(floorf(size_ms * 0.001f * sr + 0.5f), 16.f, 24000.f);
+    const float base_delay = jb_clamp((20.f + size_ms * 1.5f) * 0.001f * sr, 32.f, (float)(JB_ECHO_MAX_DELAY - grain_len - 4));
+    const float spray_samps = jb_clamp(x->echo_spray, 0.f, 1.f) * base_delay * 0.6f;
+    const float pitch_semi = jb_clamp(x->echo_pitch, -1.f, 1.f) * 12.f;
+    const float base_inc = powf(2.f, pitch_semi / 12.f);
+    const float shape = jb_clamp(x->echo_shape, 0.f, 1.f);
+    const float feedback = jb_clamp(x->echo_feedback, 0.f, 0.98f);
+    const float rate_hz = 0.2f + density * 28.f;
+    const float wet_gain = 0.18f + 0.52f * density;
+
+    for(int i = 0; i < n; ++i){
+        float dryL = inoutL[i];
+        float dryR = inoutR[i];
+
+        x->echo_spawn_acc += rate_hz / sr;
+        while(x->echo_spawn_acc >= 1.f){
+            x->echo_spawn_acc -= 1.f;
+            int slot = -1;
+            for(int g = 0; g < JB_ECHO_MAX_GRAINS; ++g){
+                if(!x->echo_grain[g].active){ slot = g; break; }
+            }
+            if(slot >= 0){
+                float r1 = jb_rng_uni(&x->rng);
+                float r2 = jb_rng_uni(&x->rng);
+                float ro = (r1 * 2.f - 1.f) * spray_samps;
+                float rp = (r2 * 2.f - 1.f) * 0.03f;
+                int ri = x->echo_w - (int)floorf(base_delay + ro);
+                while(ri < 0) ri += JB_ECHO_MAX_DELAY;
+                while(ri >= JB_ECHO_MAX_DELAY) ri -= JB_ECHO_MAX_DELAY;
+                x->echo_grain[slot].active = 1;
+                x->echo_grain[slot].pos = (float)ri;
+                x->echo_grain[slot].inc = jb_clamp(base_inc * (1.f + rp), 0.25f, 4.f);
+                x->echo_grain[slot].env = 0.f;
+                x->echo_grain[slot].env_inc = 1.f / (float)grain_len;
+                float pan = (jb_rng_bi(&x->rng) * 0.25f) * x->echo_spray;
+                x->echo_grain[slot].gainL = 0.7071f * (1.f - pan);
+                x->echo_grain[slot].gainR = 0.7071f * (1.f + pan);
+            }
+        }
+
+        float wetL = 0.f, wetR = 0.f;
+        for(int g = 0; g < JB_ECHO_MAX_GRAINS; ++g){
+            if(!x->echo_grain[g].active) continue;
+            float u = x->echo_grain[g].env;
+            if(u >= 1.f){ x->echo_grain[g].active = 0; continue; }
+            float tri = 1.f - fabsf(2.f * u - 1.f);
+            if(tri < 0.f) tri = 0.f;
+            float soft = tri * tri * (3.f - 2.f * tri);
+            float win = tri + shape * (soft - tri);
+            int i0 = (int)x->echo_grain[g].pos;
+            int i1 = i0 + 1; if(i1 >= JB_ECHO_MAX_DELAY) i1 = 0;
+            float frac = x->echo_grain[g].pos - (float)i0;
+            float sL = x->echo_bufL[i0] + frac * (x->echo_bufL[i1] - x->echo_bufL[i0]);
+            float sR = x->echo_bufR[i0] + frac * (x->echo_bufR[i1] - x->echo_bufR[i0]);
+            wetL += sL * win * x->echo_grain[g].gainL;
+            wetR += sR * win * x->echo_grain[g].gainR;
+            x->echo_grain[g].pos += x->echo_grain[g].inc;
+            while(x->echo_grain[g].pos >= JB_ECHO_MAX_DELAY) x->echo_grain[g].pos -= JB_ECHO_MAX_DELAY;
+            x->echo_grain[g].env += x->echo_grain[g].env_inc;
+        }
+
+        float outWetL = wetL * wet_gain;
+        float outWetR = wetR * wet_gain;
+        x->echo_bufL[x->echo_w] = dryL + x->echo_feedbackL;
+        x->echo_bufR[x->echo_w] = dryR + x->echo_feedbackR;
+        x->echo_feedbackL = outWetL * feedback;
+        x->echo_feedbackR = outWetR * feedback;
+        x->echo_w++; if(x->echo_w >= JB_ECHO_MAX_DELAY) x->echo_w = 0;
+
+        inoutL[i] = dryL + outWetL;
+        inoutR[i] = dryR + outWetR;
+    }
+}
+
 static inline void jb_sat_process_stereo(t_juicy_bank_tilde *x, float *inoutL, float *inoutR, int n){
     float drive = jb_clamp(x->sat_drive, 0.f, 1.f);
     if (drive <= 1.0e-5f) return;
@@ -2088,8 +2212,10 @@ static inline void jb_sat_process_stereo(t_juicy_bank_tilde *x, float *inoutL, f
     float curve = jb_clamp(x->sat_curve, 0.f, 1.f);
     float asym  = jb_clamp(x->sat_asym, -1.f, 1.f);
     float tone  = jb_clamp(x->sat_tone, -1.f, 1.f);
-    float comp  = jb_clamp(x->sat_comp, 0.f, 2.f);
-    float pregain = powf(2.f, drive * 4.f); /* up to 16x, only when SAT is engaged */
+    float wetdry = jb_clamp(x->sat_wetdry, -1.f, 1.f);
+    float pregain = powf(2.f, drive * 4.f);
+    float mixsat = 0.5f * (wetdry + 1.f);
+    float drysat = 1.f - mixsat;
 
     float fc = jb_expmap01(0.5f * (tone + 1.f), 700.f, 12000.f);
     float a = expf(-2.f * (float)M_PI * fc / ((x->sr > 1.f) ? x->sr : 48000.f));
@@ -2098,8 +2224,9 @@ static inline void jb_sat_process_stereo(t_juicy_bank_tilde *x, float *inoutL, f
     float mix = fabsf(tone);
 
     for (int i = 0; i < n; ++i){
-        float yL = jb_sat_curve_nl(inoutL[i] * pregain, thr, curve, asym);
-        float yR = jb_sat_curve_nl(inoutR[i] * pregain, thr, curve, asym);
+        float dryL = inoutL[i], dryR = inoutR[i];
+        float yL = jb_sat_curve_nl(dryL * pregain, thr, curve, asym);
+        float yR = jb_sat_curve_nl(dryR * pregain, thr, curve, asym);
 
         if (mix > 1.0e-5f){
             lpL = (1.f - a) * yL + a * lpL;
@@ -2113,8 +2240,8 @@ static inline void jb_sat_process_stereo(t_juicy_bank_tilde *x, float *inoutL, f
             }
         }
 
-        inoutL[i] = yL * comp;
-        inoutR[i] = yR * comp;
+        inoutL[i] = dryL * drysat + yL * mixsat;
+        inoutR[i] = dryR * drysat + yR * mixsat;
     }
 
     x->sat_tone_lpL = jb_kill_denorm(lpL);
@@ -4338,6 +4465,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         if (!jb_isfinitef(outR[i])) outR[i] = 0.f;
     }
 
+    jb_echo_process_stereo(x, outL, outR, n);
     jb_sat_process_stereo(x, outL, outR, n);
 
     // ---------- SPACE (global stereo room) ----------
@@ -5524,6 +5652,7 @@ static const char *jb_screen_subpage_name(const t_juicy_bank_tilde *x){
         case JB_PAGE_EXCITER_A: return "A";
         case JB_PAGE_EXCITER_B: return "B";
         case JB_PAGE_SPACE: return "SPACE";
+        case JB_PAGE_ECHO: return "ECHO";
         case JB_PAGE_SATURATION: return "SAT";
         case JB_PAGE_MOD_LFO1: return "LFO1";
         case JB_PAGE_MOD_LFO2: return "LFO2";
@@ -5692,6 +5821,11 @@ static float jb_hw_param_to_norm(float v, jb_hw_param_t pid){
         case JB_HW_PARAM_GAIN:
         case JB_HW_PARAM_POSITION:
         case JB_HW_PARAM_PICKUP:
+        case JB_HW_PARAM_ECHO_SIZE:
+        case JB_HW_PARAM_ECHO_DENSITY:
+        case JB_HW_PARAM_ECHO_SPRAY:
+        case JB_HW_PARAM_ECHO_SHAPE:
+        case JB_HW_PARAM_ECHO_FEEDBACK:
         case JB_HW_PARAM_SAT_DRIVE:
         case JB_HW_PARAM_SAT_THRESH:
         case JB_HW_PARAM_SAT_CURVE:
@@ -5736,6 +5870,11 @@ static float jb_hw_norm_to_param(float n, jb_hw_param_t pid){
         case JB_HW_PARAM_GAIN:
         case JB_HW_PARAM_POSITION:
         case JB_HW_PARAM_PICKUP:
+        case JB_HW_PARAM_ECHO_SIZE:
+        case JB_HW_PARAM_ECHO_DENSITY:
+        case JB_HW_PARAM_ECHO_SPRAY:
+        case JB_HW_PARAM_ECHO_SHAPE:
+        case JB_HW_PARAM_ECHO_FEEDBACK:
         case JB_HW_PARAM_SAT_DRIVE:
         case JB_HW_PARAM_SAT_THRESH:
         case JB_HW_PARAM_SAT_CURVE:
@@ -5788,12 +5927,18 @@ static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t 
         case JB_HW_PARAM_SPACE_DIFFUSION: return x->space_diffusion;
         case JB_HW_PARAM_SPACE_DAMPING: return x->space_damping;
         case JB_HW_PARAM_SPACE_ONSET: return x->space_onset;
+        case JB_HW_PARAM_ECHO_SIZE: return x->echo_size;
+        case JB_HW_PARAM_ECHO_DENSITY: return x->echo_density;
+        case JB_HW_PARAM_ECHO_SPRAY: return x->echo_spray;
+        case JB_HW_PARAM_ECHO_PITCH: return x->echo_pitch;
+        case JB_HW_PARAM_ECHO_SHAPE: return x->echo_shape;
+        case JB_HW_PARAM_ECHO_FEEDBACK: return x->echo_feedback;
         case JB_HW_PARAM_SAT_DRIVE: return x->sat_drive;
         case JB_HW_PARAM_SAT_THRESH: return x->sat_thresh;
         case JB_HW_PARAM_SAT_CURVE: return x->sat_curve;
         case JB_HW_PARAM_SAT_ASYM: return x->sat_asym;
         case JB_HW_PARAM_SAT_TONE: return x->sat_tone;
-        case JB_HW_PARAM_SAT_COMP: return x->sat_comp;
+        case JB_HW_PARAM_SAT_WETDRY: return x->sat_wetdry;
         case JB_HW_PARAM_LFO_BANK: return jb_target_bank_mode_to_param(x->lfo_target_bank[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0]);
         case JB_HW_PARAM_LFO_TARGET: return (float)jb_hw_lfo_target_to_index(x->lfo_target[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0]);
         case JB_HW_PARAM_LFO_SHAPE: return x->lfo_shape_v[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0];
@@ -5860,12 +6005,18 @@ static void jb_hw_apply_param_value(t_juicy_bank_tilde *x, jb_hw_param_t pid, fl
         case JB_HW_PARAM_SPACE_DIFFUSION: juicy_bank_tilde_space_diffusion(x, value); break;
         case JB_HW_PARAM_SPACE_DAMPING: juicy_bank_tilde_space_damping(x, value); break;
         case JB_HW_PARAM_SPACE_ONSET: juicy_bank_tilde_space_onset(x, value); break;
+        case JB_HW_PARAM_ECHO_SIZE: x->echo_size = jb_clamp(value, 0.f, 1.f); break;
+        case JB_HW_PARAM_ECHO_DENSITY: x->echo_density = jb_clamp(value, 0.f, 1.f); break;
+        case JB_HW_PARAM_ECHO_SPRAY: x->echo_spray = jb_clamp(value, 0.f, 1.f); break;
+        case JB_HW_PARAM_ECHO_PITCH: x->echo_pitch = jb_clamp(value, -1.f, 1.f); break;
+        case JB_HW_PARAM_ECHO_SHAPE: x->echo_shape = jb_clamp(value, 0.f, 1.f); break;
+        case JB_HW_PARAM_ECHO_FEEDBACK: x->echo_feedback = jb_clamp(value, 0.f, 1.f); break;
         case JB_HW_PARAM_SAT_DRIVE: x->sat_drive = jb_clamp(value, 0.f, 1.f); break;
         case JB_HW_PARAM_SAT_THRESH: x->sat_thresh = jb_clamp(value, 0.f, 1.f); break;
         case JB_HW_PARAM_SAT_CURVE: x->sat_curve = jb_clamp(value, 0.f, 1.f); break;
         case JB_HW_PARAM_SAT_ASYM: x->sat_asym = jb_clamp(value, -1.f, 1.f); break;
         case JB_HW_PARAM_SAT_TONE: x->sat_tone = jb_clamp(value, -1.f, 1.f); break;
-        case JB_HW_PARAM_SAT_COMP: x->sat_comp = jb_clamp(value, 0.f, 2.f); break;
+        case JB_HW_PARAM_SAT_WETDRY: x->sat_wetdry = jb_clamp(value, -1.f, 1.f); break;
         case JB_HW_PARAM_LFO_BANK: x->lfo_target_bank[lfoi] = jb_target_bank_mode_from_param(value); { t_symbol *eff = jb_hw_lfo_target_from_index(jb_hw_lfo_target_to_index(x->lfo_target[lfoi]), x->lfo_target_bank[lfoi]); if(lfoi==0) juicy_bank_tilde_lfo1_target(x, eff); else juicy_bank_tilde_lfo2_target(x, eff); } break;
         case JB_HW_PARAM_LFO_SHAPE: x->lfo_index = (float)(lfoi + 1); juicy_bank_tilde_lfo_shape(x, value); break;
         case JB_HW_PARAM_LFO_RATE: x->lfo_index = (float)(lfoi + 1); juicy_bank_tilde_lfo_rate(x, value); break;
@@ -6439,12 +6590,23 @@ x->excite_pos2    = x->excite_pos;
     x->velmap_target = jb_sym_none;
     for (int i = 0; i < JB_VELMAP_N_TARGETS; ++i) x->velmap_on[i] = 0;
 
+    x->echo_size = 0.25f;
+    x->echo_density = 0.f;
+    x->echo_spray = 0.f;
+    x->echo_pitch = 0.f;
+    x->echo_shape = 0.6f;
+    x->echo_feedback = 0.f;
+    x->echo_w = 0;
+    x->echo_feedbackL = 0.f;
+    x->echo_feedbackR = 0.f;
+    x->echo_spawn_acc = 0.f;
+    for(int gi=0; gi<JB_ECHO_MAX_GRAINS; ++gi){ x->echo_grain[gi].active = 0; }
     x->sat_drive = 0.f;
     x->sat_thresh = 0.85f;
     x->sat_curve = 0.35f;
     x->sat_asym = 0.f;
     x->sat_tone = 0.f;
-    x->sat_comp = 1.f;
+    x->sat_wetdry = 1.f;
     x->sat_tone_lpL = 0.f;
     x->sat_tone_lpR = 0.f;
 
@@ -6557,6 +6719,7 @@ x->excite_pos2    = x->excite_pos;
     x->space_wetdry = -0.3f; // -1..+1 : -1=dry, +1=wet (default matches old mix≈0.35)
 
     x->space_predelay_w = 0;
+    for (int n = 0; n < JB_ECHO_MAX_DELAY; ++n){ x->echo_bufL[n] = 0.f; x->echo_bufR[n] = 0.f; }
     for (int n = 0; n < JB_SPACE_PREDELAY_MAX; ++n){ x->space_predelay_bufL[n] = 0.f; x->space_predelay_bufR[n] = 0.f; }
 
     for (int k = 0; k < JB_SPACE_NCOMB; ++k){
@@ -6839,6 +7002,13 @@ static void jb_preset_snapshot(const t_juicy_bank_tilde *x, jb_preset_t *p){
     p->exc_imp_shape = x->exc_imp_shape;
     p->exc_shape = x->exc_shape;
 
+    p->echo_size = x->echo_size;
+    p->echo_density = x->echo_density;
+    p->echo_spray = x->echo_spray;
+    p->echo_pitch = x->echo_pitch;
+    p->echo_shape = x->echo_shape;
+    p->echo_feedback = x->echo_feedback;
+
     p->lfo_index = x->lfo_index;
     for (int li = 0; li < JB_N_LFO; ++li){
         p->lfo_shape_v[li] = x->lfo_shape_v[li];
@@ -6861,7 +7031,7 @@ static void jb_preset_snapshot(const t_juicy_bank_tilde *x, jb_preset_t *p){
     p->sat_curve = x->sat_curve;
     p->sat_asym = x->sat_asym;
     p->sat_tone = x->sat_tone;
-    p->sat_comp = x->sat_comp;
+    p->sat_wetdry = x->sat_wetdry;
 
     p->pressure_amount = x->pressure_amount;
     p->pressure_target_bank = x->pressure_target_bank;
@@ -6960,6 +7130,13 @@ static void jb_preset_apply(t_juicy_bank_tilde *x, const jb_preset_t *p){
     x->exc_imp_shape = p->exc_imp_shape;
     x->exc_shape = p->exc_shape;
 
+    x->echo_size = jb_clamp(p->echo_size, 0.f, 1.f);
+    x->echo_density = jb_clamp(p->echo_density, 0.f, 1.f);
+    x->echo_spray = jb_clamp(p->echo_spray, 0.f, 1.f);
+    x->echo_pitch = jb_clamp(p->echo_pitch, -1.f, 1.f);
+    x->echo_shape = jb_clamp(p->echo_shape, 0.f, 1.f);
+    x->echo_feedback = jb_clamp(p->echo_feedback, 0.f, 1.f);
+
     for (int li = 0; li < JB_N_LFO; ++li){
         x->lfo_shape_v[li] = p->lfo_shape_v[li];
         x->lfo_rate_v[li]  = p->lfo_rate_v[li];
@@ -6981,7 +7158,7 @@ static void jb_preset_apply(t_juicy_bank_tilde *x, const jb_preset_t *p){
     x->sat_curve = jb_clamp(p->sat_curve, 0.f, 1.f);
     x->sat_asym = jb_clamp(p->sat_asym, -1.f, 1.f);
     x->sat_tone = jb_clamp(p->sat_tone, -1.f, 1.f);
-    x->sat_comp = jb_clamp(p->sat_comp, 0.f, 2.f);
+    x->sat_wetdry = jb_clamp(p->sat_wetdry, -1.f, 1.f);
 
     for (int ti = 0; ti < JB_VELMAP_N_TARGETS; ++ti){
         x->velmap_on[ti] = p->velmap_on[ti];
