@@ -305,6 +305,7 @@ typedef enum {
     JB_PAGE_EXCITER_A,
     JB_PAGE_EXCITER_B,
     JB_PAGE_SPACE,
+    JB_PAGE_SATURATION,
     JB_PAGE_MOD_LFO1,
     JB_PAGE_MOD_LFO2,
     JB_PAGE_VELOCITY,
@@ -379,6 +380,12 @@ typedef enum {
     JB_HW_PARAM_SPACE_DIFFUSION,
     JB_HW_PARAM_SPACE_DAMPING,
     JB_HW_PARAM_SPACE_ONSET,
+    JB_HW_PARAM_SAT_DRIVE,
+    JB_HW_PARAM_SAT_THRESH,
+    JB_HW_PARAM_SAT_CURVE,
+    JB_HW_PARAM_SAT_ASYM,
+    JB_HW_PARAM_SAT_TONE,
+    JB_HW_PARAM_SAT_COMP,
     JB_HW_PARAM_LFO_BANK,
     JB_HW_PARAM_LFO_TARGET,
     JB_HW_PARAM_LFO_SHAPE,
@@ -489,6 +496,13 @@ typedef struct _jb_preset {
     float   velmap_amount;
     int     velmap_target_bank;
     uint8_t velmap_on[JB_VELMAP_N_TARGETS];
+
+    float sat_drive;
+    float sat_thresh;
+    float sat_curve;
+    float sat_asym;
+    float sat_tone;
+    float sat_comp;
 
     float pressure_amount;
     int   pressure_target_bank;
@@ -1119,7 +1133,7 @@ static t_symbol *jb_sym_none         = NULL;
 static const jb_page_family_t jb_page_family_map[JB_PAGE_COUNT] = {
     JB_FAMILY_PLAY, JB_FAMILY_PLAY,
     JB_FAMILY_BODY, JB_FAMILY_BODY, JB_FAMILY_BODY, JB_FAMILY_BODY, JB_FAMILY_BODY,
-    JB_FAMILY_EXCITER, JB_FAMILY_EXCITER, JB_FAMILY_EXCITER,
+    JB_FAMILY_EXCITER, JB_FAMILY_EXCITER, JB_FAMILY_EXCITER, JB_FAMILY_EXCITER,
     JB_FAMILY_MOD, JB_FAMILY_MOD, JB_FAMILY_MOD, JB_FAMILY_MOD, JB_FAMILY_MOD,
     JB_FAMILY_EDIT,
     JB_FAMILY_PRESET
@@ -1136,10 +1150,11 @@ static const jb_hw_param_t jb_page_param_map[JB_PAGE_COUNT][6] = {
     [JB_PAGE_EXCITER_A] =   { JB_HW_PARAM_EXC_FADER, JB_HW_PARAM_EXC_ATTACK, JB_HW_PARAM_EXC_DECAY, JB_HW_PARAM_EXC_SUSTAIN, JB_HW_PARAM_EXC_RELEASE, JB_HW_PARAM_NOISE_COLOR },
     [JB_PAGE_EXCITER_B] =   { JB_HW_PARAM_IMPULSE_SHAPE, JB_HW_PARAM_EXC_ATTACK_CURVE, JB_HW_PARAM_EXC_DECAY_CURVE, JB_HW_PARAM_EXC_RELEASE_CURVE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE },
     [JB_PAGE_SPACE] =       { JB_HW_PARAM_SPACE_SIZE, JB_HW_PARAM_SPACE_DECAY, JB_HW_PARAM_SPACE_DIFFUSION, JB_HW_PARAM_SPACE_DAMPING, JB_HW_PARAM_SPACE_ONSET, JB_HW_PARAM_SPACE_WETDRY },
+    [JB_PAGE_SATURATION] =  { JB_HW_PARAM_SAT_DRIVE, JB_HW_PARAM_SAT_THRESH, JB_HW_PARAM_SAT_CURVE, JB_HW_PARAM_SAT_ASYM, JB_HW_PARAM_SAT_TONE, JB_HW_PARAM_SAT_COMP },
     [JB_PAGE_MOD_LFO1] =    { JB_HW_PARAM_LFO_BANK, JB_HW_PARAM_LFO_TARGET, JB_HW_PARAM_LFO_SHAPE, JB_HW_PARAM_LFO_RATE, JB_HW_PARAM_LFO_MODE, JB_HW_PARAM_LFO_AMOUNT },
     [JB_PAGE_MOD_LFO2] =    { JB_HW_PARAM_LFO_BANK, JB_HW_PARAM_LFO_TARGET, JB_HW_PARAM_LFO_SHAPE, JB_HW_PARAM_LFO_RATE, JB_HW_PARAM_LFO_MODE, JB_HW_PARAM_LFO_AMOUNT },
     [JB_PAGE_VELOCITY] =    { JB_HW_PARAM_VEL_BANK, JB_HW_PARAM_VEL_TARGET, JB_HW_PARAM_VEL_AMOUNT, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE },
-    [JB_PAGE_PRESSURE] =    { JB_HW_PARAM_PRESS_BANK, JB_HW_PARAM_PRESS_TARGET, JB_HW_PARAM_PRESS_AMOUNT, JB_HW_PARAM_PRESS_THRESH, JB_HW_PARAM_PRESS_DZ, JB_HW_PARAM_PRESS_CURVE },
+    [JB_PAGE_PRESSURE] =    { JB_HW_PARAM_PRESS_BANK, JB_HW_PARAM_PRESS_TARGET, JB_HW_PARAM_PRESS_AMOUNT, JB_HW_PARAM_PRESS_DZ, JB_HW_PARAM_PRESS_CURVE, JB_HW_PARAM_NONE },
     [JB_PAGE_GLOBAL_EDIT] = { JB_HW_PARAM_BANK_SELECT, JB_HW_PARAM_OCTAVE, JB_HW_PARAM_SEMITONE, JB_HW_PARAM_TUNE, JB_HW_PARAM_PARTIALS, JB_HW_PARAM_NONE },
     [JB_PAGE_RESONATOR_EDIT]={ JB_HW_PARAM_RESONATOR_INDEX, JB_HW_PARAM_RATIO, JB_HW_PARAM_GAIN, JB_HW_PARAM_DECAY, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE },
     [JB_PAGE_PRESET] =      { JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE, JB_HW_PARAM_NONE }
@@ -1182,6 +1197,12 @@ static const jb_hw_param_spec_t jb_hw_param_specs[] = {
     [JB_HW_PARAM_SPACE_DIFFUSION] = { "DIFF",   0.f,   1.f,   0 },
     [JB_HW_PARAM_SPACE_DAMPING]   = { "DAMP",   0.f,   1.f,   0 },
     [JB_HW_PARAM_SPACE_ONSET]     = { "ONST",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_SAT_DRIVE]       = { "DRIV",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_SAT_THRESH]      = { "THR",    0.f,   1.f,   0 },
+    [JB_HW_PARAM_SAT_CURVE]       = { "CURV",   0.f,   1.f,   0 },
+    [JB_HW_PARAM_SAT_ASYM]        = { "ASYM",  -1.f,   1.f,   0 },
+    [JB_HW_PARAM_SAT_TONE]        = { "TONE",  -1.f,   1.f,   0 },
+    [JB_HW_PARAM_SAT_COMP]        = { "COMP",   0.f,   2.f,   0 },
     [JB_HW_PARAM_LFO_BANK]        = { "BANK",   1.f,   3.f,   1 },
     [JB_HW_PARAM_LFO_TARGET]      = { "TGT",    0.f,  10.f,   1 },
     [JB_HW_PARAM_LFO_SHAPE]       = { "SHAPE",  1.f,   5.f,   1 },
@@ -1565,11 +1586,20 @@ float density_amt; jb_density_mode density_mode;
     int       velmap_target_bank;    // 0=A,1=B,2=BOTH
     t_symbol *velmap_target;         // symbol selector
 
+    float     sat_drive;
+    float     sat_thresh;
+    float     sat_curve;
+    float     sat_asym;
+    float     sat_tone;
+    float     sat_comp;
+    float     sat_tone_lpL;
+    float     sat_tone_lpR;
+
     float     pressure_amount;
     int       pressure_target_bank;
     t_symbol *pressure_target;
     uint8_t   pressure_on[JB_VELMAP_N_TARGETS];
-    float     pressure_threshold;
+    float     pressure_threshold; /* legacy/unused now that saturation has its own page */
     float     pressure_deadzone;
     float     pressure_curve;
 
@@ -2037,6 +2067,58 @@ static inline float jb_softclip_thresh(float x, float threshold){
     float s = (ax - t) / (1.f - t);           // 0..inf
     float y = t + (1.f - t) * tanhf(s);       // asymptote -> 1.0
     return copysignf(y, x);
+}
+
+static inline float jb_sat_curve_nl(float x, float thr, float curve, float asym){
+    float t = jb_clamp(thr, 0.05f, 0.99f);
+    float k = 1.f + 11.f * jb_clamp(curve, 0.f, 1.f);
+    float bias = jb_clamp(asym, -1.f, 1.f) * 0.35f;
+    float norm = tanhf(k);
+    if (norm < 1.0e-6f) norm = 1.f;
+    float y = t * (tanhf(k * ((x + bias) / t)) / norm);
+    float dc = t * (tanhf(k * (bias / t)) / norm);
+    return y - dc;
+}
+
+static inline void jb_sat_process_stereo(t_juicy_bank_tilde *x, float *inoutL, float *inoutR, int n){
+    float drive = jb_clamp(x->sat_drive, 0.f, 1.f);
+    if (drive <= 1.0e-5f) return;
+
+    float thr   = jb_clamp(x->sat_thresh, 0.05f, 0.99f);
+    float curve = jb_clamp(x->sat_curve, 0.f, 1.f);
+    float asym  = jb_clamp(x->sat_asym, -1.f, 1.f);
+    float tone  = jb_clamp(x->sat_tone, -1.f, 1.f);
+    float comp  = jb_clamp(x->sat_comp, 0.f, 2.f);
+    float pregain = powf(2.f, drive * 4.f); /* up to 16x, only when SAT is engaged */
+
+    float fc = jb_expmap01(0.5f * (tone + 1.f), 700.f, 12000.f);
+    float a = expf(-2.f * (float)M_PI * fc / ((x->sr > 1.f) ? x->sr : 48000.f));
+    float lpL = x->sat_tone_lpL;
+    float lpR = x->sat_tone_lpR;
+    float mix = fabsf(tone);
+
+    for (int i = 0; i < n; ++i){
+        float yL = jb_sat_curve_nl(inoutL[i] * pregain, thr, curve, asym);
+        float yR = jb_sat_curve_nl(inoutR[i] * pregain, thr, curve, asym);
+
+        if (mix > 1.0e-5f){
+            lpL = (1.f - a) * yL + a * lpL;
+            lpR = (1.f - a) * yR + a * lpR;
+            if (tone < 0.f){
+                yL = yL + (lpL - yL) * mix;
+                yR = yR + (lpR - yR) * mix;
+            } else {
+                yL = yL + (yL - lpL) * (0.75f * mix);
+                yR = yR + (yR - lpR) * (0.75f * mix);
+            }
+        }
+
+        inoutL[i] = yL * comp;
+        inoutR[i] = yR * comp;
+    }
+
+    x->sat_tone_lpL = jb_kill_denorm(lpL);
+    x->sat_tone_lpR = jb_kill_denorm(lpR);
 }
 
 // Render one exciter sample for one voice (stereo).
@@ -4256,16 +4338,7 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         if (!jb_isfinitef(outR[i])) outR[i] = 0.f;
     }
 
-    {
-        float pd = jb_pressure_delta(x);
-        if (pd > 0.f && (x->pressure_on[JB_VEL_MASTER_1] || x->pressure_on[JB_VEL_MASTER_2])){
-            float thr = jb_clamp(x->pressure_threshold, 0.05f, 0.99f);
-            for (int i = 0; i < n; ++i){
-                outL[i] = jb_softclip_thresh(outL[i], thr);
-                outR[i] = jb_softclip_thresh(outR[i], thr);
-            }
-        }
-    }
+    jb_sat_process_stereo(x, outL, outR, n);
 
     // ---------- SPACE (global stereo room) ----------
     // Schroeder-style: 4 combs per channel -> 2 allpasses per channel.
@@ -5427,6 +5500,7 @@ static const char *jb_screen_page_name(jb_page_t page){
         case JB_PAGE_EXCITER_A: return "EXC";
         case JB_PAGE_EXCITER_B: return "EXC";
         case JB_PAGE_SPACE: return "EXC";
+        case JB_PAGE_SATURATION: return "EXC";
         case JB_PAGE_MOD_LFO1: return "MOD";
         case JB_PAGE_MOD_LFO2: return "MOD";
         case JB_PAGE_VELOCITY: return "MOD";
@@ -5450,6 +5524,7 @@ static const char *jb_screen_subpage_name(const t_juicy_bank_tilde *x){
         case JB_PAGE_EXCITER_A: return "A";
         case JB_PAGE_EXCITER_B: return "B";
         case JB_PAGE_SPACE: return "SPACE";
+        case JB_PAGE_SATURATION: return "SAT";
         case JB_PAGE_MOD_LFO1: return "LFO1";
         case JB_PAGE_MOD_LFO2: return "LFO2";
         case JB_PAGE_VELOCITY: return "VEL";
@@ -5617,6 +5692,9 @@ static float jb_hw_param_to_norm(float v, jb_hw_param_t pid){
         case JB_HW_PARAM_GAIN:
         case JB_HW_PARAM_POSITION:
         case JB_HW_PARAM_PICKUP:
+        case JB_HW_PARAM_SAT_DRIVE:
+        case JB_HW_PARAM_SAT_THRESH:
+        case JB_HW_PARAM_SAT_CURVE:
             return jb_unscurve((v - sp->min_value) / den);
         default:
             return jb_clamp((v - sp->min_value) / den, 0.f, 1.f);
@@ -5658,6 +5736,9 @@ static float jb_hw_norm_to_param(float n, jb_hw_param_t pid){
         case JB_HW_PARAM_GAIN:
         case JB_HW_PARAM_POSITION:
         case JB_HW_PARAM_PICKUP:
+        case JB_HW_PARAM_SAT_DRIVE:
+        case JB_HW_PARAM_SAT_THRESH:
+        case JB_HW_PARAM_SAT_CURVE:
             v = sp->min_value + jb_scurve(n) * (sp->max_value - sp->min_value);
             break;
         default:
@@ -5707,6 +5788,12 @@ static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t 
         case JB_HW_PARAM_SPACE_DIFFUSION: return x->space_diffusion;
         case JB_HW_PARAM_SPACE_DAMPING: return x->space_damping;
         case JB_HW_PARAM_SPACE_ONSET: return x->space_onset;
+        case JB_HW_PARAM_SAT_DRIVE: return x->sat_drive;
+        case JB_HW_PARAM_SAT_THRESH: return x->sat_thresh;
+        case JB_HW_PARAM_SAT_CURVE: return x->sat_curve;
+        case JB_HW_PARAM_SAT_ASYM: return x->sat_asym;
+        case JB_HW_PARAM_SAT_TONE: return x->sat_tone;
+        case JB_HW_PARAM_SAT_COMP: return x->sat_comp;
         case JB_HW_PARAM_LFO_BANK: return jb_target_bank_mode_to_param(x->lfo_target_bank[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0]);
         case JB_HW_PARAM_LFO_TARGET: return (float)jb_hw_lfo_target_to_index(x->lfo_target[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0]);
         case JB_HW_PARAM_LFO_SHAPE: return x->lfo_shape_v[(x->wf.current_page == JB_PAGE_MOD_LFO2) ? 1 : 0];
@@ -5720,7 +5807,6 @@ static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t 
         case JB_HW_PARAM_PRESS_AMOUNT: return x->pressure_amount;
         case JB_HW_PARAM_PRESS_BANK: return jb_target_bank_mode_to_param(x->pressure_target_bank);
         case JB_HW_PARAM_PRESS_TARGET: return (float)jb_hw_vel_target_to_index(x->pressure_target);
-        case JB_HW_PARAM_PRESS_THRESH: return x->pressure_threshold;
         case JB_HW_PARAM_PRESS_DZ: return x->pressure_deadzone;
         case JB_HW_PARAM_PRESS_CURVE: return x->pressure_curve;
         case JB_HW_PARAM_BANK_SELECT: return (float)(x->edit_bank + 1);
@@ -5774,6 +5860,12 @@ static void jb_hw_apply_param_value(t_juicy_bank_tilde *x, jb_hw_param_t pid, fl
         case JB_HW_PARAM_SPACE_DIFFUSION: juicy_bank_tilde_space_diffusion(x, value); break;
         case JB_HW_PARAM_SPACE_DAMPING: juicy_bank_tilde_space_damping(x, value); break;
         case JB_HW_PARAM_SPACE_ONSET: juicy_bank_tilde_space_onset(x, value); break;
+        case JB_HW_PARAM_SAT_DRIVE: x->sat_drive = jb_clamp(value, 0.f, 1.f); break;
+        case JB_HW_PARAM_SAT_THRESH: x->sat_thresh = jb_clamp(value, 0.f, 1.f); break;
+        case JB_HW_PARAM_SAT_CURVE: x->sat_curve = jb_clamp(value, 0.f, 1.f); break;
+        case JB_HW_PARAM_SAT_ASYM: x->sat_asym = jb_clamp(value, -1.f, 1.f); break;
+        case JB_HW_PARAM_SAT_TONE: x->sat_tone = jb_clamp(value, -1.f, 1.f); break;
+        case JB_HW_PARAM_SAT_COMP: x->sat_comp = jb_clamp(value, 0.f, 2.f); break;
         case JB_HW_PARAM_LFO_BANK: x->lfo_target_bank[lfoi] = jb_target_bank_mode_from_param(value); { t_symbol *eff = jb_hw_lfo_target_from_index(jb_hw_lfo_target_to_index(x->lfo_target[lfoi]), x->lfo_target_bank[lfoi]); if(lfoi==0) juicy_bank_tilde_lfo1_target(x, eff); else juicy_bank_tilde_lfo2_target(x, eff); } break;
         case JB_HW_PARAM_LFO_SHAPE: x->lfo_index = (float)(lfoi + 1); juicy_bank_tilde_lfo_shape(x, value); break;
         case JB_HW_PARAM_LFO_RATE: x->lfo_index = (float)(lfoi + 1); juicy_bank_tilde_lfo_rate(x, value); break;
@@ -5796,7 +5888,6 @@ static void jb_hw_apply_param_value(t_juicy_bank_tilde *x, jb_hw_param_t pid, fl
             int idx = (int)jb_clamp(floorf(value + 0.5f), 0.f, 12.f);
             jb_hw_pressure_target_set_exact(x, jb_hw_vel_target_symbol_from_index(idx));
         } break;
-        case JB_HW_PARAM_PRESS_THRESH: x->pressure_threshold = jb_clamp(value, 0.f, 1.f); break;
         case JB_HW_PARAM_PRESS_DZ: x->pressure_deadzone = jb_clamp(value, 0.f, 1.f); break;
         case JB_HW_PARAM_PRESS_CURVE: x->pressure_curve = jb_clamp(value, -1.f, 1.f); break;
         case JB_HW_PARAM_VEL_BANK: {
@@ -6101,10 +6192,10 @@ static void juicy_bank_tilde_encoder(t_juicy_bank_tilde *x, t_floatarg f){
             if(x->wf.selected_bell >= JB_N_DAMPERS) x->wf.selected_bell = JB_N_DAMPERS - 1;
             juicy_bank_tilde_damper_sel(x, (t_float)(x->wf.selected_bell + 1));
             break;
-        case JB_PAGE_EXCITER_A: case JB_PAGE_EXCITER_B: case JB_PAGE_SPACE: {
-            jb_page_t seq[3] = { JB_PAGE_EXCITER_A, JB_PAGE_EXCITER_B, JB_PAGE_SPACE };
-            int idx = (x->wf.current_page == JB_PAGE_EXCITER_B) ? 1 : (x->wf.current_page == JB_PAGE_SPACE ? 2 : 0);
-            idx = (idx + delta + 3) % 3; jb_hw_set_page(x, seq[idx]);
+        case JB_PAGE_EXCITER_A: case JB_PAGE_EXCITER_B: case JB_PAGE_SPACE: case JB_PAGE_SATURATION: {
+            jb_page_t seq[4] = { JB_PAGE_EXCITER_A, JB_PAGE_EXCITER_B, JB_PAGE_SPACE, JB_PAGE_SATURATION };
+            int idx = (x->wf.current_page == JB_PAGE_EXCITER_B) ? 1 : (x->wf.current_page == JB_PAGE_SPACE ? 2 : (x->wf.current_page == JB_PAGE_SATURATION ? 3 : 0));
+            idx = (idx + delta + 4) % 4; jb_hw_set_page(x, seq[idx]);
         } break;
         case JB_PAGE_MOD_LFO1: case JB_PAGE_MOD_LFO2: case JB_PAGE_VELOCITY: case JB_PAGE_PRESSURE: {
             jb_page_t seq[5] = { JB_PAGE_MOD_LFO1, JB_PAGE_MOD_LFO2, JB_PAGE_VELOCITY, JB_PAGE_PRESSURE, JB_PAGE_GLOBAL_EDIT };
@@ -6347,6 +6438,15 @@ x->excite_pos2    = x->excite_pos;
     x->velmap_target_bank = 2;
     x->velmap_target = jb_sym_none;
     for (int i = 0; i < JB_VELMAP_N_TARGETS; ++i) x->velmap_on[i] = 0;
+
+    x->sat_drive = 0.f;
+    x->sat_thresh = 0.85f;
+    x->sat_curve = 0.35f;
+    x->sat_asym = 0.f;
+    x->sat_tone = 0.f;
+    x->sat_comp = 1.f;
+    x->sat_tone_lpL = 0.f;
+    x->sat_tone_lpR = 0.f;
 
     x->pressure_amount = 0.f;
     x->pressure_target_bank = 2;
@@ -6756,6 +6856,13 @@ static void jb_preset_snapshot(const t_juicy_bank_tilde *x, jb_preset_t *p){
         p->velmap_on[ti] = x->velmap_on[ti];
     }
 
+    p->sat_drive = x->sat_drive;
+    p->sat_thresh = x->sat_thresh;
+    p->sat_curve = x->sat_curve;
+    p->sat_asym = x->sat_asym;
+    p->sat_tone = x->sat_tone;
+    p->sat_comp = x->sat_comp;
+
     p->pressure_amount = x->pressure_amount;
     p->pressure_target_bank = x->pressure_target_bank;
     p->pressure_target_index = jb_hw_vel_target_to_index(x->pressure_target);
@@ -6868,6 +6975,14 @@ static void jb_preset_apply(t_juicy_bank_tilde *x, const jb_preset_t *p){
     x->velmap_amount = p->velmap_amount;
     x->velmap_target_bank = jb_target_bank_mode_clamp(p->velmap_target_bank);
     x->velmap_target = jb_sym_none;
+
+    x->sat_drive = jb_clamp(p->sat_drive, 0.f, 1.f);
+    x->sat_thresh = jb_clamp(p->sat_thresh, 0.f, 1.f);
+    x->sat_curve = jb_clamp(p->sat_curve, 0.f, 1.f);
+    x->sat_asym = jb_clamp(p->sat_asym, -1.f, 1.f);
+    x->sat_tone = jb_clamp(p->sat_tone, -1.f, 1.f);
+    x->sat_comp = jb_clamp(p->sat_comp, 0.f, 2.f);
+
     for (int ti = 0; ti < JB_VELMAP_N_TARGETS; ++ti){
         x->velmap_on[ti] = p->velmap_on[ti];
         if (x->velmap_target == jb_sym_none && x->velmap_on[ti]) {
