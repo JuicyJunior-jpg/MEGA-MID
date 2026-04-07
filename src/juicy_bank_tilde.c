@@ -6343,10 +6343,14 @@ static void juicy_bank_tilde_encoder(t_juicy_bank_tilde *x, t_floatarg f){
             if(x->wf.selected_bell >= JB_N_DAMPERS) x->wf.selected_bell = JB_N_DAMPERS - 1;
             juicy_bank_tilde_damper_sel(x, (t_float)(x->wf.selected_bell + 1));
             break;
-        case JB_PAGE_EXCITER_A: case JB_PAGE_EXCITER_B: case JB_PAGE_SPACE: case JB_PAGE_SATURATION: {
-            jb_page_t seq[4] = { JB_PAGE_EXCITER_A, JB_PAGE_EXCITER_B, JB_PAGE_SPACE, JB_PAGE_SATURATION };
-            int idx = (x->wf.current_page == JB_PAGE_EXCITER_B) ? 1 : (x->wf.current_page == JB_PAGE_SPACE ? 2 : (x->wf.current_page == JB_PAGE_SATURATION ? 3 : 0));
-            idx = (idx + delta + 4) % 4; jb_hw_set_page(x, seq[idx]);
+        case JB_PAGE_EXCITER_A: case JB_PAGE_EXCITER_B: case JB_PAGE_SPACE: case JB_PAGE_ECHO: case JB_PAGE_SATURATION: {
+            jb_page_t seq[5] = { JB_PAGE_EXCITER_A, JB_PAGE_EXCITER_B, JB_PAGE_SPACE, JB_PAGE_ECHO, JB_PAGE_SATURATION };
+            int idx = (x->wf.current_page == JB_PAGE_EXCITER_B) ? 1 :
+                      (x->wf.current_page == JB_PAGE_SPACE) ? 2 :
+                      (x->wf.current_page == JB_PAGE_ECHO) ? 3 :
+                      (x->wf.current_page == JB_PAGE_SATURATION) ? 4 : 0;
+            idx = (idx + delta + 5) % 5;
+            jb_hw_set_page(x, seq[idx]);
         } break;
         case JB_PAGE_MOD_LFO1: case JB_PAGE_MOD_LFO2: case JB_PAGE_VELOCITY: case JB_PAGE_PRESSURE: {
             jb_page_t seq[5] = { JB_PAGE_MOD_LFO1, JB_PAGE_MOD_LFO2, JB_PAGE_VELOCITY, JB_PAGE_PRESSURE, JB_PAGE_GLOBAL_EDIT };
