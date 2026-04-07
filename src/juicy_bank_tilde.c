@@ -1341,6 +1341,8 @@ static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t 
 static void jb_screen_emit_full(t_juicy_bank_tilde *x);
 static void jb_ui_clock_tick(t_juicy_bank_tilde *x);
 static void jb_mark_patch_dirty(t_juicy_bank_tilde *x);
+static inline int jb_target_is_none(t_symbol *s);
+static inline float jb_bell_map_norm_to_zeta(float u);
 static inline int jb_velmap_target_allowed(t_symbol *s);
 static void jb_set_preset_feedback(t_juicy_bank_tilde *x, int code);
 static void jb_compare_capture_from_slot(t_juicy_bank_tilde *x, int slot);
@@ -2819,10 +2821,6 @@ static inline void jb_voice_refresh_dirty_flags(const t_juicy_bank_tilde *x, jb_
     float pos_base = (v->velmap_pos[bank] >= 0.f) ? v->velmap_pos[bank] : jb_bank_excite_pos(x, bank);
     float pickup_base = (v->velmap_pickup[bank] >= 0.f) ? v->velmap_pickup[bank] : jb_bank_pickup_pos(x, bank);
     float brightness_v = bank ? v->brightness_v2 : v->brightness_v;
-    if (pressure_add != 0.f){
-        if (bank == 0 && x->pressure_on[JB_VEL_BRIGHTNESS_1]) brightness_v = jb_clamp(brightness_v + pressure_add, -1.f, 1.f);
-        if (bank == 1 && x->pressure_on[JB_VEL_BRIGHTNESS_2]) brightness_v = jb_clamp(brightness_v + pressure_add, -1.f, 1.f);
-    }
     float pressure_add = jb_pressure_delta(x);
     if (pressure_add != 0.f){
         if (bank == 0){
@@ -3431,8 +3429,6 @@ static inline void jb_exc_note_off(jb_voice_t *v){
 
 // ---- forward declarations (avoid implicit declarations) ----
 static void jb_apply_velocity_mapping(t_juicy_bank_tilde *x, jb_voice_t *v);
-static inline int jb_target_is_none(t_symbol *s);
-static inline float jb_bell_map_norm_to_zeta(float u);
 static void jb_note_on(t_juicy_bank_tilde *x, float f0, float vel){
     int idx = jb_find_voice_to_steal(x);
     jb_voice_t *v = &x->v[idx];
