@@ -154,11 +154,11 @@ static void jb_screen_symbols_init(void){
 
 /* Hardware control conditioning.
    These values are tuned for noisy 0..1 analog controls on Bela/embedded ADCs. */
-#define JB_HW_POT_DEADBAND_NORM   0.0012f   /* ignore tiny idle ADC drift */
-#define JB_HW_POT_SMOOTH_ALPHA    0.30f     /* base one-pole smoothing amount */
-#define JB_HW_POT_SMOOTH_FAST     0.85f     /* faster tracking for larger knob moves */
-#define JB_HW_POT_SEND_HYST       0.00045f  /* do not re-apply microscopic changes */
-#define JB_HW_POT_PAGE_REARM      0.0100f   /* after a page change, require real knob motion before takeover */
+#define JB_HW_POT_DEADBAND_NORM   0.0020f   /* ignore tiny idle ADC drift */
+#define JB_HW_POT_SMOOTH_ALPHA    0.22f     /* base one-pole smoothing amount */
+#define JB_HW_POT_SMOOTH_FAST     0.92f     /* faster tracking for larger knob moves */
+#define JB_HW_POT_SEND_HYST       0.00120f  /* do not re-apply microscopic changes */
+#define JB_HW_POT_PAGE_REARM      0.0125f   /* after a page change, require real knob motion before takeover */
 
 // ---------- utils ----------
 static inline float jb_clamp(float x, float lo, float hi){ return (x<lo)?lo:((x>hi)?hi:x); }
@@ -1200,8 +1200,8 @@ static const jb_hw_param_spec_t jb_hw_param_specs[] = {
     [JB_HW_PARAM_PARTIALS]        = { "PART",   0.f,  32.f,   1 },
     [JB_HW_PARAM_BELL_FREQ]       = { "FREQ",  40.f, 12000.f, 0 },
     [JB_HW_PARAM_BELL_ZETA]       = { "ZETA",   0.f,   1.f,   0 },
-    [JB_HW_PARAM_BELL_NPL]        = { "LPOW",   0.1f,  8.f,   0 },
-    [JB_HW_PARAM_BELL_NPR]        = { "RPOW",   0.1f,  8.f,   0 },
+    [JB_HW_PARAM_BELL_NPL]        = { "LPOW",   0.f,   8.f,   0 },
+    [JB_HW_PARAM_BELL_NPR]        = { "RPOW",   0.f,   8.f,   0 },
     [JB_HW_PARAM_BELL_NPM]        = { "MODEL", -1.9f,  8.f,   0 },
     [JB_HW_PARAM_EXC_ATTACK]      = { "ATK",    0.f, 5000.f,  0 },
     [JB_HW_PARAM_EXC_DECAY]       = { "DEC",    0.f, 5000.f,  0 },
@@ -3854,10 +3854,12 @@ static void jb_note_off_voice(t_juicy_bank_tilde *x, int vix1){
     if (x->v[idx].state != V_IDLE){
         jb_exc_note_off(&x->v[idx]);
         x->v[idx].state = V_RELEASE;
-        /* Do not force a coefficient refresh on note-off.
-           The runtime ratio-slew path advances during coeff updates, so
-           re-dirtying the voice here causes an audible post-release pitch
-           step/glide even when the played note itself did not change. */
+        x->v[idx].coeff_dirty[0] = x->v[idx].coeff_dirty[1] = 0u;
+        x->v[idx].gain_dirty[0]  = x->v[idx].gain_dirty[1]  = 0u;
+        /* Freeze modal coefficients/gains on note-off.
+           Release should only decay the existing resonant state, not push
+           either bank through another coefficient refresh that can sound like
+           an upward pitch glide when the release tails overlap. */
     }
 }
 
@@ -3885,9 +3887,11 @@ static void jb_note_off_voice_pitch(t_juicy_bank_tilde *x, int vix1, float f0){
 
     jb_exc_note_off(v);
     v->state = V_RELEASE;
+    v->coeff_dirty[0] = v->coeff_dirty[1] = 0u;
+    v->gain_dirty[0]  = v->gain_dirty[1]  = 0u;
     /* Same reason as jb_note_off_voice(): release should only start the
        amplitude/exciter release, not push the modal coefficients through
-       another ratio-slew update. */
+       another ratio-slew update. Keep both banks frozen during release. */
 }
 
 // Message handlers (voice-addressed)
@@ -4015,15 +4019,23 @@ static t_int *juicy_bank_tilde_perform(t_int *w){
         jb_voice_t *v = &x->v[vix];
         if (v->state==V_IDLE) continue;
         jb_update_lfos_oneshot_voice_block(x, v, n);
-        jb_project_behavior_into_voice(x, v); // keep behavior up-to-date
-        jb_project_behavior_into_voice2(x, v);
-        jb_voice_refresh_dirty_flags(x, v, 0);
-        jb_voice_refresh_dirty_flags(x, v, 1);
-        if (v->coeff_dirty[0]){ jb_update_voice_coeffs(x, v); v->coeff_dirty[0] = 0u; }
-        if (v->gain_dirty[0]) { jb_update_voice_gains(x, v);  v->gain_dirty[0]  = 0u; }
-        // bank 2 runtime prep (render/mix happens in STEP 2B-2)
-        if (v->coeff_dirty[1]){ jb_update_voice_coeffs2(x, v); v->coeff_dirty[1] = 0u; }
-        if (v->gain_dirty[1]) { jb_update_voice_gains2(x, v);  v->gain_dirty[1]  = 0u; }
+        if (v->state == V_HELD){
+            jb_project_behavior_into_voice(x, v); // keep behavior up-to-date while held
+            jb_project_behavior_into_voice2(x, v);
+            jb_voice_refresh_dirty_flags(x, v, 0);
+            jb_voice_refresh_dirty_flags(x, v, 1);
+            if (v->coeff_dirty[0]){ jb_update_voice_coeffs(x, v); v->coeff_dirty[0] = 0u; }
+            if (v->gain_dirty[0]) { jb_update_voice_gains(x, v);  v->gain_dirty[0]  = 0u; }
+            // bank 2 runtime prep (render/mix happens in STEP 2B-2)
+            if (v->coeff_dirty[1]){ jb_update_voice_coeffs2(x, v); v->coeff_dirty[1] = 0u; }
+            if (v->gain_dirty[1]) { jb_update_voice_gains2(x, v);  v->gain_dirty[1]  = 0u; }
+        } else {
+            /* Freeze coefficient/gain refresh while a note is in release so the
+               tail keeps its pitch and damping stable even when the second bank
+               is active or controls are moving. */
+            v->coeff_dirty[0] = v->coeff_dirty[1] = 0u;
+            v->gain_dirty[0]  = v->gain_dirty[1]  = 0u;
+        }
     }
 
     // pressure smoothing / shaping (continuous expression)
@@ -4770,14 +4782,15 @@ static inline float jb_bell_param_to_hz(const t_juicy_bank_tilde *x, float f){
 
 static inline float jb_bell_map_norm_to_pow(float u){
     u = jb_clamp(u, 0.f, 1.f);
-    const float pmin = JB_BELL_NP_MIN;
+    if (u <= 0.f) return 0.f;
+    const float pmin = 1.0e-3f;
     const float pmax = JB_BELL_NP_MAX;
     return expf(logf(pmin) + u * (logf(pmax) - logf(pmin)));
 }
 static inline float jb_bell_param_to_pow(float f){
-    if (!isfinite(f)) return 1.f;
+    if (!isfinite(f)) return 0.f;
+    if (f <= 0.f) return 0.f;
     if (f <= 1.f) return jb_bell_map_norm_to_pow(f);
-    if (f < JB_BELL_NP_MIN) f = JB_BELL_NP_MIN;
     if (f > 32.f) f = 32.f;
     return f;
 }
@@ -5737,19 +5750,13 @@ static void jb_screen_emit_full(t_juicy_bank_tilde *x){
 
 static void jb_ui_clock_tick(t_juicy_bank_tilde *x){
     if(!x) return;
-    int changed = 0;
     if(x->wf.highlight_ticks > 0){
         x->wf.highlight_ticks--;
-        if(x->wf.highlight_ticks <= 0 && x->wf.highlighted_pot >= 0){
-            x->wf.highlighted_pot = -1;
-            changed = 1;
-        }
     }
     if(x->preset_feedback_ticks > 0){
         x->preset_feedback_ticks--;
         if(x->preset_feedback_ticks <= 0 && x->preset_feedback != JB_FEEDBACK_NONE){
             x->preset_feedback = JB_FEEDBACK_NONE;
-            changed = 1;
         }
     }
     jb_screen_emit_full(x);
@@ -5795,7 +5802,14 @@ static void jb_hw_set_page(t_juicy_bank_tilde *x, jb_page_t page){
     else if(page == JB_PAGE_MOD_LFO1) x->lfo_index = 1.f;
     else if(page == JB_PAGE_MOD_LFO2) x->lfo_index = 2.f;
 
-    x->wf.highlighted_pot = -1;
+    {
+        int sel = -1;
+        for(int i = 0; i < 6; ++i){
+            if(jb_page_param_map[page][i] != JB_HW_PARAM_NONE){ sel = i; break; }
+        }
+        x->wf.highlighted_pot = sel;
+        x->wf.highlight_ticks = 0;
+    }
     jb_hw_reset_soft_takeover(x);
     jb_screen_emit_full(x);
 }
@@ -5810,7 +5824,8 @@ static float jb_hw_param_to_norm(float v, jb_hw_param_t pid){
             return jb_norm_from_exp(v, 40.f, 12000.f);
         case JB_HW_PARAM_BELL_NPL:
         case JB_HW_PARAM_BELL_NPR:
-            return jb_norm_from_exp(v, 0.1f, 8.f);
+            if(v <= 0.f) return 0.f;
+            return jb_norm_from_exp(v, 1.0e-3f, 8.f);
         case JB_HW_PARAM_EXC_ATTACK:
         case JB_HW_PARAM_EXC_DECAY:
         case JB_HW_PARAM_EXC_RELEASE:
@@ -6169,7 +6184,7 @@ static void juicy_bank_tilde_pot(t_juicy_bank_tilde *x, t_floatarg pf, t_floatar
     }
 
     x->wf.highlighted_pot = pot;
-    x->wf.highlight_ticks = 4;
+    x->wf.highlight_ticks = 8;
 
     jb_hw_param_t pid = jb_page_param_map[x->wf.current_page][pot];
     if(pid == JB_HW_PARAM_NONE){
