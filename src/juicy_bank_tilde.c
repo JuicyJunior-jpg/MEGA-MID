@@ -3065,7 +3065,11 @@ static inline void jb_voice_refresh_dirty_flags(const t_juicy_bank_tilde *x, jb_
     if (f0_eff <= 0.f) f0_eff = 1.f;
     f0_eff *= x->bank_pitch_ratio[bank];
     float pitch_lfo_add = jb_coeff_pitch_lfo_add(x, v, bank);
-    if (pitch_lfo_add != 0.f) f0_eff *= exp2f(pitch_lfo_add);
+    /* Important: do not apply pitch modulation here.
+       This refresh path is only for dirty/change detection.
+       Applying the pitch LFO again here causes coefficient logic to see an
+       already-shifted f0 and then shift it a second time in the actual coeff
+       update path, which can sound like an ascending/repeating pitch bug. */
 
     float lfo1 = jb_lfo_value_for_voice(x, v, 0) * jb_clamp(x->lfo_amt_v[0], -1.f, 1.f);
     float lfo2 = jb_lfo_value_for_voice(x, v, 1) * jb_clamp(x->lfo_amt_eff[1], -1.f, 1.f);
@@ -3165,16 +3169,12 @@ static void jb_update_voice_coeffs_bank(t_juicy_bank_tilde *x, jb_voice_t *v, in
     }
 }
 
-    float (*mm)[JB_N_MODTGT] = jb_bank_mod_matrix(x, bank);
-
-    float pitch_mod = 0.f;
-    pitch_mod += x->lfo_val[0] * mm[3][12];
-    pitch_mod += x->lfo_val[1] * mm[4][12];
-    if (pitch_mod != 0.f){
-        float semis = pitch_mod * JB_PITCH_MOD_SEMITONES;
-        float ratio = powf(2.f, semis / 12.f);
-        f0_eff *= ratio;
-    }
+    /* Legacy matrix-pitch modulation removed from the coefficient path.
+       The current hardware workflow uses explicit target lanes (LFO1/LFO2
+       targets, velocity, pressure). Keeping this hidden legacy pitch route
+       active means pitch can still be modulated by stale matrix state even
+       when the current UI does not expose it, which is a prime suspect for
+       the repeated ascending pitch bug heard when bank 2 is enabled. */
 
         // --- GPD damping (solve once per change) ---
 
