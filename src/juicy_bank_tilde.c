@@ -56,6 +56,7 @@ static t_symbol *jb_sym_screen_preset_used = NULL;
 static t_symbol *jb_sym_screen_preset_name[8] = {NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL};
 static t_symbol *jb_sym_screen_feedback = NULL;
 static t_symbol *jb_sym_screen_patch_dirty = NULL;
+static t_symbol *jb_sym_screen_touch = NULL;
 static t_symbol *jb_sym_screen_param[6] = {NULL, NULL, NULL, NULL, NULL, NULL};
 
 static inline void jb_screen_send_float(t_symbol *sym, t_float f){
@@ -82,6 +83,7 @@ static void jb_screen_symbols_init(void){
         jb_sym_screen_preset_name[7] = gensym("bela_screen_preset_name7");
         jb_sym_screen_feedback = gensym("bela_screen_feedback");
         jb_sym_screen_patch_dirty = gensym("bela_screen_patch_dirty");
+        jb_sym_screen_touch = gensym("bela_screen_touch");
         jb_sym_screen_param[0] = gensym("bela_screen_param0");
         jb_sym_screen_param[1] = gensym("bela_screen_param1");
         jb_sym_screen_param[2] = gensym("bela_screen_param2");
@@ -1671,6 +1673,7 @@ int preset_cursor;            // 0..JB_PRESET_NAME_MAX-1 (naming mode)
 int preset_slot_sel;          // 0..JB_PRESET_SLOTS-1 (slot mode)
 char preset_edit_name[JB_PRESET_NAME_MAX + 1];
 int patch_dirty;                 // 1 when current patch differs from last loaded/saved state
+int screen_touch_nonce;          // increments only when a knob-driven parameter is actually applied
 int preset_feedback;             // JB_FEEDBACK_* for transient OLED feedback
 int preset_feedback_ticks;       // countdown timer for transient feedback
 int compare_valid;               // compare/revert snapshot valid flag
@@ -5723,13 +5726,14 @@ static void jb_screen_emit_full(t_juicy_bank_tilde *x){
     }
 
     jb_screen_send_float(jb_sym_screen_page, (t_float)x->wf.current_page);
-    jb_screen_send_float(jb_sym_screen_selected, (t_float)x->wf.highlighted_pot);
+    jb_screen_send_float(jb_sym_screen_selected, (t_float)((x->wf.highlight_ticks > 0) ? x->wf.highlighted_pot : -1));
     jb_screen_send_float(jb_sym_screen_preset_slot, (t_float)x->preset_slot_sel);
     { int preset_screen_mode = x->preset_mode; if(x->wf.ui_mode == JB_UI_SAVE_MODE && preset_screen_mode == JB_PRESET_MODE_NORMAL) preset_screen_mode = JB_PRESET_MODE_SLOT; jb_screen_send_float(jb_sym_screen_preset_mode, (t_float)preset_screen_mode); }
     jb_screen_send_float(jb_sym_screen_preset_cursor, (t_float)x->preset_cursor);
     jb_screen_send_float(jb_sym_screen_preset_used, (t_float)((x->preset_slot_sel >= 0 && x->preset_slot_sel < JB_PRESET_SLOTS && x->presets[x->preset_slot_sel].used) ? 1.f : 0.f));
     jb_screen_send_float(jb_sym_screen_feedback, (t_float)x->preset_feedback);
     jb_screen_send_float(jb_sym_screen_patch_dirty, (t_float)(x->patch_dirty ? 1.f : 0.f));
+    jb_screen_send_float(jb_sym_screen_touch, (t_float)x->screen_touch_nonce);
 
     {
         char pname[JB_PRESET_NAME_MAX + 1];
@@ -5810,6 +5814,7 @@ static void jb_hw_set_page(t_juicy_bank_tilde *x, jb_page_t page){
         x->wf.highlighted_pot = sel;
         x->wf.highlight_ticks = 0;
     }
+    x->wf.highlight_ticks = 0;
     jb_hw_reset_soft_takeover(x);
     jb_screen_emit_full(x);
 }
@@ -6199,6 +6204,7 @@ static void juicy_bank_tilde_pot(t_juicy_bank_tilde *x, t_floatarg pf, t_floatar
     }
     ps->last_sent = ps->filtered;
 
+    x->screen_touch_nonce++;
     jb_hw_apply_param_value(x, pid, jb_hw_norm_to_param(ps->filtered, pid));
     jb_mark_patch_dirty(x);
     jb_screen_emit_full(x);
@@ -6704,6 +6710,7 @@ x->excite_pos2    = x->excite_pos;
     x->hw_pressure = 0.f;
     x->hw_pressure_smoothed = 0.f;
     x->patch_dirty = 0;
+    x->screen_touch_nonce = 0;
     x->preset_feedback = JB_FEEDBACK_NONE;
     x->preset_feedback_ticks = 0;
     x->compare_valid = 0;
