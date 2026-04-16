@@ -1193,7 +1193,7 @@ static const jb_hw_param_spec_t jb_hw_param_specs[] = {
     [JB_HW_PARAM_STRETCH]         = { "STR",   -1.f,   1.f,   0 },
     [JB_HW_PARAM_WARP]            = { "WARP",  -1.f,   1.f,   0 },
     [JB_HW_PARAM_DISPERSION]      = { "DISP",   0.f,   1.f,   0 },
-    [JB_HW_PARAM_DENSITY]         = { "DENS",  -1.f,   1.f,   0 },
+    [JB_HW_PARAM_DENSITY]         = { "DENS",   0.f,   6.f,   0 },
     [JB_HW_PARAM_ODD_SKEW]        = { "ODDSK", -1.f,   1.f,   0 },
     [JB_HW_PARAM_EVEN_SKEW]       = { "EVNSK", -1.f,   1.f,   0 },
     [JB_HW_PARAM_COLLISION]       = { "COLL",   0.f,   1.f,   0 },
@@ -1388,12 +1388,16 @@ static void jb_preset_emit_ui(t_juicy_bank_tilde *x);
 static void juicy_bank_tilde_screen_refresh(t_juicy_bank_tilde *x);
 
 static inline float jb_density_display_from_ui(float ui){
+    /* Public density display domain:
+       0.00 .. 1.00 maps the "collapse" side, with 1.00 = normal harmonic spacing.
+       1.00 .. 6.00 maps progressively wider harmonic gaps, where 6.00 is the current max.
+       Internally the synth still stores the legacy UI value in -1..+1. */
     ui = jb_clamp(ui, -1.f, 1.f);
-    return (ui >= 0.f) ? (1.f + 4.f * ui) : (1.f + ui);
+    return (ui >= 0.f) ? (1.f + 5.f * ui) : jb_clamp(1.f + ui, 0.f, 1.f);
 }
 static inline float jb_density_ui_from_display(float d){
-    d = jb_clamp(d, 0.f, 5.f);
-    return (d >= 1.f) ? jb_clamp((d - 1.f) * 0.25f, 0.f, 1.f)
+    d = jb_clamp(d, 0.f, 6.f);
+    return (d >= 1.f) ? jb_clamp((d - 1.f) * 0.2f, 0.f, 1.f)
                       : jb_clamp(d - 1.f, -1.f, 0.f);
 }
 static inline float jb_stretch_display_from_ui(float ui){
@@ -1441,7 +1445,7 @@ static float jb_hw_quantize_param_value(jb_hw_param_t pid, float value){
         case JB_HW_PARAM_DENSITY: {
             float d = jb_density_display_from_ui(value);
             if(d >= 1.f){
-                d = jb_snap_to_step(d, 0.5f, 1.f, 5.f);
+                d = jb_snap_to_step(d, 0.5f, 1.f, 6.f);
             } else {
                 static const float densNeg[] = {0.f, 0.25f, 0.5f, 1.f};
                 d = jb_snap_to_set(d, densNeg, 4);
@@ -5924,6 +5928,9 @@ static float jb_hw_param_to_norm(float v, jb_hw_param_t pid){
     if(den <= 1e-9f) return 0.f;
 
     switch(pid){
+        case JB_HW_PARAM_DENSITY:
+            if(v >= 1.f) return jb_clamp(0.5f + 0.1f * (v - 1.f), 0.f, 1.f);
+            return jb_clamp(0.5f * jb_clamp(v, 0.f, 1.f), 0.f, 1.f);
         case JB_HW_PARAM_BELL_FREQ:
             return jb_norm_from_exp(v, 40.f, 12000.f);
         case JB_HW_PARAM_BELL_NPL:
@@ -5972,6 +5979,10 @@ static float jb_hw_norm_to_param(float n, jb_hw_param_t pid){
 
     float v = 0.f;
     switch(pid){
+        case JB_HW_PARAM_DENSITY:
+            if(n >= 0.5f) v = 1.f + (n - 0.5f) * 10.f;
+            else          v = n * 2.f;
+            break;
         case JB_HW_PARAM_BELL_FREQ:
             v = jb_expmap01(n, 40.f, 12000.f);
             break;
@@ -6032,7 +6043,7 @@ static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t 
         case JB_HW_PARAM_STRETCH: return b ? x->stretch2 : x->stretch;
         case JB_HW_PARAM_WARP: return b ? x->warp2 : x->warp;
         case JB_HW_PARAM_DISPERSION: return b ? x->dispersion2 : x->dispersion;
-        case JB_HW_PARAM_DENSITY: return b ? x->density_amt2 : x->density_amt;
+        case JB_HW_PARAM_DENSITY: return jb_density_display_from_ui(b ? x->density_amt2 : x->density_amt);
         case JB_HW_PARAM_ODD_SKEW: return b ? x->odd_skew2 : x->odd_skew;
         case JB_HW_PARAM_EVEN_SKEW: return b ? x->even_skew2 : x->even_skew;
         case JB_HW_PARAM_COLLISION: return b ? x->collision_amt2 : x->collision_amt;
@@ -6110,7 +6121,7 @@ static void jb_hw_apply_param_value(t_juicy_bank_tilde *x, jb_hw_param_t pid, fl
         case JB_HW_PARAM_STRETCH: juicy_bank_tilde_stretch(x, value); break;
         case JB_HW_PARAM_WARP: juicy_bank_tilde_warp(x, value); break;
         case JB_HW_PARAM_DISPERSION: juicy_bank_tilde_dispersion(x, value); break;
-        case JB_HW_PARAM_DENSITY: juicy_bank_tilde_density(x, value); break;
+        case JB_HW_PARAM_DENSITY: juicy_bank_tilde_density(x, jb_density_ui_from_display(value)); break;
         case JB_HW_PARAM_ODD_SKEW: juicy_bank_tilde_odd_skew(x, value); break;
         case JB_HW_PARAM_EVEN_SKEW: juicy_bank_tilde_even_skew(x, value); break;
         case JB_HW_PARAM_COLLISION: juicy_bank_tilde_collision(x, value); break;
