@@ -1386,6 +1386,105 @@ static inline char jb_preset_char_from_index(int idx);
 static void jb_hw_global_action(t_juicy_bank_tilde *x, int action);
 static void jb_preset_emit_ui(t_juicy_bank_tilde *x);
 static void juicy_bank_tilde_screen_refresh(t_juicy_bank_tilde *x);
+
+static inline float jb_density_display_from_ui(float ui){
+    ui = jb_clamp(ui, -1.f, 1.f);
+    return (ui >= 0.f) ? (1.f + 4.f * ui) : (1.f + ui);
+}
+static inline float jb_density_ui_from_display(float d){
+    d = jb_clamp(d, 0.f, 5.f);
+    return (d >= 1.f) ? jb_clamp((d - 1.f) * 0.25f, 0.f, 1.f)
+                      : jb_clamp(d - 1.f, -1.f, 0.f);
+}
+static inline float jb_stretch_display_from_ui(float ui){
+    return jb_clamp(1.f + jb_clamp(ui, -1.f, 1.f), 0.f, 2.f);
+}
+static inline float jb_stretch_ui_from_display(float d){
+    return jb_clamp(d - 1.f, -1.f, 1.f);
+}
+static inline float jb_warp_display_from_ui(float ui){
+    return powf(2.f, jb_clamp(ui, -1.f, 1.f) * 2.f);
+}
+static inline float jb_warp_ui_from_display(float d){
+    d = jb_clamp(d, 0.25f, 4.f);
+    return jb_clamp(0.5f * (logf(d) / logf(2.f)), -1.f, 1.f);
+}
+static inline float jb_skew_display_from_ui(float ui){
+    return powf(2.f, jb_clamp(ui, -1.f, 1.f));
+}
+static inline float jb_skew_ui_from_display(float d){
+    d = jb_clamp(d, 0.5f, 2.f);
+    return jb_clamp(logf(d) / logf(2.f), -1.f, 1.f);
+}
+static inline float jb_brightness_display_from_ui(float ui){
+    return 1.f - jb_clamp(ui, -1.f, 1.f);
+}
+static inline float jb_brightness_ui_from_display(float d){
+    return jb_clamp(1.f - d, -1.f, 1.f);
+}
+static inline float jb_snap_to_step(float v, float step, float lo, float hi){
+    if(step <= 0.f) return jb_clamp(v, lo, hi);
+    float q = floorf(((v - lo) / step) + 0.5f);
+    return jb_clamp(lo + q * step, lo, hi);
+}
+static inline float jb_snap_to_set(float v, const float *vals, int n){
+    float best = vals[0];
+    float bestd = fabsf(v - vals[0]);
+    for(int i = 1; i < n; ++i){
+        float d = fabsf(v - vals[i]);
+        if(d < bestd){ bestd = d; best = vals[i]; }
+    }
+    return best;
+}
+static float jb_hw_quantize_param_value(jb_hw_param_t pid, float value){
+    switch(pid){
+        case JB_HW_PARAM_DENSITY: {
+            float d = jb_density_display_from_ui(value);
+            if(d >= 1.f){
+                d = jb_snap_to_step(d, 0.5f, 1.f, 5.f);
+            } else {
+                static const float densNeg[] = {0.f, 0.25f, 0.5f, 1.f};
+                d = jb_snap_to_set(d, densNeg, 4);
+            }
+            return jb_density_ui_from_display(d);
+        }
+        case JB_HW_PARAM_STRETCH: {
+            float d = jb_stretch_display_from_ui(value);
+            d = jb_snap_to_step(d, 0.25f, 0.f, 2.f);
+            return jb_stretch_ui_from_display(d);
+        }
+        case JB_HW_PARAM_WARP: {
+            float d = jb_warp_display_from_ui(value);
+            d = jb_snap_to_step(d, 0.25f, 0.25f, 4.f);
+            return jb_warp_ui_from_display(d);
+        }
+        case JB_HW_PARAM_ODD_SKEW:
+        case JB_HW_PARAM_EVEN_SKEW: {
+            float d = jb_skew_display_from_ui(value);
+            d = jb_snap_to_step(d, 0.25f, 0.5f, 2.f);
+            return jb_skew_ui_from_display(d);
+        }
+        case JB_HW_PARAM_BRIGHTNESS: {
+            float d = jb_brightness_display_from_ui(value);
+            d = jb_snap_to_step(d, 0.25f, 0.f, 2.f);
+            return jb_brightness_ui_from_display(d);
+        }
+        case JB_HW_PARAM_LFO_PHASE: {
+            float deg = jb_clamp(value, 0.f, 1.f) * 360.f;
+            deg = jb_snap_to_step(deg, 15.f, 0.f, 360.f);
+            return jb_clamp(deg / 360.f, 0.f, 1.f);
+        }
+        case JB_HW_PARAM_TUNE:
+            return jb_snap_to_step(value, 5.f, -100.f, 100.f);
+        case JB_HW_PARAM_SPACE_WETDRY:
+        case JB_HW_PARAM_SAT_WETDRY:
+        case JB_HW_PARAM_EXC_FADER:
+            return jb_snap_to_step(value, 0.1f, -1.f, 1.f);
+        default:
+            return value;
+    }
+}
+
 static float jb_hw_get_current_value(const t_juicy_bank_tilde *x, jb_hw_param_t pid);
 static void jb_screen_emit_full(t_juicy_bank_tilde *x);
 static void jb_ui_clock_tick(t_juicy_bank_tilde *x);
@@ -6205,7 +6304,16 @@ static void juicy_bank_tilde_pot(t_juicy_bank_tilde *x, t_floatarg pf, t_floatar
     ps->last_sent = ps->filtered;
 
     x->screen_touch_nonce++;
-    jb_hw_apply_param_value(x, pid, jb_hw_norm_to_param(ps->filtered, pid));
+    {
+        float applied = jb_hw_norm_to_param(ps->filtered, pid);
+        if(x->wf.shift_held)
+            applied = jb_hw_quantize_param_value(pid, applied);
+        if(fabsf(applied - jb_hw_get_current_value(x, pid)) < 1.0e-6f){
+            jb_screen_emit_full(x);
+            return;
+        }
+        jb_hw_apply_param_value(x, pid, applied);
+    }
     jb_mark_patch_dirty(x);
     jb_screen_emit_full(x);
 }
